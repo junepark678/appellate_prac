@@ -27,6 +27,16 @@ bun run test
 bun run build
 ```
 
+## Seed Convex
+
+Static rule packs, rule items, court packs, and bundled scenarios are seeded with
+an idempotent Convex mutation:
+
+```bash
+bunx convex run --push seed:all --identity '{"tokenIdentifier":"seed:convex-cli","name":"Convex Seeder"}'
+bunx convex run seed:status
+```
+
 ## Deploy
 
 Both deployment targets use Convex as the source of truth for authenticated beta

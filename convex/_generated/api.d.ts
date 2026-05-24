@@ -12,6 +12,7 @@ import type * as authHelpers from "../authHelpers.js";
 import type * as caseSessions from "../caseSessions.js";
 import type * as integrations from "../integrations.js";
 import type * as scenarios from "../scenarios.js";
+import type * as seed from "../seed.js";
 import type * as users from "../users.js";
 import type * as validators from "../validators.js";
 
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   caseSessions: typeof caseSessions;
   integrations: typeof integrations;
   scenarios: typeof scenarios;
+  seed: typeof seed;
   users: typeof users;
   validators: typeof validators;
 }>;

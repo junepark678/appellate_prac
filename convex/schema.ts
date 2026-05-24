@@ -31,6 +31,7 @@ export default defineSchema({
 
   ruleItems: defineTable({
     packId: v.string(),
+    jurisdiction: v.optional(v.string()),
     ruleId: v.string(),
     topic: v.string(),
     effectiveFrom: v.string(),
@@ -51,6 +52,9 @@ export default defineSchema({
     baseCourtPackIds: v.array(v.string()),
     includedRulePackIds: v.array(v.string()),
     rulePackIds: v.array(v.string()),
+    participantRoles: v.optional(v.array(participantRoleValidator)),
+    filingEventsJson: v.optional(v.string()),
+    aiActorsJson: v.optional(v.string()),
     docketNumberFormat: v.string(),
     published: v.boolean(),
   }).index('by_pack_id', ['packId']),
