@@ -159,7 +159,17 @@ export const filingAttachmentValidator = v.object({
 })
 
 export const filingMetadataValidator = v.object({
+  filingAttorneyName: v.optional(v.string()),
   representedPartyId: v.optional(v.string()),
+  feePaymentStatus: v.optional(
+    v.union(
+      v.literal('not_required'),
+      v.literal('paid'),
+      v.literal('deferred'),
+      v.literal('waived'),
+      v.literal('pending'),
+    ),
+  ),
   reliefRequested: v.optional(v.string()),
   serviceMethod: v.union(
     v.literal('cm_ecf'),
@@ -178,6 +188,15 @@ export const filingMetadataValidator = v.object({
     ),
   ),
   sealedDocumentType: v.optional(v.string()),
+  privacyAcknowledged: v.optional(v.boolean()),
+  publicRedactedVersionIncluded: v.optional(v.boolean()),
+  serviceListOverrides: v.optional(
+    v.object({
+      additionalRecipients: v.optional(v.array(v.string())),
+      suppressedParticipantIds: v.optional(v.array(v.string())),
+      manualServiceRecipients: v.optional(v.array(v.string())),
+    }),
+  ),
   feeWaiverRequested: v.optional(v.boolean()),
   emergency: v.boolean(),
   sealed: v.boolean(),
@@ -621,6 +640,100 @@ export const ecfReceiptValidator = v.object({
     }),
   ),
   createdAt: v.string(),
+})
+
+export const ecfEventCategoryValidator = v.union(
+  v.literal('case_opening'),
+  v.literal('appearance'),
+  v.literal('brief'),
+  v.literal('appendix'),
+  v.literal('motion'),
+  v.literal('response'),
+  v.literal('sealed'),
+  v.literal('post_disposition'),
+  v.literal('amicus'),
+)
+
+export const ecfMetadataFieldValidator = v.object({
+  key: v.string(),
+  label: v.string(),
+  inputType: v.union(
+    v.literal('text'),
+    v.literal('select'),
+    v.literal('checkbox'),
+    v.literal('date'),
+    v.literal('docket_entry_ref'),
+  ),
+  required: v.boolean(),
+  options: v.optional(v.array(v.string())),
+})
+
+export const ecfEventDefinitionValidator = v.object({
+  eventId: v.string(),
+  category: ecfEventCategoryValidator,
+  displayName: v.string(),
+  eligibleRoles: v.array(participantRoleValidator),
+  requiresMainDocument: v.boolean(),
+  requiredAttachments: v.array(v.string()),
+  optionalAttachments: v.array(v.string()),
+  metadataFields: v.array(ecfMetadataFieldValidator),
+  menuPath: v.array(v.string()),
+  courtEventCode: v.string(),
+  requiresRelatedEntry: v.boolean(),
+  requiresReliefText: v.boolean(),
+  feeBehavior: v.union(
+    v.literal('none'),
+    v.literal('required'),
+    v.literal('waivable'),
+    v.literal('deferred'),
+  ),
+  serviceBehavior: v.union(
+    v.literal('cm_ecf'),
+    v.literal('manual_required'),
+    v.literal('mixed'),
+  ),
+  partySelectionMode: v.union(
+    v.literal('none'),
+    v.literal('single'),
+    v.literal('multiple'),
+    v.literal('all_filers'),
+  ),
+  receiptTemplateId: v.string(),
+})
+
+export const ecfEventAvailabilityValidator = v.object({
+  eventId: v.string(),
+  category: ecfEventCategoryValidator,
+  displayName: v.string(),
+  eligibleRoles: v.array(participantRoleValidator),
+  requiresMainDocument: v.boolean(),
+  requiredAttachments: v.array(v.string()),
+  optionalAttachments: v.array(v.string()),
+  metadataFields: v.array(ecfMetadataFieldValidator),
+  menuPath: v.array(v.string()),
+  courtEventCode: v.string(),
+  requiresRelatedEntry: v.boolean(),
+  requiresReliefText: v.boolean(),
+  feeBehavior: v.union(
+    v.literal('none'),
+    v.literal('required'),
+    v.literal('waivable'),
+    v.literal('deferred'),
+  ),
+  serviceBehavior: v.union(
+    v.literal('cm_ecf'),
+    v.literal('manual_required'),
+    v.literal('mixed'),
+  ),
+  partySelectionMode: v.union(
+    v.literal('none'),
+    v.literal('single'),
+    v.literal('multiple'),
+    v.literal('all_filers'),
+  ),
+  receiptTemplateId: v.string(),
+  available: v.boolean(),
+  unavailableReasons: v.array(v.string()),
 })
 
 export const caseSessionValidator = v.object({

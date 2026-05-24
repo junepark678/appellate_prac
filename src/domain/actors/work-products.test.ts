@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
+import { ruleRefs } from '../../modules/registry'
 import { defaultFilingMetadata } from '../filing/ecf'
-import { assignPanel, createPanelDisposition } from '../panel/deliberation'
+import { addPanelVote, assignPanel, deterministicPanelVote } from '../panel/deliberation'
 import { transitionAfterFiling } from '../procedure/state-machine'
 import { createInitialSession, fileDraft } from '../simulation'
 import { generateActorWorkProductWithProvider } from './orchestration'
@@ -37,6 +38,24 @@ const disclosurePdf: UploadedDocument = {
   extractedSignals: ['disclosure'],
 }
 
+const docketingPdf: UploadedDocument = {
+  id: 'docketing',
+  fileName: 'docketing-statement.pdf',
+  mimeType: 'application/pdf',
+  sizeBytes: 100_000,
+  extractedText: 'Docketing statement.',
+  extractedSignals: ['docketing statement'],
+}
+
+const transcriptPdf: UploadedDocument = {
+  id: 'transcript',
+  fileName: 'transcript-order-acknowledgment.pdf',
+  mimeType: 'application/pdf',
+  sizeBytes: 100_000,
+  extractedText: 'Transcript order acknowledgment.',
+  extractedSignals: ['transcript'],
+}
+
 const briefPdf: UploadedDocument = {
   id: 'brief',
   fileName: 'opening-brief.pdf',
@@ -44,8 +63,16 @@ const briefPdf: UploadedDocument = {
   sizeBytes: 200_000,
   pageCount: 32,
   extractedText:
-    'Statement of issues. Retaliation summary judgment comparator evidence. Standard of review. Argument with record citation and J.A. 42.',
-  extractedSignals: ['statement of issues', 'standard of review', 'argument', 'record citation'],
+    'Jurisdictional statement. Statement of issues. Retaliation summary judgment comparator evidence. Standard of review. Argument with record citation and J.A. 42. Oral argument statement. Conclusion.',
+  extractedSignals: [
+    'jurisdiction',
+    'statement of issues',
+    'standard of review',
+    'argument',
+    'record citation',
+    'oral argument',
+    'conclusion',
+  ],
 }
 
 const appendixPdf: UploadedDocument = {
@@ -83,6 +110,8 @@ function briefedSession() {
   let session = createInitialSession()
   session = fileDraft(session, draft('notice_of_appeal', noticePdf))
   session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
+  session = fileDraft(session, draft('docketing_statement', docketingPdf))
+  session = fileDraft(session, draft('transcript_order_acknowledgment', transcriptPdf))
   session = fileDraft(session, draft('opening_brief', briefPdf))
   session = fileDraft(session, draft('joint_appendix', appendixPdf))
   return session
@@ -163,7 +192,10 @@ describe('actor work products', () => {
 
     const submission = generatedFilingToSubmission(session, product)
     expect(submission?.eventId).toBe('appellee_brief')
-    expect(submission?.metadata).toEqual(defaultFilingMetadata('appellee_brief'))
+    expect(submission?.metadata).toEqual({
+      ...defaultFilingMetadata('appellee_brief'),
+      representedPartyId: 'appellee',
+    })
     expect(canAcceptActorWorkProduct(session, product).accepted).toBe(true)
   })
 
@@ -228,19 +260,9 @@ describe('actor work products', () => {
   it('allows panel disposition drafts after three votes', () => {
     let session = briefedSession()
     session = fileDraft(session, draft('reply_brief', replyPdf))
-    session = transitionAfterFiling({
-      ...assignPanel({ ...session, status: 'submitted', procedureState: 'panel_deliberation' }),
-      panelDisposition: createPanelDisposition({
-        ...assignPanel({ ...session, status: 'submitted', procedureState: 'panel_deliberation' }),
-        panelDeliberation: {
-          id: 'delib',
-          caseSessionId: session.id,
-          posture: 'drafting',
-          votes: [],
-          mandateStatus: 'not_started',
-        },
-      }),
-    })
+    session = transitionAfterFiling(
+      assignPanel({ ...session, status: 'submitted', procedureState: 'panel_deliberation' }),
+    )
 
     const product: ActorWorkProduct = {
       id: 'wp4',
@@ -254,7 +276,7 @@ describe('actor work products', () => {
         reasoning: [],
         recommendations: [],
         citations: [],
-        ruleRefs: [],
+        ruleRefs: [ruleRefs.frap34, ruleRefs.frap36, ruleRefs.frap41],
         requestedDisposition: 'affirm',
         reliefOption: 'affirm',
       },
@@ -268,31 +290,14 @@ describe('actor work products', () => {
       'three_votes_required_for_disposition',
     )
 
-    const withVoteProducts = {
-      ...session,
-      actorWorkProducts: ['ca4_judge_1', 'ca4_judge_2', 'ca4_judge_3'].map(
-        (actorId, index): ActorWorkProduct => ({
-          id: `vote_${index}`,
-          caseSessionId: session.id,
-          actorId,
-          kind: 'judge_vote_memo',
-          status: 'proposed',
-          workProduct: {
-            title: 'Vote',
-            summary: 'Affirm.',
-            reasoning: [],
-            recommendations: [],
-            citations: [],
-            ruleRefs: [],
-            requestedDisposition: 'affirm',
-            reliefOption: 'affirm',
-          },
-          sourceDocumentAnalysisIds: [],
-          sourceFilingIds: [],
-          createdAt: session.simulatedDate,
-        }),
-      ),
+    let withVotes = session
+    for (const judge of ['ca4_judge_1', 'ca4_judge_2', 'ca4_judge_3']) {
+      withVotes = addPanelVote(withVotes, {
+        ...deterministicPanelVote(withVotes, judge),
+        vote: 'affirm',
+        reliefOption: 'affirm',
+      })
     }
-    expect(validateActorWorkProduct(withVoteProducts, product)).toHaveLength(0)
+    expect(validateActorWorkProduct(withVotes, product)).toHaveLength(0)
   })
 })

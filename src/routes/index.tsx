@@ -18,8 +18,6 @@ import {
   CalendarClock,
   CheckCircle2,
   ChevronRight,
-  CircleDashed,
-  FileArchive,
   FileCheck2,
   FileText,
   Gavel,
@@ -27,17 +25,16 @@ import {
   Library,
   LogIn,
   PanelTop,
-  RefreshCw,
   Scale,
   Search,
   ShieldCheck,
   Upload,
   UserPlus,
   Users,
-  XCircle,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
+import { EcfWizard } from '../components/ecf/EcfWizard'
 import {
   getCourtPack,
   getRuleItemsForCourt,
@@ -49,22 +46,23 @@ import {
   validateFiling,
 } from '../domain/simulation'
 import { nextActorWorkProductTask, type ActorWorkProductTask } from '../domain/actors/orchestration'
-import { preflightFilingSubmission } from '../domain/rules/executable-constraints'
 import {
-  ecfEventDefinitionFromFilingEvent,
+  defaultFilingMetadata,
   filingDraftToSubmission,
+  getAvailableEcfEventDefinitions,
+  preflightEcfFiling,
 } from '../domain/filing/ecf'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import type {
   ActorWorkProduct,
   CaseSession,
+  EcfEventAvailability,
   FilingDraft,
-  FilingEvent,
+  FilingMetadata,
   ParticipantRole,
   Scenario,
   ToolCall,
   UploadedDocument,
-  ValidationIssue,
 } from '../domain/types'
 import type { DocumentAnalysis } from '../modules/types'
 import type { CourtListenerSearchResult } from '../integrations/courtlistener'
@@ -123,6 +121,8 @@ type AcceptActorWorkProductMutation = (args: {
 }) => Promise<{
   session: CaseSession
   workProduct: ActorWorkProduct
+  receipt: import('../domain/types').EcfReceipt | null
+  validationReason?: string
 }>
 
 type RejectActorWorkProductMutation = (args: {
@@ -182,6 +182,9 @@ function Home() {
   const [draft, setDraft] = useState<FilingDraft>(() =>
     createEmptyDraft(createInitialSession(), 'notice_of_appeal'),
   )
+  const [filingMetadata, setFilingMetadata] = useState<FilingMetadata>(() =>
+    createDefaultMetadata(createInitialSession(), 'notice_of_appeal'),
+  )
   const upsertCurrentUser = useMutation(api.users.upsertCurrentUser)
   const createCaseSession = useMutation(api.caseSessions.create)
   const submitFiling = useMutation(api.caseSessions.submitFiling)
@@ -235,9 +238,14 @@ function Home() {
       ? { caseSessionId: session.id as Id<'caseSessions'> }
       : 'skip',
   )
+  const ecfEventAvailabilityQuery = useQuery(
+    (api as any).caseSessions.getAvailableEcfEvents,
+    canUseConvex && session
+      ? { caseSessionId: session.id as Id<'caseSessions'> }
+      : 'skip',
+  ) as EcfEventAvailability[] | undefined
   const activeSession = session ?? null
   const scenarioOptions = publishedScenarios ?? scenarios
-  const courtPack = activeSession ? getCourtPack(activeSession.courtPackId) : null
   const ruleItems = activeSession ? getRuleItemsForCourt(activeSession.courtPackId) : []
   const visibleTabs = useMemo(
     () => (activeSession ? navigationTabsForSession(activeSession) : []),
@@ -246,20 +254,20 @@ function Home() {
   const visibleViewKeys = visibleTabs.map((tab) => tab.key)
   const selectedView =
     activeSession && visibleViewKeys.includes(activeView) ? activeView : 'docket'
-  const availableEvents = (courtPack?.filingEvents ?? []).filter((event) =>
-    event.allowedParticipantRoles.includes(learnerRole),
-  )
+  const ecfEventAvailability =
+    ecfEventAvailabilityQuery ??
+    (activeSession ? getAvailableEcfEventDefinitions(activeSession) : [])
   const activeToolCall = activeSession ? nextProcedureToolCall(activeSession) : null
   const activeActorTask = activeSession ? nextActorWorkProductTask(activeSession) : null
   const validationIssues = useMemo(
     () => {
       if (!activeSession) return []
-      const submission = filingDraftToSubmission(draft)
+      const submission = filingDraftToSubmission(draft, filingMetadata)
       return submission
-        ? preflightFilingSubmission(activeSession, submission).issues
+        ? preflightEcfFiling(activeSession, submission).issues
         : validateFiling(activeSession, draft)
     },
-    [activeSession, draft],
+    [activeSession, draft, filingMetadata],
   )
   const liveAiReady =
     enableLiveAi && integrationStatus?.openRouterConfigured === true
@@ -288,6 +296,7 @@ function Home() {
   useEffect(() => {
     if (!activeSession) return
     setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
+    setFilingMetadata(createDefaultMetadata(activeSession, 'notice_of_appeal'))
     setTrialDocket(importedTrialDocket ?? createTrialDocket(activeSession))
   }, [activeSession?.id, importedTrialDocket])
 
@@ -299,6 +308,7 @@ function Home() {
   function resetDraft(eventId = draft.eventId) {
     if (!activeSession) return
     setDraft(createEmptyDraft(activeSession, eventId))
+    setFilingMetadata(createDefaultMetadata(activeSession, eventId))
   }
 
   async function startScenario(scenarioId: string) {
@@ -309,6 +319,7 @@ function Home() {
       setActiveCaseSessionId(nextSession.id as Id<'caseSessions'>)
       setTrialDocket(createTrialDocket(nextSession))
       setDraft(createEmptyDraft(nextSession, 'notice_of_appeal'))
+      setFilingMetadata(createDefaultMetadata(nextSession, 'notice_of_appeal'))
       setActiveView('docket')
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : 'Unable to create session')
@@ -328,7 +339,7 @@ function Home() {
     setSessionPending(true)
     setSessionError('')
     try {
-      const submission = filingDraftToSubmission(draft)
+      const submission = filingDraftToSubmission(draft, filingMetadata)
       const nextSession = submission
         ? (
             await submitEcfFiling({
@@ -341,6 +352,7 @@ function Home() {
             draft,
           })
       setDraft(createEmptyDraft(nextSession, draft.eventId))
+      setFilingMetadata(createDefaultMetadata(nextSession, draft.eventId))
       setActiveView('docket')
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : 'Unable to submit filing')
@@ -424,6 +436,9 @@ function Home() {
         caseSessionId: activeSession.id as Id<'caseSessions'>,
         workProductId,
       })
+      if (result.workProduct.status === 'rejected') {
+        setActorError(result.validationReason ?? 'Actor work product was rejected.')
+      }
       if (result.session.status === 'closed') {
         setActiveView('assessment')
       }
@@ -667,14 +682,18 @@ function Home() {
                   ) : null}
 
                   {selectedView === 'file' ? (
-                    <FilingView
+                    <EcfWizard
                       draft={draft}
                       documentError={documentError}
                       documentPending={documentPending}
-                      events={availableEvents}
+                      eventAvailability={ecfEventAvailability}
+                      learnerRole={learnerRole}
+                      metadata={filingMetadata}
+                      session={activeSession}
                       validationIssues={validationIssues}
                       onDraftChange={setDraft}
                       onDocumentsSelected={analyzeAndAttachDocuments}
+                      onMetadataChange={setFilingMetadata}
                       onReset={resetDraft}
                       onSubmit={submitDraft}
                     />
@@ -998,17 +1017,33 @@ function SessionChooser({
 }
 
 function createEmptyDraft(session: CaseSession, eventId: string): FilingDraft {
+  const event = getCourtPack(session.courtPackId).filingEvents.find(
+    (candidate) => candidate.id === eventId,
+  )
   return {
     eventId,
     participantRole: learnerRole,
-    title:
-      getCourtPack(session.courtPackId).filingEvents.find((event) => event.id === eventId)
-        ?.label ?? 'Filing',
+    title: event?.label ?? 'Filing',
     documents: [],
     certificateOfService: true,
     certificateOfCompliance: eventId.includes('brief'),
     sealed: false,
     notes: '',
+  }
+}
+
+function createDefaultMetadata(session: CaseSession, eventId: string): FilingMetadata {
+  const event = getCourtPack(session.courtPackId).filingEvents.find(
+    (candidate) => candidate.id === eventId,
+  )
+  const representedParty = session.participants.find((participant) =>
+    event?.allowedParticipantRoles.includes(participant.role),
+  )
+  const sealed = event?.ecfCategory === 'sealed' || eventId.includes('seal')
+  return {
+    ...defaultFilingMetadata(eventId, sealed),
+    representedPartyId: representedParty?.id ?? learnerRole,
+    feePaymentStatus: event?.feeBehavior === 'required' ? 'pending' : 'not_required',
   }
 }
 
@@ -1523,401 +1558,6 @@ function StatusTile({
   )
 }
 
-function FilingView({
-  draft,
-  documentError,
-  documentPending,
-  events,
-  validationIssues,
-  onDraftChange,
-  onDocumentsSelected,
-  onReset,
-  onSubmit,
-}: {
-  draft: FilingDraft
-  documentError: string
-  documentPending: boolean
-  events: FilingEvent[]
-  validationIssues: ValidationIssue[]
-  onDraftChange: (draft: FilingDraft) => void
-  onDocumentsSelected: (files: FileList | null) => void
-  onReset: (eventId?: string) => void
-  onSubmit: () => void
-}) {
-  const errors = validationIssues.filter((issue) => issue.severity === 'error')
-  const selectedEvent = events.find((event) => event.id === draft.eventId)
-  const ecfDefinition = selectedEvent
-    ? ecfEventDefinitionFromFilingEvent(selectedEvent)
-    : null
-  const briefWarnings = validationIssues.filter((issue) =>
-    [
-      'jurisdictional_statement_missing',
-      'issues_presented_missing',
-      'standard_of_review_missing',
-      'argument_section_missing',
-      'conclusion_relief_missing',
-      'record_citations_missing',
-      'appendix_references_missing',
-    ].includes(issue.code ?? ''),
-  )
-  const appendixWarnings = validationIssues.filter((issue) =>
-    (issue.code ?? '').startsWith('appendix_support_') ||
-    (issue.code ?? '').startsWith('issue_coverage_'),
-  )
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-            <FileText className="h-4 w-4" aria-hidden="true" />
-            CM/ECF Filing Workflow
-          </div>
-          <button
-            className="flex h-9 items-center gap-2 rounded-md border border-[#d8d1c4] bg-white px-3 text-sm font-semibold"
-            onClick={() => onReset()}
-            type="button"
-          >
-            <RefreshCw className="h-4 w-4" aria-hidden="true" />
-            Reset
-          </button>
-        </div>
-
-        <div className="mb-4 grid gap-2 md:grid-cols-4">
-          {['Event', 'Metadata', 'Documents', 'Review'].map((step, index) => (
-            <div
-              className="rounded-md border border-[#d8d1c4] bg-white px-3 py-2 text-sm"
-              key={step}
-            >
-              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-                Step {index + 1}
-              </div>
-              <div className="mt-1 font-semibold">{step}</div>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <label className="space-y-2 text-sm font-medium">
-            Filing event
-            <select
-              className="h-11 w-full rounded-md border border-[#c9c1b3] bg-white px-3"
-              onChange={(event) => onReset(event.target.value)}
-              value={draft.eventId}
-            >
-              {events.map((event) => (
-                <option key={event.id} value={event.id}>
-                  {event.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="space-y-2 text-sm font-medium">
-            Title
-            <input
-              className="h-11 w-full rounded-md border border-[#c9c1b3] bg-white px-3"
-              onChange={(event) => onDraftChange({ ...draft, title: event.target.value })}
-              value={draft.title}
-            />
-          </label>
-        </div>
-
-        {ecfDefinition ? (
-          <section className="mt-4 rounded-lg border border-[#e2dbcf] bg-white p-3">
-            <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-              Event Metadata
-            </div>
-            <div className="grid gap-3 text-sm md:grid-cols-3">
-              <InfoRow label="Category" value={formatLabel(ecfDefinition.category)} />
-              <InfoRow label="Fee" value={formatLabel(ecfDefinition.feeBehavior)} />
-              <InfoRow label="Service" value={formatLabel(ecfDefinition.serviceBehavior)} />
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {ecfDefinition.metadataFields.map((field) => (
-                <span
-                  className="rounded border border-[#d8d1c4] bg-[#fbfaf7] px-2 py-1 text-xs font-medium text-[#3e4843]"
-                  key={field.key}
-                >
-                  {field.label}
-                  {field.required ? ' Required' : ''}
-                </span>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        <label className="mt-4 block space-y-2 text-sm font-medium">
-          PDF documents
-          <div className="grid min-h-36 place-items-center rounded-lg border border-dashed border-[#b7aa98] bg-white px-4 py-6 text-center">
-            <div>
-              <FileArchive className="mx-auto h-8 w-8 text-[#1d4d4f]" aria-hidden="true" />
-              <input
-                accept="application/pdf"
-                className="mt-4 w-full max-w-sm text-sm"
-                disabled={documentPending}
-                multiple
-                onChange={(event) => onDocumentsSelected(event.target.files)}
-                type="file"
-              />
-              {documentPending ? (
-                <div className="mt-3 text-xs font-semibold text-[#68716c]">
-                  Extracting PDF text and storing upload...
-                </div>
-              ) : null}
-              {documentError ? (
-                <div className="mt-3 text-xs font-semibold text-[#8a321f]">
-                  {documentError}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </label>
-
-        {draft.documents.length ? (
-          <div className="mt-4 divide-y divide-[#e2dbcf] rounded-lg border border-[#e2dbcf] bg-white">
-            {draft.documents.map((document) => (
-              <div className="grid gap-2 px-3 py-3 text-sm md:grid-cols-[1fr_auto]" key={document.id}>
-                <div>
-                  <div className="font-semibold">{document.fileName}</div>
-                  <div className="text-xs text-[#68716c]">
-                    {(document.sizeBytes / 1024).toFixed(1)} KB · {formatDocumentAnalysis(document)}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <DocumentMetric label="Text" value={formatLabel(document.textExtractionStatus ?? document.analysis?.textExtractionStatus ?? 'fallback')} />
-                    <DocumentMetric label="Pages" value={String(document.pageCount ?? document.analysis?.pageCount ?? 'n/a')} />
-                    <DocumentMetric label="Words" value={String(document.wordCount ?? document.analysis?.wordCount ?? 'n/a')} />
-                    <DocumentMetric
-                      label="Certificates"
-                      value={certificateStatus(document)}
-                    />
-                    <DocumentMetric
-                      label="Record cites"
-                      value={String(document.analysis?.recordCitations?.length ?? 0)}
-                    />
-                  </div>
-                </div>
-                <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
-                  {document.mimeType}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-
-        {[...briefWarnings, ...appendixWarnings].length ? (
-          <section className="mt-4 rounded-lg border border-[#ead7a7] bg-[#fff8e5] p-3">
-            <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#785b16]">
-              Brief Analysis Warnings
-            </div>
-            <div className="space-y-2">
-              {[...briefWarnings, ...appendixWarnings].slice(0, 6).map((warning, index) => (
-                <div className="text-sm leading-5 text-[#785b16]" key={`${warning.code}-${index}`}>
-                  {warning.message}
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <Toggle
-            checked={draft.certificateOfService}
-            label="Service"
-            onChange={(checked) =>
-              onDraftChange({ ...draft, certificateOfService: checked })
-            }
-          />
-          <Toggle
-            checked={draft.certificateOfCompliance}
-            label="Compliance"
-            onChange={(checked) =>
-              onDraftChange({ ...draft, certificateOfCompliance: checked })
-            }
-          />
-          <Toggle
-            checked={draft.sealed}
-            label="Sealed"
-            onChange={(checked) => onDraftChange({ ...draft, sealed: checked })}
-          />
-        </div>
-
-        <label className="mt-4 block space-y-2 text-sm font-medium">
-          Filing notes
-          <textarea
-            className="min-h-28 w-full rounded-md border border-[#c9c1b3] bg-white p-3"
-            onChange={(event) => onDraftChange({ ...draft, notes: event.target.value })}
-            value={draft.notes}
-          />
-        </label>
-
-        <section className="mt-4 rounded-lg border border-[#e2dbcf] bg-white p-3">
-          <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-            Review
-          </div>
-          <div className="grid gap-3 text-sm md:grid-cols-3">
-            <InfoRow label="Main document" value={draft.documents[0]?.fileName ?? 'Not attached'} />
-            <InfoRow label="Attachments" value={String(Math.max(0, draft.documents.length - 1))} />
-            <InfoRow
-              label="Receipt status"
-              value={errors.length ? 'Cannot file until errors are cured' : 'Receipt preview ready'}
-            />
-          </div>
-        </section>
-
-        <div className="mt-4 flex justify-end">
-          <button
-            className="flex h-11 items-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173e40] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
-            disabled={errors.length > 0 || documentPending}
-            onClick={onSubmit}
-            type="button"
-          >
-            <FileCheck2 className="h-4 w-4" aria-hidden="true" />
-            Submit ECF Filing
-          </button>
-        </div>
-      </section>
-
-      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
-        <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-          <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-          Validation
-        </div>
-        <div className="space-y-3">
-          {validationIssues.length ? (
-            groupValidationIssuesBySource(validationIssues).map((group) => (
-              <div className="space-y-2" key={group.source}>
-                <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-                  {group.source}
-                </div>
-                {group.issues.map((issue, index) => (
-                  <ValidationItem issue={issue} key={`${issue.message}-${index}`} />
-                ))}
-              </div>
-            ))
-          ) : (
-            <div className="rounded-md border border-[#c8dfcb] bg-[#eff8f0] p-3 text-sm text-[#285b38]">
-              <div className="flex items-center gap-2 font-semibold">
-                <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
-                Ready for filing
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function validationSource(issue: ValidationIssue) {
-  const ruleIds = issue.ruleRefs.map((rule) => rule.ruleId)
-  if (ruleIds.some((ruleId) => ruleId.startsWith('FRAP'))) return 'FRAP'
-  if (ruleIds.some((ruleId) => ruleId.startsWith('CA4_LR'))) return 'CA4 Local Rule'
-  return 'Simulator'
-}
-
-function groupValidationIssuesBySource(issues: ValidationIssue[]) {
-  const order = ['FRAP', 'CA4 Local Rule', 'Simulator']
-  return order
-    .map((source) => ({
-      source,
-      issues: issues.filter((issue) => validationSource(issue) === source),
-    }))
-    .filter((group) => group.issues.length)
-}
-
-function Toggle({
-  checked,
-  label,
-  onChange,
-}: {
-  checked: boolean
-  label: string
-  onChange: (checked: boolean) => void
-}) {
-  return (
-    <label className="flex h-11 items-center justify-between rounded-md border border-[#c9c1b3] bg-white px-3 text-sm font-semibold">
-      {label}
-      <input
-        checked={checked}
-        className="h-4 w-4 accent-[#1d4d4f]"
-        onChange={(event) => onChange(event.target.checked)}
-        type="checkbox"
-      />
-    </label>
-  )
-}
-
-function DocumentMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="rounded border border-[#d8d1c4] bg-[#fbfaf7] px-2 py-1 text-xs font-medium text-[#3e4843]">
-      {label}: {value}
-    </span>
-  )
-}
-
-function formatDocumentAnalysis(document: UploadedDocument) {
-  const status = document.textExtractionStatus ?? document.analysis?.textExtractionStatus
-  const recordCites = document.analysis?.recordCitations?.length ?? 0
-  const appendixCites = document.analysis?.appendixCitations?.length ?? 0
-  if (!status) return document.extractedSignals.join(', ') || 'metadata only'
-  return `${formatLabel(status)} · ${recordCites} record cite${recordCites === 1 ? '' : 's'} · ${appendixCites} appendix cite${appendixCites === 1 ? '' : 's'}`
-}
-
-function certificateStatus(document: UploadedDocument) {
-  const service = document.analysis?.certificateOfServiceDetected
-  const compliance = document.analysis?.certificateOfComplianceDetected
-  if (service && compliance) return 'service + compliance'
-  if (service) return 'service'
-  if (compliance) return 'compliance'
-  return 'not detected'
-}
-
-function ValidationItem({ issue }: { issue: ValidationIssue }) {
-  const Icon =
-    issue.severity === 'error'
-      ? XCircle
-      : issue.severity === 'warning'
-        ? AlertTriangle
-        : CircleDashed
-  const tone =
-    issue.severity === 'error'
-      ? 'border-[#edc6bc] bg-[#fff1ee] text-[#8a321f]'
-      : issue.severity === 'warning'
-        ? 'border-[#ead7a7] bg-[#fff8e5] text-[#785b16]'
-        : 'border-[#cdd8e8] bg-[#f0f5ff] text-[#334f7c]'
-
-  return (
-    <div className={`rounded-md border p-3 text-sm ${tone}`}>
-      <div className="flex gap-2">
-        <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <div>
-          <div className="font-semibold">{formatLabel(issue.severity)}</div>
-          <p className="mt-1 leading-5">{issue.message}</p>
-          {issue.code ? (
-            <div className="mt-1 font-mono text-xs opacity-80">{issue.code}</div>
-          ) : null}
-          {issue.cureSuggestion ? (
-            <p className="mt-2 leading-5">{issue.cureSuggestion}</p>
-          ) : null}
-          {issue.ruleRefs.length ? (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {issue.ruleRefs.map((rule) => (
-                <span
-                  className="rounded border border-current px-2 py-0.5 text-xs"
-                  key={rule.ruleId}
-                >
-                  {rule.label}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function ReceiptView({ session }: { session: CaseSession }) {
   const receipts = session.ecfReceipts ?? []
   return (
@@ -2338,12 +1978,35 @@ function WorkProductCard({
         {product.validationIssues?.length ? (
           <div className="mt-3 space-y-2">
             {product.validationIssues.map((issue, index) => (
-              <ValidationItem issue={issue} key={`${issue.code ?? issue.message}-${index}`} />
+              <ActorValidationItem issue={issue} key={`${issue.code ?? issue.message}-${index}`} />
             ))}
           </div>
         ) : null}
       </div>
     </article>
+  )
+}
+
+function ActorValidationItem({
+  issue,
+}: {
+  issue: NonNullable<ActorWorkProduct['validationIssues']>[number]
+}) {
+  const tone =
+    issue.severity === 'error'
+      ? 'border-[#edc6bc] bg-[#fff1ee] text-[#8a321f]'
+      : issue.severity === 'warning'
+        ? 'border-[#ead7a7] bg-[#fff8e5] text-[#785b16]'
+        : 'border-[#cdd8e8] bg-[#f0f5ff] text-[#334f7c]'
+
+  return (
+    <div className={`rounded-md border p-3 text-sm ${tone}`}>
+      <div className="font-semibold">{formatLabel(issue.severity)}</div>
+      <p className="mt-1 leading-5">{issue.message}</p>
+      {issue.cureSuggestion ? (
+        <p className="mt-2 leading-5">{issue.cureSuggestion}</p>
+      ) : null}
+    </div>
   )
 }
 

@@ -140,12 +140,38 @@ export type DocumentRequirement = {
   mustContain?: string[]
 }
 
+export type EcfEventCategory =
+  | 'case_opening'
+  | 'appearance'
+  | 'brief'
+  | 'appendix'
+  | 'motion'
+  | 'response'
+  | 'sealed'
+  | 'post_disposition'
+  | 'amicus'
+
+export type EcfFeeBehavior = 'none' | 'required' | 'waivable' | 'deferred'
+
+export type EcfServiceBehavior = 'cm_ecf' | 'manual_required' | 'mixed'
+
+export type EcfPartySelectionMode = 'none' | 'single' | 'multiple' | 'all_filers'
+
 export type FilingEvent = {
   id: string
   label: string
   domain: ProcedureDomain
   allowedCourtLevels: CourtLevel[]
   allowedParticipantRoles: ParticipantRole[]
+  ecfMenuPath: string[]
+  ecfCategory: EcfEventCategory
+  courtEventCode: string
+  requiresRelatedEntry: boolean
+  requiresReliefText: boolean
+  feeBehavior: EcfFeeBehavior
+  serviceBehavior: EcfServiceBehavior
+  partySelectionMode: EcfPartySelectionMode
+  receiptTemplateId: string
   requiredDocuments: DocumentRequirement[]
   optionalDocuments: DocumentRequirement[]
   validationRuleRefs: RuleRef[]
@@ -250,12 +276,21 @@ export type FilingAttachment = {
 }
 
 export type FilingMetadata = {
+  filingAttorneyName?: string
   representedPartyId?: string
+  feePaymentStatus?: 'not_required' | 'paid' | 'deferred' | 'waived' | 'pending'
   reliefRequested?: string
   serviceMethod: 'cm_ecf' | 'mail' | 'email' | 'hand_delivery' | 'none'
   relatedDocketEntryId?: string
   consentStatus?: 'all_parties_consent' | 'partial_consent' | 'no_consent' | 'unknown'
   sealedDocumentType?: string
+  privacyAcknowledged?: boolean
+  publicRedactedVersionIncluded?: boolean
+  serviceListOverrides?: {
+    additionalRecipients?: string[]
+    suppressedParticipantIds?: string[]
+    manualServiceRecipients?: string[]
+  }
   feeWaiverRequested?: boolean
   emergency: boolean
   sealed: boolean
@@ -797,17 +832,6 @@ export type AmicusParticipation = {
   deniedCandidateIds: string[]
 }
 
-export type EcfEventCategory =
-  | 'case_opening'
-  | 'appearance'
-  | 'brief'
-  | 'appendix'
-  | 'motion'
-  | 'response'
-  | 'sealed'
-  | 'post_disposition'
-  | 'amicus'
-
 export type EcfMetadataField = {
   key: string
   label: string
@@ -825,8 +849,19 @@ export type EcfEventDefinition = {
   requiredAttachments: string[]
   optionalAttachments: string[]
   metadataFields: EcfMetadataField[]
-  feeBehavior: 'none' | 'required' | 'waivable' | 'deferred'
-  serviceBehavior: 'cm_ecf' | 'manual_required' | 'mixed'
+  menuPath: string[]
+  courtEventCode: string
+  requiresRelatedEntry: boolean
+  requiresReliefText: boolean
+  feeBehavior: EcfFeeBehavior
+  serviceBehavior: EcfServiceBehavior
+  partySelectionMode: EcfPartySelectionMode
+  receiptTemplateId: string
+}
+
+export type EcfEventAvailability = EcfEventDefinition & {
+  available: boolean
+  unavailableReasons: string[]
 }
 
 export type ScenarioRecordExcerpt = {

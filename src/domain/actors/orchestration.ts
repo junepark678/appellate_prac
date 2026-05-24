@@ -1,4 +1,6 @@
 import type { AiProvider } from '../../modules/types'
+import { getCourtPack, getRuleItemsForCourt } from '../../modules/registry'
+import { getAvailableEcfEventDefinitions } from '../filing/ecf'
 import { evaluateRelief } from '../legal/evaluators'
 import {
   normalizeActorWorkProduct,
@@ -211,27 +213,81 @@ function filingSummary(session: CaseSession) {
   }))
 }
 
+function roleSpecificPrompt(session: CaseSession, task: ActorWorkProductTask) {
+  const actor = getCourtPack(session.courtPackId).aiActors.find(
+    (candidate) => candidate.id === task.actorId,
+  )
+  if (actor?.role === 'opposing_party') {
+    return 'You act as appellee counsel. Protect appellee procedural advantages, challenge forfeited issues, and file only appellee-authorized papers.'
+  }
+  if (actor?.role === 'amicus') {
+    return 'You act as a potential amicus. Explain distinct institutional interest, support side, consent or leave posture, and avoid party-only relief.'
+  }
+  if (task.actorId === 'ca4_staff_attorney') {
+    return 'You act as a staff attorney. Produce neutral screening analysis for the panel and identify jurisdiction, preservation, record, and standard-of-review risks.'
+  }
+  if (actor?.role === 'judge') {
+    return 'You act as one assigned judge. Cast only your own vote, avoid duplicate votes, and tie relief to available deterministic relief.'
+  }
+  if (actor?.role === 'panel') {
+    return 'You act for the three-judge panel. Draft disposition only after three votes and a two-judge majority are available.'
+  }
+  return 'Stay within the authority of the named simulator actor.'
+}
+
 function systemPrompt(task: ActorWorkProductTask) {
   return [
     'You are a constrained Fourth Circuit civil appeal simulator actor.',
     `Create only the requested ${task.kind.replaceAll('_', ' ')} work product as JSON.`,
-    'Ground every material claim in the provided filings, document analyses, record excerpts, or rule references.',
+    'Every legal or procedural claim must cite a provided filing, record excerpt, docket entry, document analysis, or rule reference.',
     'Do not invent docketed filings, unavailable relief, party authority, or procedural rules.',
     'The simulator validators remain authoritative; draft and recommend only.',
   ].join(' ')
 }
 
 function userPrompt(session: CaseSession, task: ActorWorkProductTask) {
+  const reliefEvaluation = evaluateRelief(session)
   return JSON.stringify({
     task,
+    actorInstructions: roleSpecificPrompt(session, task),
     procedureState: session.procedureState,
     status: session.status,
     courtPackId: session.courtPackId,
     simulatedDate: session.simulatedDate,
     scenario: session.scenario,
-    docketEntries: session.docketEntries.slice(-10),
+    docketEntries: session.docketEntries,
     deadlines: session.deadlines,
     filings: filingSummary(session),
+    documentAnalysisSources: filingSummary(session).flatMap((filing) =>
+      filing.documents.map((document) => ({
+        filingId: filing.id,
+        documentId: document.id,
+        analysisId: document.analysisId,
+        fileName: document.fileName,
+        textSnippet: document.textSnippet,
+      })),
+    ),
+    recordExcerpts: session.scenario.recordExcerpts ?? [],
+    scenarioIssues: session.scenario.issues ?? [],
+    ecfEventAvailability: getAvailableEcfEventDefinitions(session).map((event) => ({
+      eventId: event.eventId,
+      displayName: event.displayName,
+      menuPath: event.menuPath,
+      category: event.category,
+      available: event.available,
+      unavailableReasons: event.unavailableReasons,
+      requiresRelatedEntry: event.requiresRelatedEntry,
+      requiresReliefText: event.requiresReliefText,
+      feeBehavior: event.feeBehavior,
+      serviceBehavior: event.serviceBehavior,
+    })),
+    ruleReferences: getRuleItemsForCourt(session.courtPackId).map((item) => ({
+      ruleId: item.ruleId,
+      label: item.sourceLabel,
+      topic: item.topic,
+      sourceUrl: item.sourceUrl,
+      plainText: item.plainText,
+    })),
     existingWorkProducts: session.actorWorkProducts?.map((product) => ({
       id: product.id,
       kind: product.kind,
@@ -239,7 +295,9 @@ function userPrompt(session: CaseSession, task: ActorWorkProductTask) {
       status: product.status,
       createdAt: product.createdAt,
     })),
-    reliefEvaluation: evaluateRelief(session),
+    availableRelief: reliefEvaluation.availableRelief,
+    barredRelief: reliefEvaluation.barredRelief,
+    reliefReasons: reliefEvaluation.reasons,
   })
 }
 

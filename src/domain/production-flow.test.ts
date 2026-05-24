@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { ruleRefs } from '../modules/registry'
+import { applyAcceptedActorWorkProduct } from './actors/effects'
 import { validateAiProposal } from './actors/proposals'
 import {
   defaultFilingMetadata,
@@ -14,8 +16,8 @@ import {
   transitionAfterFiling,
 } from './procedure/state-machine'
 import { preflightFilingSubmission } from './rules/executable-constraints'
-import { createInitialSession, fileDraft } from './simulation'
-import type { FilingDraft, FilingSubmission, UploadedDocument } from './types'
+import { applyToolCall, createInitialSession, fileDraft } from './simulation'
+import type { ActorWorkProduct, FilingDraft, FilingSubmission, UploadedDocument } from './types'
 
 const noticePdf: UploadedDocument = {
   id: 'notice',
@@ -115,6 +117,16 @@ const rule28jPdf: UploadedDocument = {
   sizeBytes: 100_000,
   extractedText: 'Rule 28(j) letter regarding supplemental authority.',
   extractedSignals: ['28(j)'],
+}
+
+const replyPdf: UploadedDocument = {
+  id: 'reply',
+  fileName: 'reply-brief.pdf',
+  mimeType: 'application/pdf',
+  sizeBytes: 140_000,
+  extractedText:
+    'Reply brief. Argument. Record citation. Oral argument statement. Conclusion.',
+  extractedSignals: ['reply', 'argument', 'record citation', 'oral argument', 'conclusion'],
 }
 
 function draft(eventId: string, document: UploadedDocument): FilingDraft {
@@ -240,6 +252,126 @@ describe('production appellate flow', () => {
 
     expect(session.counterpartyStrategy?.meritsArguments.length).toBeGreaterThan(0)
     expect(session.amicusParticipation?.candidates[0]?.requiresLeave).toBe(true)
+  })
+
+  it('runs a full ECF and actor-effect happy path through judgment and mandate deadline', () => {
+    let session = createInitialSession()
+    session = submitEcfFiling(session, submission('notice_of_appeal', noticePdf)).session
+    session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
+    session = fileDraft(session, draft('docketing_statement', docketingPdf))
+    session = fileDraft(session, draft('transcript_order_acknowledgment', transcriptAckPdf))
+    session = fileDraft(session, draft('opening_brief', briefPdf))
+    session = fileDraft(session, draft('joint_appendix', appendixPdf))
+
+    const appelleeProduct: ActorWorkProduct = {
+      id: 'appellee_effect',
+      caseSessionId: session.id,
+      actorId: 'appellee_ai',
+      kind: 'counterparty_filing_draft',
+      status: 'proposed',
+      workProduct: {
+        eventId: 'appellee_brief',
+        participantRole: 'appellee',
+        title: 'Appellee Brief',
+        documentFileName: 'appellee-brief.pdf',
+        documentText:
+          'Jurisdictional response. Statement of issues. Standard of review. Argument with record citation. Oral argument statement. Conclusion. Certificate of Service. Certificate of Compliance.',
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Accepted AI appellee brief.',
+        citations: [],
+        ruleRefs: [ruleRefs.frap31],
+      },
+      sourceDocumentAnalysisIds: [],
+      sourceFilingIds: session.filings.map((filing) => filing.id),
+      createdAt: session.simulatedDate,
+    }
+    const appelleeEffect = applyAcceptedActorWorkProduct(session, appelleeProduct)
+    session = appelleeEffect.session
+    expect(appelleeEffect.receipt?.eventId).toBe('appellee_brief')
+
+    session = fileDraft(session, draft('reply_brief', replyPdf))
+    session = applyToolCall(session, {
+      tool: 'submitToPanel',
+      actorId: 'ca4_clerk',
+      text: 'Briefing is complete and the case is submitted on the briefs.',
+    })
+    session = applyAcceptedActorWorkProduct(session, {
+      id: 'bench_effect',
+      caseSessionId: session.id,
+      actorId: 'ca4_staff_attorney',
+      kind: 'bench_memo',
+      status: 'proposed',
+      workProduct: {
+        title: 'Bench Memo',
+        summary: 'Recommend affirmance.',
+        reasoning: ['The record and briefs support affirmance.'],
+        recommendations: ['Affirm.'],
+        citations: [],
+        ruleRefs: [ruleRefs.frap34],
+        reliefOption: 'affirm',
+      },
+      sourceDocumentAnalysisIds: [],
+      sourceFilingIds: session.filings.map((filing) => filing.id),
+      createdAt: session.simulatedDate,
+    }).session
+    for (const judge of ['ca4_judge_1', 'ca4_judge_2', 'ca4_judge_3']) {
+      session = applyAcceptedActorWorkProduct(session, {
+        id: `vote_effect_${judge}`,
+        caseSessionId: session.id,
+        actorId: judge,
+        kind: 'judge_vote_memo',
+        status: 'proposed',
+        workProduct: {
+          title: 'Vote Memo',
+          summary: 'Vote to affirm.',
+          reasoning: ['Affirmance is available on this record.'],
+          recommendations: ['Affirm.'],
+          citations: [],
+          ruleRefs: [ruleRefs.frap34],
+          reliefOption: 'affirm',
+          requestedDisposition: 'affirm',
+          confidence: 0.8,
+        },
+        sourceDocumentAnalysisIds: [],
+        sourceFilingIds: session.filings.map((filing) => filing.id),
+        createdAt: session.simulatedDate,
+      }).session
+    }
+
+    session = applyAcceptedActorWorkProduct(session, {
+      id: 'disposition_effect',
+      caseSessionId: session.id,
+      actorId: 'ca4_panel',
+      kind: 'panel_disposition_draft',
+      status: 'proposed',
+      workProduct: {
+        title: 'Panel Disposition',
+        summary: 'Judgment affirmed. The mandate will issue under FRAP 41.',
+        reasoning: ['Three votes support affirmance.'],
+        recommendations: ['Enter judgment affirming.'],
+        citations: [],
+        ruleRefs: [ruleRefs.frap34, ruleRefs.frap36, ruleRefs.frap41],
+        reliefOption: 'affirm',
+        requestedDisposition: 'affirm',
+      },
+      sourceDocumentAnalysisIds: [],
+      sourceFilingIds: session.filings.map((filing) => filing.id),
+      createdAt: session.simulatedDate,
+    }).session
+    session = applyToolCall(session, {
+      tool: 'enterJudgment',
+      actorId: 'ca4_panel',
+      disposition: 'affirm',
+      judgmentText: 'Judgment affirmed.',
+      ruleRefs: [ruleRefs.frap36, ruleRefs.frap41],
+    })
+
+    expect(session.status).toBe('closed')
+    expect(session.panelDeliberation?.votes).toHaveLength(3)
+    expect(session.panelDisposition?.disposition).toBe('affirm')
+    expect(session.deadlines.some((deadline) => deadline.targetEventId === 'mandate')).toBe(true)
   })
 
   it('covers opening-stage, motion, amicus, sealed, and post-judgment filing constraints', () => {

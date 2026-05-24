@@ -1,5 +1,7 @@
 import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
 import { evaluateRelief } from '../legal/evaluators'
+import { defaultFilingMetadata } from '../filing/ecf'
+import { validatePanelDisposition } from '../panel/deliberation'
 import { preflightFilingSubmission } from '../rules/executable-constraints'
 import { isActorReasoningMemo, isGeneratedFilingDraft, validateWorkProductPayload } from './schemas'
 import type {
@@ -56,6 +58,14 @@ function sourceDocumentAnalysisIds(session: CaseSession) {
         ...(document.analysis ? [`${document.id}:analysis`] : []),
       ]),
   )
+}
+
+function sourceRecordExcerptIds(session: CaseSession) {
+  return new Set(session.scenario.recordExcerpts?.map((excerpt) => excerpt.id) ?? [])
+}
+
+function sourceDocketEntryIds(session: CaseSession) {
+  return new Set(session.docketEntries.map((entry) => entry.id))
 }
 
 function issue(
@@ -208,6 +218,8 @@ function postureIssues(session: CaseSession, kind: ActorWorkProductKind) {
 function citationIssues(session: CaseSession, product: ActorWorkProduct) {
   const filings = sourceFilingIds(session)
   const analyses = sourceDocumentAnalysisIds(session)
+  const recordExcerpts = sourceRecordExcerptIds(session)
+  const docketEntries = sourceDocketEntryIds(session)
   const issues: ValidationIssue[] = []
 
   for (const filingId of product.sourceFilingIds) {
@@ -237,6 +249,17 @@ function citationIssues(session: CaseSession, product: ActorWorkProduct) {
   }
 
   for (const citation of product.workProduct.citations) {
+    if (citation.sourceType !== 'rule' && !citation.sourceId) {
+      issues.push(
+        issue(
+          'error',
+          'citation_source_id_missing',
+          `Citation ${citation.label} does not identify a supported source.`,
+          'Cite a filing, docket entry, record excerpt, or document analysis from the current session.',
+        ),
+      )
+      continue
+    }
     if (citation.sourceType === 'filing' && citation.sourceId && !filings.has(citation.sourceId)) {
       issues.push(
         issue(
@@ -258,6 +281,44 @@ function citationIssues(session: CaseSession, product: ActorWorkProduct) {
           'citation_document_analysis_unavailable',
           `Citation ${citation.label} references unavailable document analysis.`,
           'Use document analysis IDs attached to uploaded PDFs.',
+        ),
+      )
+    }
+    if (
+      citation.sourceType === 'record_excerpt' &&
+      citation.sourceId &&
+      !recordExcerpts.has(citation.sourceId)
+    ) {
+      issues.push(
+        issue(
+          'error',
+          'citation_record_excerpt_unavailable',
+          `Citation ${citation.label} references an unavailable record excerpt.`,
+          'Use record excerpts attached to the current scenario.',
+        ),
+      )
+    }
+    if (
+      citation.sourceType === 'docket_entry' &&
+      citation.sourceId &&
+      !docketEntries.has(citation.sourceId)
+    ) {
+      issues.push(
+        issue(
+          'error',
+          'citation_docket_entry_unavailable',
+          `Citation ${citation.label} references an unavailable docket entry.`,
+          'Use docket entry IDs from the current case session.',
+        ),
+      )
+    }
+    if (citation.sourceType === 'rule' && !citation.ruleRef) {
+      issues.push(
+        issue(
+          'error',
+          'citation_rule_ref_missing',
+          `Citation ${citation.label} references a rule without a rule reference.`,
+          'Attach the FRAP or Fourth Circuit rule reference supporting the claim.',
         ),
       )
     }
@@ -324,6 +385,84 @@ function generatedFilingIssues(session: CaseSession, product: ActorWorkProduct) 
   return preflightFilingSubmission(session, submission, session.simulatedDate).issues
 }
 
+function duplicateJudgeVoteIssues(session: CaseSession, product: ActorWorkProduct) {
+  if (product.kind !== 'judge_vote_memo') return []
+  const duplicateVote = session.panelDeliberation?.votes.some(
+    (vote) => vote.judgeActorId === product.actorId,
+  )
+  const duplicateProduct = session.actorWorkProducts?.some(
+    (candidate) =>
+      candidate.id !== product.id &&
+      candidate.kind === 'judge_vote_memo' &&
+      candidate.actorId === product.actorId &&
+      candidate.status !== 'rejected',
+  )
+  if (!duplicateVote && !duplicateProduct) return []
+  return [
+    issue(
+      'error',
+      'duplicate_judge_vote',
+      'This judge has already recorded or proposed a vote in this panel deliberation.',
+      'Use the next assigned judge who has not voted.',
+    ),
+  ]
+}
+
+function counterpartyFilingPostureIssues(session: CaseSession, product: ActorWorkProduct) {
+  if (product.kind !== 'counterparty_filing_draft' || !isGeneratedFilingDraft(product.workProduct)) {
+    return []
+  }
+  const filedEvents = activeFiledEventSet(session)
+  const draft = product.workProduct
+  const issues: ValidationIssue[] = []
+
+  if (draft.eventId === 'appellee_brief') {
+    if (filedEvents.has('appellee_brief')) {
+      issues.push(
+        issue(
+          'error',
+          'appellee_brief_already_filed',
+          'The appellee brief has already been filed.',
+          'Do not docket duplicate appellee merits briefing.',
+        ),
+      )
+    }
+    if (!session.deadlines.some((deadline) => deadline.targetEventId === 'appellee_brief' && deadline.status === 'open')) {
+      issues.push(
+        issue(
+          'error',
+          'appellee_brief_deadline_not_open',
+          'The appellee brief draft is premature because no appellee-brief deadline is open.',
+          'Wait for the opening brief and appendix posture to generate an appellee brief.',
+        ),
+      )
+    }
+  }
+
+  return issues
+}
+
+function panelDispositionIssues(session: CaseSession, product: ActorWorkProduct) {
+  if (product.kind !== 'panel_disposition_draft' || !isActorReasoningMemo(product.workProduct)) {
+    return []
+  }
+  const memo = product.workProduct
+  const validation = validatePanelDisposition(session, {
+    disposition: memo.reliefOption ?? memo.requestedDisposition ?? memo.title,
+    judgmentText: memo.summary || memo.recommendations.join(' '),
+    ruleRefs: memo.ruleRefs,
+  })
+
+  return validation.issues.map((message) =>
+    issue(
+      'error',
+      'panel_disposition_invalid',
+      message,
+      'Record three valid votes, confirm a two-judge majority, and include the required disposition rule references.',
+    ),
+  )
+}
+
 export function normalizeActorWorkProduct(
   input: Omit<ActorWorkProduct, 'id' | 'status' | 'validationIssues'> & {
     id?: string
@@ -355,6 +494,9 @@ export function validateActorWorkProduct(
     ...citationIssues(session, product),
     ...ruleReferenceIssues(product),
     ...reliefIssues(session, product),
+    ...duplicateJudgeVoteIssues(session, product),
+    ...counterpartyFilingPostureIssues(session, product),
+    ...panelDispositionIssues(session, product),
     ...generatedFilingIssues(session, product),
   ]
 }
@@ -429,14 +571,18 @@ export function generatedFilingToSubmission(
         attachmentType: attachment.attachmentType,
       })) ?? [],
     metadata: {
-      serviceMethod: 'cm_ecf',
-      emergency: false,
-      sealed: draft.sealed,
-      redactionAcknowledged: !draft.sealed,
+      ...defaultFilingMetadata(draft.eventId, draft.sealed),
+      representedPartyId: participantRoleForGeneratedDraft(draft),
       certificateOfService: draft.certificateOfService,
       certificateOfCompliance: draft.certificateOfCompliance,
-      ...(draft.sealed ? { sealedDocumentType: 'sealed material' } : {}),
-      ...(draft.eventId.includes('amicus') ? { consentStatus: 'unknown' as const } : {}),
+      ...(draft.sealed
+        ? {
+            privacyAcknowledged: true,
+            redactionAcknowledged: true,
+            publicRedactedVersionIncluded: true,
+            sealedDocumentType: 'sealed material',
+          }
+        : {}),
     },
     notes: draft.notes,
   }

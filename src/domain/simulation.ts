@@ -573,21 +573,6 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
     ),
   }
 
-  if (hasWarnings) {
-    const deficiencyEntry = createDocketEntry(updatedSession, {
-      filedAt: addDays(filedAt, 0),
-      actorRole: 'clerk',
-      title: 'Clerk Deficiency Notice',
-      text: validationIssues.map((issue) => issue.message).join(' '),
-      filingId: filing.id,
-      ruleRefs: validationIssues.flatMap((issue) => issue.ruleRefs),
-    })
-    return postProcessAcceptedFiling({
-      ...updatedSession,
-      docketEntries: [...updatedSession.docketEntries, deficiencyEntry],
-    }, draft)
-  }
-
   const newDeadlines =
     event?.deadlineEffects.map((effect) =>
       createDeadline(
@@ -599,11 +584,27 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
         effect.sourceRuleRefs,
       ),
     ) ?? []
-
-  return postProcessAcceptedFiling({
+  const updatedSessionWithDeadlines = {
     ...updatedSession,
     deadlines: [...updatedSession.deadlines, ...newDeadlines],
-  }, draft)
+  }
+
+  if (hasWarnings) {
+    const deficiencyEntry = createDocketEntry(updatedSessionWithDeadlines, {
+      filedAt: addDays(filedAt, 0),
+      actorRole: 'clerk',
+      title: 'Clerk Deficiency Notice',
+      text: validationIssues.map((issue) => issue.message).join(' '),
+      filingId: filing.id,
+      ruleRefs: validationIssues.flatMap((issue) => issue.ruleRefs),
+    })
+    return postProcessAcceptedFiling({
+      ...updatedSessionWithDeadlines,
+      docketEntries: [...updatedSessionWithDeadlines.docketEntries, deficiencyEntry],
+    }, draft)
+  }
+
+  return postProcessAcceptedFiling(updatedSessionWithDeadlines, draft)
 }
 
 export function validateToolCall(

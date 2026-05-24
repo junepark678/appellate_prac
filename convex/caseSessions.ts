@@ -13,6 +13,7 @@ import {
   courtListenerSearchResultValidator,
   documentAnalysisValidator,
   documentAnalysisRecordValidator,
+  ecfEventAvailabilityValidator,
   ecfReceiptValidator,
   filingDraftValidator,
   filingSubmissionValidator,
@@ -25,8 +26,8 @@ import {
 import { generateActorWorkProductWithProvider } from '../src/domain/actors/orchestration'
 import {
   canAcceptActorWorkProduct,
-  generatedFilingToSubmission,
 } from '../src/domain/actors/work-products'
+import { applyAcceptedActorWorkProduct } from '../src/domain/actors/effects'
 import {
   applyToolCall,
   createInitialSession,
@@ -49,8 +50,11 @@ import type {
   UploadedDocument,
 } from '../src/domain/types'
 import type { DocumentAnalysis } from '../src/modules/types'
-import { submitEcfFiling as submitEcfFilingDomain } from '../src/domain/filing/ecf'
-import { preflightFilingSubmission } from '../src/domain/rules/executable-constraints'
+import {
+  getAvailableEcfEventDefinitions,
+  preflightEcfFiling,
+  submitEcfFiling as submitEcfFilingDomain,
+} from '../src/domain/filing/ecf'
 import {
   advanceProcedure as advanceProcedureStateMachine,
   inferProcedureState,
@@ -1109,7 +1113,20 @@ export const preflightFiling = query({
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    return preflightFilingSubmission(session, args.submission as FilingSubmission)
+    return preflightEcfFiling(session, args.submission as FilingSubmission)
+  },
+})
+
+export const getAvailableEcfEvents = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.array(ecfEventAvailabilityValidator),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    return getAvailableEcfEventDefinitions(session)
   },
 })
 
@@ -1701,6 +1718,7 @@ export const acceptActorWorkProduct = mutation({
     session: caseSessionValidator,
     workProduct: actorWorkProductValidator,
     receipt: v.union(ecfReceiptValidator, v.null()),
+    validationReason: v.optional(v.string()),
   }),
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
@@ -1725,27 +1743,62 @@ export const acceptActorWorkProduct = mutation({
     const acceptance = canAcceptActorWorkProduct(session, product)
     if (!acceptance.accepted) {
       await ctx.db.patch(productDoc._id, { status: 'rejected' })
-      throw new Error(
+      const validationReason =
         acceptance.validationIssues.map((issue) => issue.message).join(' ') ||
-          'Actor work product failed deterministic validation.',
-      )
+        'Actor work product failed deterministic validation.'
+      const rejectedSession = {
+        ...session,
+        actorWorkProducts: session.actorWorkProducts?.map((candidate) =>
+          candidate.id === product.id ? { ...candidate, status: 'rejected' as const } : candidate,
+        ),
+      }
+      return {
+        session: rejectedSession,
+        workProduct: {
+          ...product,
+          status: 'rejected' as const,
+          validationIssues: acceptance.validationIssues,
+        },
+        receipt: null,
+        validationReason,
+      }
     }
 
-    let nextSession = session
-    let receipt: ReturnType<typeof submitEcfFilingDomain>['receipt'] = null
-    const submission = generatedFilingToSubmission(session, product)
-    if (submission) {
-      const result = submitEcfFilingDomain(session, submission)
-      if (!result.preflight.accepted) {
-        await ctx.db.patch(productDoc._id, { status: 'rejected' })
-        throw new Error(result.preflight.issues.map((issue) => issue.message).join(' '))
+    let effect: ReturnType<typeof applyAcceptedActorWorkProduct>
+    try {
+      effect = applyAcceptedActorWorkProduct(session, product)
+    } catch (error) {
+      await ctx.db.patch(productDoc._id, { status: 'rejected' })
+      const validationReason =
+        error instanceof Error ? error.message : 'Actor work product effect failed.'
+      const rejectedSession = {
+        ...session,
+        actorWorkProducts: session.actorWorkProducts?.map((candidate) =>
+          candidate.id === product.id ? { ...candidate, status: 'rejected' as const } : candidate,
+        ),
       }
-      nextSession = transitionAfterFiling(result.session)
-      receipt = result.receipt
+      return {
+        session: rejectedSession,
+        workProduct: {
+          ...product,
+          status: 'rejected' as const,
+          validationIssues: [
+            {
+              severity: 'error' as const,
+              code: 'actor_effect_failed',
+              message: validationReason,
+              ruleRefs: [],
+              cureSuggestion: 'Regenerate or edit the actor work product before accepting it.',
+            },
+          ],
+        },
+        receipt: null,
+        validationReason,
+      }
     }
 
     await ctx.db.patch(productDoc._id, { status: 'accepted' })
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, effect.session)
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -1754,7 +1807,7 @@ export const acceptActorWorkProduct = mutation({
         workProductId: productDoc._id,
         kind: productDoc.kind,
         actorId: productDoc.actorId,
-        convertedToFiling: Boolean(submission),
+        convertedToFiling: Boolean(effect.receipt),
       },
       user._id,
     )
@@ -1766,7 +1819,7 @@ export const acceptActorWorkProduct = mutation({
         status: 'accepted' as const,
         validationIssues: acceptance.validationIssues,
       },
-      receipt,
+      receipt: effect.receipt ?? null,
     }
   },
 })

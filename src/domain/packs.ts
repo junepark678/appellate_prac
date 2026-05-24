@@ -14,6 +14,9 @@ const usCourtsFrapSource =
   'https://www.uscourts.gov/forms-rules/current-rules-practice-procedure/federal-rules-appellate-procedure'
 
 const ca4RulesSource = 'https://www.ca4.uscourts.gov/LocalRules/toc.html'
+const ca4LocalRule31Source = 'https://www.ca4.uscourts.gov/LocalRules/LocalRules.3.22.html'
+const ca4EcfEventsSource =
+  'https://www.ca4.uscourts.gov/caseinformationefiling/efiling_cm-ecf/filingevents'
 
 export const ruleRefs = {
   frap3: {
@@ -159,7 +162,7 @@ export const ruleRefs = {
   ca4Local31: {
     ruleId: 'CA4_LR_31',
     label: '4th Cir. Loc. R. 31',
-    sourceUrl: ca4RulesSource,
+    sourceUrl: ca4LocalRule31Source,
   },
   ca4Local32: {
     ruleId: 'CA4_LR_32',
@@ -222,7 +225,200 @@ const pdfRequirement = (id: string, label: string, maxPages?: number) => ({
   maxPages,
 })
 
-export const filingEvents: FilingEvent[] = [
+type EcfEventMetadata = Pick<
+  FilingEvent,
+  | 'ecfMenuPath'
+  | 'ecfCategory'
+  | 'courtEventCode'
+  | 'requiresRelatedEntry'
+  | 'requiresReliefText'
+  | 'feeBehavior'
+  | 'serviceBehavior'
+  | 'partySelectionMode'
+  | 'receiptTemplateId'
+>
+
+type BaseFilingEvent = Omit<FilingEvent, keyof EcfEventMetadata>
+
+const ecfEventMetadata = (
+  menuPath: string[],
+  category: FilingEvent['ecfCategory'],
+  courtEventCode: string,
+  options: Partial<
+    Pick<
+      EcfEventMetadata,
+      | 'requiresRelatedEntry'
+      | 'requiresReliefText'
+      | 'feeBehavior'
+      | 'serviceBehavior'
+      | 'partySelectionMode'
+      | 'receiptTemplateId'
+    >
+  > = {},
+): EcfEventMetadata => ({
+  ecfMenuPath: menuPath,
+  ecfCategory: category,
+  courtEventCode,
+  requiresRelatedEntry: options.requiresRelatedEntry ?? false,
+  requiresReliefText: options.requiresReliefText ?? category === 'motion',
+  feeBehavior: options.feeBehavior ?? 'none',
+  serviceBehavior: options.serviceBehavior ?? 'cm_ecf',
+  partySelectionMode: options.partySelectionMode ?? 'single',
+  receiptTemplateId: options.receiptTemplateId ?? 'standard_noda',
+})
+
+const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
+  notice_of_appeal: ecfEventMetadata(
+    ['Case Opening', 'Notice of Appeal'],
+    'case_opening',
+    'NOA',
+    { feeBehavior: 'required', receiptTemplateId: 'case_opening_noda' },
+  ),
+  appearance_disclosure: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Appearance of counsel / Disclosure statement'],
+    'appearance',
+    'APPEAR_DISC',
+  ),
+  docketing_statement: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Docketing statement (civil/agency)'],
+    'appearance',
+    'DOCKET_STMT_CIV',
+  ),
+  transcript_order_acknowledgment: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Transcript order form'],
+    'appearance',
+    'TRANSCRIPT_ACK',
+  ),
+  motion: ecfEventMetadata(['Motions, Responses & Replies', 'MOTION'], 'motion', 'MOTION', {
+    requiresReliefText: true,
+  }),
+  motion_response: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'RESPONSE/ANSWER (to motion or request)'],
+    'response',
+    'MOTION_RESPONSE',
+    { requiresRelatedEntry: true },
+  ),
+  motion_stay_pending_appeal: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion to stay or injunction pending appeal'],
+    'motion',
+    'MOTION_STAY',
+    { requiresReliefText: true, requiresRelatedEntry: true },
+  ),
+  opening_brief: ecfEventMetadata(
+    ['Briefing Documents', 'BRIEF (formal briefs not under seal)'],
+    'brief',
+    'OPENING_BRIEF',
+  ),
+  joint_appendix: ecfEventMetadata(
+    ['Briefing Documents', 'Joint Appendix'],
+    'appendix',
+    'JOINT_APPENDIX',
+  ),
+  appellee_brief: ecfEventMetadata(
+    ['Briefing Documents', 'BRIEF (formal briefs not under seal)'],
+    'brief',
+    'APPELLEE_BRIEF',
+  ),
+  reply_brief: ecfEventMetadata(
+    ['Briefing Documents', 'BRIEF (formal briefs not under seal)'],
+    'brief',
+    'REPLY_BRIEF',
+  ),
+  amicus_notice_or_consent: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Notice / Consent statement'],
+    'amicus',
+    'AMICUS_NOTICE',
+    { serviceBehavior: 'mixed' },
+  ),
+  motion_for_leave_to_file_amicus: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion for leave to file amicus brief'],
+    'motion',
+    'AMICUS_LEAVE',
+    { requiresReliefText: true, serviceBehavior: 'mixed' },
+  ),
+  response_to_amicus_motion: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'RESPONSE/ANSWER (to motion or request)'],
+    'response',
+    'AMICUS_RESPONSE',
+    { requiresRelatedEntry: true },
+  ),
+  amicus_brief: ecfEventMetadata(
+    ['Briefing Documents', 'Amicus Curiae/Intervenor Brief'],
+    'amicus',
+    'AMICUS_BRIEF',
+    { serviceBehavior: 'mixed' },
+  ),
+  corrected_brief: ecfEventMetadata(
+    ['Briefing Documents', 'Corrected Brief'],
+    'brief',
+    'CORRECTED_BRIEF',
+    { requiresRelatedEntry: true },
+  ),
+  rule_28j_letter: ecfEventMetadata(
+    ['Briefing Documents', 'Supplemental authorities'],
+    'brief',
+    'FRAP_28J',
+  ),
+  motion_extend_time: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion to extend time'],
+    'motion',
+    'MOTION_EXT_TIME',
+    { requiresReliefText: true, requiresRelatedEntry: true },
+  ),
+  motion_overlength_brief: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion to file overlength brief'],
+    'motion',
+    'MOTION_OVERLENGTH',
+    { requiresReliefText: true },
+  ),
+  motion_to_seal: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion to seal'],
+    'sealed',
+    'MOTION_SEAL',
+    {
+      requiresReliefText: true,
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  sealed_filing_acknowledgment: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'SEALED DOCUMENT (court access only)'],
+    'sealed',
+    'SEALED_DOCUMENT',
+    {
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  mandate_stay_motion: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'Motion to stay mandate'],
+    'post_disposition',
+    'MANDATE_STAY',
+    { requiresReliefText: true, requiresRelatedEntry: true },
+  ),
+  petition_rehearing: ecfEventMetadata(
+    ['Rehearing Petitions & Answers', 'Petition for rehearing by panel or en banc'],
+    'post_disposition',
+    'REHEARING_PETITION',
+  ),
+  bill_of_costs: ecfEventMetadata(
+    ['Bills of Cost & Objections', 'Bill of Costs'],
+    'post_disposition',
+    'BILL_COSTS',
+  ),
+}
+
+const withEcfMetadata = (event: BaseFilingEvent): FilingEvent => ({
+  ...event,
+  ...(ecfMetadataByEventId[event.id] ??
+    ecfEventMetadata(
+      ['Other Filings', event.label],
+      'motion',
+      event.id.toUpperCase(),
+    )),
+})
+
+const baseFilingEvents: BaseFilingEvent[] = [
   {
     id: 'notice_of_appeal',
     label: 'Notice of Appeal',
@@ -725,6 +921,8 @@ export const filingEvents: FilingEvent[] = [
   },
 ]
 
+export const filingEvents: FilingEvent[] = baseFilingEvents.map(withEcfMetadata)
+
 const frapItems: RuleItem[] = [
   {
     jurisdiction: 'us-federal',
@@ -976,6 +1174,22 @@ const frapItems: RuleItem[] = [
 const ca4Items: RuleItem[] = [
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_ECF_EVENTS',
+    topic: 'ecf_event_menu',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Filing Events & Reliefs',
+    sourceUrl: ca4EcfEventsSource,
+    plainText:
+      'Fourth Circuit CM/ECF publishes event categories for forms, motions, briefing documents, argument notices, judgments, rehearing, bills of cost, and other filings.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'court-specific CM/ECF event menu' },
+      { kind: 'attachment_type', value: 'event-specific document assembly' },
+    ],
+    simulatorNotes:
+      'The CM/ECF wizard uses these public event categories for menu paths and receipt labels.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_3',
     topic: 'notice_and_docketing_statement',
     effectiveFrom: '2026-03-23',
@@ -1118,13 +1332,15 @@ const ca4Items: RuleItem[] = [
     topic: 'briefing_deadlines',
     effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
-    sourceUrl: ca4RulesSource,
-    plainText: 'Fourth Circuit local practice supplements federal briefing schedules.',
+    sourceUrl: ca4LocalRule31Source,
+    plainText:
+      'A formal briefing schedule is sent when the record is received or the clerk determines the record is complete, whichever occurs first; the briefing order controls brief and joint appendix timing.',
     structuredConstraints: [
       { kind: 'deadline', value: 'local briefing schedule handling' },
+      { kind: 'event_sequence', value: 'briefing schedule after record completion' },
     ],
     simulatorNotes:
-      'The default opening-brief deadline cites both FRAP and Fourth Circuit practice.',
+      'The simulator issues the opening-brief schedule only after docketing and transcript/record-ordering prerequisites are complete or clerk-determined complete.',
   },
   {
     jurisdiction: 'us-federal-ca4',
@@ -1335,7 +1551,11 @@ const aiActors: AiActor[] = [
     label: 'Potential Amicus',
     role: 'amicus',
     authorityScope: ['motion for leave', 'amicus brief'],
-    allowedTools: ['fileCounterpartyDocument', 'recommendAmicusParticipation'],
+    allowedTools: [
+      'fileCounterpartyDocument',
+      'draftCounterpartyFiling',
+      'recommendAmicusParticipation',
+    ],
   },
 ]
 
