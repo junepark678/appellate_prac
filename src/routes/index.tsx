@@ -739,34 +739,35 @@ function createEmptyDraft(session: CaseSession, eventId: string): FilingDraft {
 }
 
 function createTrialDocket(session: CaseSession): TrialDocket {
+  const { scenario } = session
   return {
-    caption: session.scenario.shortCaption,
-    court: session.scenario.lowerTribunal,
+    caption: scenario.shortCaption,
+    court: scenario.lowerTribunal,
     docketNumber: '1:25-cv-01482',
     entries: [
       {
         entryNumber: 1,
         filedAt: '2025-08-18T14:32:00.000Z',
         title: 'Complaint',
-        text: 'Plaintiff filed a civil complaint alleging retaliation after reporting compliance irregularities.',
+        text: `Opening pleading filed in ${scenario.shortCaption}. Nature of suit: ${scenario.natureOfSuit}.`,
       },
       {
         entryNumber: 18,
         filedAt: '2025-11-03T16:20:00.000Z',
-        title: 'Motion for Summary Judgment',
-        text: 'Defendant moved for summary judgment on causation, pretext, and damages.',
+        title: 'Dispositive Motion',
+        text: `A dispositive motion was filed in the lower tribunal. Posture: ${scenario.proceduralPosture}`,
       },
       {
         entryNumber: 31,
         filedAt: '2026-02-06T19:45:00.000Z',
         title: 'Memorandum Opinion and Order',
-        text: 'The district court granted summary judgment for defendant and entered judgment on all claims.',
+        text: `The lower tribunal issued an order creating the appellate posture for ${scenario.shortCaption}.`,
       },
       {
         entryNumber: 32,
         filedAt: '2026-02-06T19:48:00.000Z',
         title: 'Civil Judgment',
-        text: 'Judgment entered in favor of Meridian Analytics, Inc. and against Maya Jordan.',
+        text: `Final judgment entered in the ${scenario.natureOfSuit.toLowerCase()} matter.`,
       },
     ],
   }

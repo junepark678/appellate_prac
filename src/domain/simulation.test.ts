@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { courtPacks } from './packs'
+import { courtPacks, getScenario, scenarios } from './packs'
 import {
   applyToolCall,
   createInitialSession,
@@ -61,6 +61,27 @@ describe('simulation engine', () => {
     const trialPack = courtPacks.find((pack) => pack.id === 'future-state-trial-template')
     expect(trialPack?.courtLevel).toBe('trial')
     expect(trialPack?.filingEvents).toHaveLength(0)
+  })
+
+  it('loads the synthetic employment scenario from seed data', () => {
+    const scenario = getScenario('synthetic-employment-retaliation')
+    expect(scenario.title).toBe('Retaliation Summary Judgment Appeal')
+  })
+
+  it('throws for unknown scenario IDs', () => {
+    expect(() => getScenario('unknown-scenario')).toThrow('Unknown scenario')
+  })
+
+  it('creates initial sessions from the default seeded scenario', () => {
+    const session = createInitialSession()
+    expect(session.scenario.id).toBe('synthetic-employment-retaliation')
+  })
+
+  it('keeps every seed scenario attached to an existing court pack', () => {
+    const courtPackIds = new Set(courtPacks.map((pack) => pack.id))
+    expect(scenarios.every((scenario) => courtPackIds.has(scenario.courtPackId))).toBe(
+      true,
+    )
   })
 
   it('rejects a reply brief before an appellee brief', () => {

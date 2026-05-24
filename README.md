@@ -64,7 +64,7 @@ Convex deployment env vars, not in client-visible `VITE_` variables.
 - PDF upload metadata handling in the browser.
 - Persisted signed-in sessions backed by Convex.
 - Manual “next expected document” simulator advancement through Convex mutations.
-- Feature-gated OpenRouter procedural advancement through authenticated Convex actions.
+- Feature-gated live AI procedural advancement through authenticated Convex actions.
 - Feature-gated CourtListener/RECAP docket search and source import through Convex.
 - Clerk authentication with signed-in simulator access and signed-out entry actions.
 - Convex schema for users, rule packs, case sessions, filings, documents, docket entries, AI runs, and assessments.
@@ -75,7 +75,7 @@ Convex deployment env vars, not in client-visible `VITE_` variables.
 - `src/domain/types.ts` - jurisdiction-neutral domain model.
 - `src/domain/packs.ts` - seed Fourth Circuit/FRAP court and rule packs.
 - `src/domain/simulation.ts` - deterministic filing, docket, deadline, AI-tool validation engine.
-- `src/integrations/openrouter.ts` - low-level OpenRouter tool-call adapter.
+- `src/integrations/openrouter.ts` - current low-level AI chat-completions adapter.
 - `src/integrations/courtlistener.ts` - low-level CourtListener/RECAP search adapter.
 - `convex/integrations.ts` - authenticated Convex actions for live integrations.
 - `convex/auth.config.ts` - Clerk JWT provider configuration for Convex.
@@ -89,6 +89,6 @@ To connect live services:
 - Set `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` from `.env.example` for real Clerk authentication.
 - Create a Clerk JWT template named `convex` with audience `convex`, then set `CLERK_JWT_ISSUER_DOMAIN` in Convex.
 - Set `VITE_CONVEX_URL` for the React app.
-- Set `VITE_ENABLE_OPENROUTER=true`, plus Convex env vars `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`, to enable the OpenRouter event button.
+- Set `VITE_ENABLE_OPENROUTER=true`, plus Convex env vars `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`, to enable live AI events through the configured chat-completions provider.
 - Set `VITE_ENABLE_COURTLISTENER=true`, plus Convex env var `COURTLISTENER_TOKEN`, to enable live CourtListener requests.
 - Keep AI-generated procedural actions behind `validateToolCall` before writing any docket entry.
