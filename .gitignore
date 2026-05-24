@@ -1,0 +1,19 @@
+node_modules
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.env.local
+.nitro
+.tanstack/
+.wrangler
+.vercel/
+.output
+.vinxi
+__unconfig*
+todos.json
+.convex/
+
+# clerk configuration (can include secrets)
+/.clerk/

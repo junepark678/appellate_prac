@@ -1,0 +1,4 @@
+{
+  "installCommand": "bun install --frozen-lockfile",
+  "buildCommand": "DEPLOY_TARGET=vercel bun run release:vercel"
+}

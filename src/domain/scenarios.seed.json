@@ -1,0 +1,36 @@
+[
+  {
+    "id": "synthetic-employment-retaliation",
+    "title": "Retaliation Summary Judgment Appeal",
+    "source": "synthetic",
+    "courtPackId": "us-federal-ca4-civil-appeal",
+    "shortCaption": "Jordan v. Meridian Analytics, Inc.",
+    "lowerTribunal": "U.S. District Court for the Eastern District of Virginia",
+    "natureOfSuit": "Civil Rights - Employment",
+    "proceduralPosture": "District court granted summary judgment for employer on causation and pretext.",
+    "issuesPresented": [
+      "Whether temporal proximity and comparator evidence created a genuine dispute.",
+      "Whether the district court applied the correct summary judgment standard.",
+      "Whether evidentiary objections preserved below limit the appellate record."
+    ],
+    "meritsRecord": [
+      "Employee reported compliance irregularities and was terminated six weeks later.",
+      "Employer cited a reduction in force and documented performance concerns.",
+      "Two comparator employees were retained despite similar audit findings.",
+      "The district court excluded a late-filed declaration in a footnote."
+    ]
+  },
+  {
+    "id": "recap-import-placeholder",
+    "title": "Import from CourtListener / RECAP",
+    "source": "recap_import",
+    "courtPackId": "us-federal-ca4-civil-appeal",
+    "shortCaption": "Selected public case",
+    "lowerTribunal": "Imported district court",
+    "natureOfSuit": "Selected during import",
+    "proceduralPosture": "Search CourtListener, pick a case, and import available docket entries and documents.",
+    "issuesPresented": ["Generated from imported docket and opinion material."],
+    "meritsRecord": ["Imported source materials remain linked with provenance."],
+    "sourceCaseUrl": "https://www.courtlistener.com/recap/"
+  }
+]

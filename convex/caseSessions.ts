@@ -1,0 +1,934 @@
+import { v } from 'convex/values'
+
+import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
+import { api, internal } from './_generated/api'
+import type { Doc, Id } from './_generated/dataModel'
+import type { MutationCtx, QueryCtx } from './_generated/server'
+import { getCurrentUser, requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
+import {
+  caseSessionSummaryValidator,
+  caseSessionValidator,
+  courtListenerSearchResultValidator,
+  filingDraftValidator,
+  toolCallValidator,
+  trialDocketValidator,
+} from './validators'
+import {
+  applyToolCall,
+  createInitialSession,
+  fileDraft,
+  nextExpectedToolCall,
+  validateFiling,
+  validateToolCall,
+} from '../src/domain/simulation'
+import { requestProceduralToolCall } from '../src/integrations/openrouter'
+import type {
+  CaseSession,
+  FilingRecord,
+  Scenario,
+  UploadedDocument,
+} from '../src/domain/types'
+import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
+import scenarioSeed from '../src/domain/scenarios.seed.json'
+
+type TrialDocketEntry = {
+  entryNumber: number
+  filedAt: string
+  title: string
+  text: string
+}
+
+type TrialDocket = {
+  caption: string
+  court: string
+  docketNumber: string
+  sourceUrl?: string
+  entries: TrialDocketEntry[]
+}
+
+type ReadCtx = QueryCtx | MutationCtx
+type WriteCtx = MutationCtx
+
+const defaultScenarioKey = 'synthetic-employment-retaliation'
+const openRouterCooldownMs = 10_000
+const estimatedOpenRouterCostCents = 1
+const seedScenarios = scenarioSeed as Scenario[]
+
+function createdMonth(isoDate: string) {
+  return isoDate.slice(0, 7)
+}
+
+function makeRecordId(prefix: string, count: number) {
+  return `${prefix}_${String(count + 1).padStart(4, '0')}`
+}
+
+function scenarioFromDoc(doc: Doc<'scenarios'>): Scenario {
+  const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
+  return {
+    id: doc.scenarioKey,
+    title: doc.title,
+    source: doc.source,
+    courtPackId: doc.courtPackId,
+    shortCaption: doc.shortCaption,
+    lowerTribunal: doc.lowerTribunal,
+    natureOfSuit: doc.natureOfSuit,
+    proceduralPosture: doc.proceduralPosture,
+    issuesPresented: doc.issuesPresented,
+    meritsRecord: doc.meritsRecord,
+    ...sourceCaseUrl,
+  }
+}
+
+async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
+  const existing = await ctx.db
+    .query('scenarios')
+    .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+    .unique()
+  if (existing) return existing
+
+  const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
+  if (!bundled) {
+    throw new Error(`Unknown scenario: ${scenarioKey}`)
+  }
+
+  const scenarioId = await ctx.db.insert('scenarios', {
+    scenarioKey: bundled.id,
+    title: bundled.title,
+    source: bundled.source,
+    courtPackId: bundled.courtPackId,
+    shortCaption: bundled.shortCaption,
+    lowerTribunal: bundled.lowerTribunal,
+    natureOfSuit: bundled.natureOfSuit,
+    proceduralPosture: bundled.proceduralPosture,
+    issuesPresented: bundled.issuesPresented,
+    meritsRecord: bundled.meritsRecord,
+    ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
+    published: true,
+  })
+  const scenario = await ctx.db.get(scenarioId)
+  if (!scenario) {
+    throw new Error('Unable to seed scenario')
+  }
+  return scenario
+}
+
+async function requireAuthorizedSessionDoc(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+  userId: Id<'users'>,
+) {
+  const caseSession = await ctx.db.get(caseSessionId)
+  if (!caseSession || caseSession.userId !== userId) {
+    throw new Error('Case session not found')
+  }
+  return caseSession
+}
+
+function documentFromDoc(doc: Doc<'documents'>): UploadedDocument {
+  return {
+    id: doc._id,
+    fileName: doc.fileName,
+    mimeType: doc.mimeType,
+    sizeBytes: doc.sizeBytes,
+    ...(typeof doc.pageCount === 'number' ? { pageCount: doc.pageCount } : {}),
+    extractedSignals: doc.extractedSignals,
+  }
+}
+
+async function assembleCaseSession(
+  ctx: ReadCtx,
+  caseSession: Doc<'caseSessions'>,
+): Promise<CaseSession> {
+  const scenarioDoc = await ctx.db.get(caseSession.scenarioId)
+  if (!scenarioDoc) {
+    throw new Error('Scenario not found for case session')
+  }
+
+  const [participants, filings, docketEntries, deadlines, assessments] = await Promise.all([
+    ctx.db
+      .query('participants')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('filings')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('docketEntries')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('deadlines')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('assessments')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+  ])
+
+  const filingRecords = await Promise.all(
+    filings
+      .slice()
+      .sort((a, b) => a.filedAt.localeCompare(b.filedAt))
+      .map(async (filing): Promise<FilingRecord> => {
+        const documents = await Promise.all(filing.documentIds.map((id) => ctx.db.get(id)))
+        const persistedDocuments = documents.filter(
+          (document): document is Doc<'documents'> => document !== null,
+        )
+        return {
+          id: filing._id,
+          eventId: filing.eventId,
+          participantRole: filing.participantRole,
+          title: filing.title,
+          documents: persistedDocuments.map(documentFromDoc),
+          certificateOfService: filing.certificateOfService,
+          certificateOfCompliance: filing.certificateOfCompliance,
+          sealed: filing.sealed,
+          notes: filing.notes,
+          filedAt: filing.filedAt,
+          outcome: filing.outcome,
+          validationIssues: filing.validationIssues,
+        }
+      }),
+  )
+
+  const assessment = assessments[0]
+
+  return {
+    id: caseSession._id,
+    scenario: scenarioFromDoc(scenarioDoc),
+    courtPackId: caseSession.courtPackId,
+    status: caseSession.status,
+    simulatedDate: caseSession.simulatedDate,
+    participants: participants.map((participant) => ({
+      id: participant._id,
+      displayName: participant.displayName,
+      role: participant.role,
+    })),
+    docketEntries: docketEntries
+      .slice()
+      .sort((a, b) => a.entryNumber - b.entryNumber)
+      .map((entry) => ({
+        id: entry._id,
+        entryNumber: entry.entryNumber,
+        filedAt: entry.filedAt,
+        actorRole: entry.actorRole,
+        title: entry.title,
+        text: entry.text,
+        ...(entry.filingId ? { filingId: entry.filingId } : {}),
+        ruleRefs: entry.ruleRefs,
+      })),
+    deadlines: deadlines
+      .slice()
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+      .map((deadline) => ({
+        id: deadline._id,
+        label: deadline.label,
+        dueDate: deadline.dueDate,
+        targetEventId: deadline.targetEventId,
+        sourceEntryId: deadline.sourceEntryId ?? 'manual',
+        status: deadline.status,
+        sourceRuleRefs: deadline.sourceRuleRefs,
+      })),
+    filings: filingRecords,
+    ...(assessment
+      ? {
+          assessment: {
+            disposition: assessment.disposition,
+            score: assessment.score,
+            proceduralFindings: assessment.proceduralFindings,
+            meritsFindings: assessment.meritsFindings,
+            nextPracticeTargets: assessment.nextPracticeTargets,
+          },
+        }
+      : {}),
+  }
+}
+
+async function deleteExistingSessionState(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  const [participants, documents, filings, docketEntries, deadlines, assessments] =
+    await Promise.all([
+      ctx.db
+        .query('participants')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('filings')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('docketEntries')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('deadlines')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('assessments')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+    ])
+
+  await Promise.all(
+    [...participants, ...documents, ...filings, ...docketEntries, ...deadlines, ...assessments].map(
+      (doc) => ctx.db.delete(doc._id),
+    ),
+  )
+}
+
+async function replaceSessionState(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+  session: CaseSession,
+) {
+  await ctx.db.patch(caseSessionId, {
+    status: session.status,
+    simulatedDate: session.simulatedDate,
+    courtPackId: session.courtPackId,
+  })
+  await deleteExistingSessionState(ctx, caseSessionId)
+
+  await Promise.all(
+    session.participants.map((participant) =>
+      ctx.db.insert('participants', {
+        caseSessionId,
+        displayName: participant.displayName,
+        role: participant.role,
+      }),
+    ),
+  )
+
+  const filingIdMap = new Map<string, Id<'filings'>>()
+  for (const filing of session.filings) {
+    const documentIds: Array<Id<'documents'>> = []
+    for (const document of filing.documents) {
+      const documentId = await ctx.db.insert('documents', {
+        caseSessionId,
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        sizeBytes: document.sizeBytes,
+        ...(typeof document.pageCount === 'number' ? { pageCount: document.pageCount } : {}),
+        extractedSignals: document.extractedSignals,
+      })
+      documentIds.push(documentId)
+    }
+
+    const filingId = await ctx.db.insert('filings', {
+      caseSessionId,
+      eventId: filing.eventId,
+      participantRole: filing.participantRole,
+      title: filing.title,
+      documentIds,
+      certificateOfService: filing.certificateOfService,
+      certificateOfCompliance: filing.certificateOfCompliance,
+      sealed: filing.sealed,
+      notes: filing.notes,
+      filedAt: filing.filedAt,
+      outcome: filing.outcome,
+      validationIssues: filing.validationIssues,
+    })
+    filingIdMap.set(filing.id, filingId)
+  }
+
+  const docketEntryIdMap = new Map<string, Id<'docketEntries'>>()
+  for (const entry of session.docketEntries) {
+    const filingId = entry.filingId ? filingIdMap.get(entry.filingId) : undefined
+    const docketEntryId = await ctx.db.insert('docketEntries', {
+      caseSessionId,
+      entryNumber: entry.entryNumber,
+      filedAt: entry.filedAt,
+      actorRole: entry.actorRole,
+      title: entry.title,
+      text: entry.text,
+      ...(filingId ? { filingId } : {}),
+      ruleRefs: entry.ruleRefs,
+    })
+    docketEntryIdMap.set(entry.id, docketEntryId)
+  }
+
+  for (const deadline of session.deadlines) {
+    const sourceEntryId = docketEntryIdMap.get(deadline.sourceEntryId)
+    await ctx.db.insert('deadlines', {
+      caseSessionId,
+      label: deadline.label,
+      dueDate: deadline.dueDate,
+      targetEventId: deadline.targetEventId,
+      ...(sourceEntryId ? { sourceEntryId } : {}),
+      status: deadline.status,
+      sourceRuleRefs: deadline.sourceRuleRefs,
+    })
+  }
+
+  if (session.assessment) {
+    await ctx.db.insert('assessments', {
+      caseSessionId,
+      disposition: session.assessment.disposition,
+      score: session.assessment.score,
+      proceduralFindings: session.assessment.proceduralFindings,
+      meritsFindings: session.assessment.meritsFindings,
+      nextPracticeTargets: session.assessment.nextPracticeTargets,
+    })
+  }
+
+  const updated = await ctx.db.get(caseSessionId)
+  if (!updated) {
+    throw new Error('Case session was removed while saving state')
+  }
+  return assembleCaseSession(ctx, updated)
+}
+
+function withRejectedFilingAudit(
+  previousSession: CaseSession,
+  draft: Parameters<typeof fileDraft>[1],
+  nextSession: CaseSession,
+) {
+  const validationIssues = validateFiling(previousSession, draft)
+  if (!validationIssues.some((issue) => issue.severity === 'error')) {
+    return nextSession
+  }
+
+  const rejectedFiling: FilingRecord = {
+    ...draft,
+    id: makeRecordId('filing', previousSession.filings.length),
+    filedAt: nextSession.simulatedDate,
+    outcome: 'rejected',
+    validationIssues,
+  }
+
+  return {
+    ...nextSession,
+    filings: [...nextSession.filings, rejectedFiling],
+  }
+}
+
+function sourceUrlForCourtListenerResult(result: CourtListenerSearchResult) {
+  if (result.absolute_url) {
+    return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+  }
+  if (result.docket_id) {
+    return `https://www.courtlistener.com/docket/${result.docket_id}/`
+  }
+  return 'https://www.courtlistener.com/'
+}
+
+function stripHtml(value: string) {
+  return value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function createImportedTrialDocket(
+  session: CaseSession,
+  result: CourtListenerSearchResult,
+  sourceUrl: string,
+): TrialDocket {
+  return {
+    caption: result.caseNameFull ?? result.caseName ?? session.scenario.shortCaption,
+    court: result.court ?? session.scenario.lowerTribunal,
+    docketNumber: result.docketNumber ?? `CourtListener docket ${result.docket_id ?? result.id}`,
+    sourceUrl,
+    entries: [
+      {
+        entryNumber: 1,
+        filedAt: result.dateFiled
+          ? new Date(result.dateFiled).toISOString()
+          : session.simulatedDate,
+        title: 'Imported CourtListener Trial Docket',
+        text: result.snippet
+          ? stripHtml(result.snippet)
+          : 'Public docket metadata imported from CourtListener. Open the source docket for the complete live docket sheet.',
+      },
+    ],
+  }
+}
+
+function promptHashForSession(session: CaseSession) {
+  return [
+    session.id,
+    session.status,
+    session.docketEntries.length,
+    session.deadlines.length,
+    session.filings.length,
+  ].join(':')
+}
+
+function requireEnv(name: string) {
+  const value = process.env[name]
+  if (!value) {
+    throw new Error('Live AI is temporarily unavailable.')
+  }
+  return value
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+export const create = mutation({
+  args: {
+    scenarioId: v.optional(v.string()),
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const user = await upsertCurrentUserDoc(ctx)
+    const scenarioKey = args.scenarioId ?? defaultScenarioKey
+    const scenario = await ensureScenarioDoc(ctx, scenarioKey)
+    const initialSession = createInitialSession(scenario.scenarioKey)
+    const caseSessionId = await ctx.db.insert('caseSessions', {
+      scenarioId: scenario._id,
+      userId: user._id,
+      courtPackId: initialSession.courtPackId,
+      status: initialSession.status,
+      simulatedDate: initialSession.simulatedDate,
+    })
+
+    return replaceSessionState(ctx, caseSessionId, initialSession)
+  },
+})
+
+export const getForCurrentUser = query({
+  args: {
+    caseSessionId: v.optional(v.id('caseSessions')),
+  },
+  returns: v.union(caseSessionValidator, v.null()),
+  handler: async (ctx, args) => {
+    const { user } = await getCurrentUser(ctx)
+    if (!user) return null
+
+    if (args.caseSessionId) {
+      const caseSession = await ctx.db.get(args.caseSessionId)
+      if (!caseSession || caseSession.userId !== user._id) return null
+      return assembleCaseSession(ctx, caseSession)
+    }
+
+    const sessions = await ctx.db
+      .query('caseSessions')
+      .withIndex('by_user', (index) => index.eq('userId', user._id))
+      .collect()
+    const latest = sessions.sort((a, b) => b._creationTime - a._creationTime)[0]
+    return latest ? assembleCaseSession(ctx, latest) : null
+  },
+})
+
+export const listForCurrentUser = query({
+  args: {},
+  returns: v.array(caseSessionSummaryValidator),
+  handler: async (ctx) => {
+    const { user } = await getCurrentUser(ctx)
+    if (!user) return []
+
+    const sessions = await ctx.db
+      .query('caseSessions')
+      .withIndex('by_user', (index) => index.eq('userId', user._id))
+      .collect()
+    const scenarioIds = new Set(sessions.map((session) => session.scenarioId))
+    const scenarios = new Map<Id<'scenarios'>, Doc<'scenarios'>>()
+    await Promise.all(
+      [...scenarioIds].map(async (scenarioId) => {
+        const scenario = await ctx.db.get(scenarioId)
+        if (scenario) scenarios.set(scenarioId, scenario)
+      }),
+    )
+
+    return sessions
+      .slice()
+      .sort((a, b) => b._creationTime - a._creationTime)
+      .map((session) => {
+        const scenario = scenarios.get(session.scenarioId)
+        return {
+          id: session._id,
+          scenarioTitle: scenario?.title ?? 'Untitled scenario',
+          shortCaption: scenario?.shortCaption ?? 'Untitled case',
+          status: session.status,
+          simulatedDate: session.simulatedDate,
+          createdAt: session._creationTime,
+        }
+      })
+  },
+})
+
+export const submitFiling = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    draft: filingDraftValidator,
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const nextSession = withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft))
+    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+  },
+})
+
+export const advanceExpectedEvent = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const nextSession = applyToolCall(session, nextExpectedToolCall(session))
+    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+  },
+})
+
+export const importCourtListenerSource = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    result: courtListenerSearchResultValidator,
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    trialDocket: trialDocketValidator,
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const sourceUrl = sourceUrlForCourtListenerResult(args.result)
+    const trialDocket = createImportedTrialDocket(session, args.result, sourceUrl)
+    const importedAt = new Date().toISOString()
+
+    await ctx.db.insert('sourceCases', {
+      scenarioId: caseSessionDoc.scenarioId,
+      sourceSystem: 'courtlistener',
+      externalId: String(args.result.docket_id ?? args.result.id),
+      sourceUrl,
+      importedAt,
+      provenanceJson: JSON.stringify(args.result),
+    })
+    await ctx.db.insert('trialDocketImports', {
+      caseSessionId: caseSessionDoc._id,
+      caption: trialDocket.caption,
+      court: trialDocket.court,
+      docketNumber: trialDocket.docketNumber,
+      ...(trialDocket.sourceUrl ? { sourceUrl: trialDocket.sourceUrl } : {}),
+      entriesJson: JSON.stringify(trialDocket.entries),
+      importedAt,
+    })
+
+    const nextSession = applyToolCall(session, {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'CourtListener Record Imported',
+      text: `Imported ${args.result.caseNameFull ?? args.result.caseName ?? 'CourtListener docket'} (${args.result.docketNumber ?? 'no docket number'}) from ${args.result.court ?? 'CourtListener'}. Source: ${sourceUrl}`,
+      ruleRefs: [
+        {
+          ruleId: `courtlistener-${args.result.docket_id ?? args.result.id}`,
+          label: 'CourtListener source',
+          sourceUrl,
+        },
+      ],
+    })
+
+    return {
+      session: await replaceSessionState(ctx, caseSessionDoc._id, nextSession),
+      trialDocket,
+    }
+  },
+})
+
+export const getTrialDocketForCurrentUser = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.union(trialDocketValidator, v.null()),
+  handler: async (ctx, args) => {
+    const { user } = await getCurrentUser(ctx)
+    if (!user) return null
+
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const imports = await ctx.db
+      .query('trialDocketImports')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
+      .collect()
+    const latest = imports.sort((a, b) => b._creationTime - a._creationTime)[0]
+    if (!latest) return null
+
+    return {
+      caption: latest.caption,
+      court: latest.court,
+      docketNumber: latest.docketNumber,
+      ...(latest.sourceUrl ? { sourceUrl: latest.sourceUrl } : {}),
+      entries: JSON.parse(latest.entriesJson) as TrialDocketEntry[],
+    }
+  },
+})
+
+export const getAiGateForCurrentUser = internalQuery({
+  args: {
+    nowIso: v.string(),
+    cooldownMs: v.number(),
+  },
+  returns: v.object({
+    allowed: v.boolean(),
+    reason: v.optional(v.string()),
+    budgetCents: v.number(),
+    spentCents: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const month = createdMonth(args.nowIso)
+    const runs = await ctx.db
+      .query('aiRuns')
+      .withIndex('by_user_month', (index) =>
+        index.eq('userId', user._id).eq('createdMonth', month),
+      )
+      .collect()
+    const spentCents = runs.reduce((sum, run) => sum + run.costCents, 0)
+    if (spentCents >= user.monthlyAiBudgetCents) {
+      return {
+        allowed: false,
+        reason: 'Live AI budget exhausted.',
+        budgetCents: user.monthlyAiBudgetCents,
+        spentCents,
+      }
+    }
+
+    const latestRun = runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    if (
+      latestRun &&
+      new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
+        args.cooldownMs
+    ) {
+      return {
+        allowed: false,
+        reason: 'Live AI cooldown is still active.',
+        budgetCents: user.monthlyAiBudgetCents,
+        spentCents,
+      }
+    }
+
+    return {
+      allowed: true,
+      budgetCents: user.monthlyAiBudgetCents,
+      spentCents,
+    }
+  },
+})
+
+export const recordAiRunForCurrentUser = internalMutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    actorId: v.string(),
+    model: v.string(),
+    promptHash: v.string(),
+    toolCallJson: v.string(),
+    accepted: v.boolean(),
+    issues: v.array(v.string()),
+    costCents: v.number(),
+    latencyMs: v.number(),
+    errorClass: v.optional(v.string()),
+    createdAt: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await ctx.db.insert('aiRuns', {
+      caseSessionId: args.caseSessionId,
+      userId: user._id,
+      actorId: args.actorId,
+      model: args.model,
+      provider: 'openrouter',
+      promptHash: args.promptHash,
+      toolCallJson: args.toolCallJson,
+      accepted: args.accepted,
+      issues: args.issues,
+      costCents: args.costCents,
+      latencyMs: args.latencyMs,
+      ...(args.errorClass ? { errorClass: args.errorClass } : {}),
+      createdMonth: createdMonth(args.createdAt),
+      createdAt: args.createdAt,
+    })
+    return null
+  },
+})
+
+export const applyLiveToolCallForCurrentUser = internalMutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    toolCall: toolCallValidator,
+    model: v.string(),
+    rawText: v.string(),
+    latencyMs: v.number(),
+    costCents: v.number(),
+    createdAt: v.string(),
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const validation = validateToolCall(session, args.toolCall)
+    await ctx.db.insert('aiRuns', {
+      caseSessionId: args.caseSessionId,
+      userId: user._id,
+      actorId: args.toolCall.actorId,
+      model: args.model,
+      provider: 'openrouter',
+      promptHash: promptHashForSession(session),
+      toolCallJson: args.rawText,
+      accepted: validation.accepted,
+      issues: validation.issues,
+      costCents: args.costCents,
+      latencyMs: args.latencyMs,
+      ...(!validation.accepted ? { errorClass: 'tool_validation_rejected' } : {}),
+      createdMonth: createdMonth(args.createdAt),
+      createdAt: args.createdAt,
+    })
+    if (!validation.accepted) {
+      console.warn('OpenRouter tool call rejected', {
+        caseSessionId: args.caseSessionId,
+        issues: validation.issues,
+      })
+      return session
+    }
+    const nextSession = applyToolCall(session, args.toolCall)
+    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+  },
+})
+
+export const advanceLiveEvent = action({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    toolCall: v.union(toolCallValidator, v.null()),
+    rawText: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    await requireIdentity(ctx)
+    const nowIso = new Date().toISOString()
+    const session = (await ctx.runQuery((api as any).caseSessions.getForCurrentUser, {
+      caseSessionId: args.caseSessionId,
+    })) as CaseSession | null
+    if (!session) {
+      throw new Error('Case session not found')
+    }
+
+    const gate = (await ctx.runQuery((internal as any).caseSessions.getAiGateForCurrentUser, {
+      nowIso,
+      cooldownMs: openRouterCooldownMs,
+    })) as { allowed: boolean; reason?: string }
+    if (!gate.allowed) {
+      throw new Error(gate.reason ?? 'Live AI is temporarily unavailable.')
+    }
+
+    const model = requireEnv('OPENROUTER_MODEL')
+    const startedAt = Date.now()
+
+    try {
+      const result = await requestProceduralToolCall(session, {
+        apiKey: requireEnv('OPENROUTER_API_KEY'),
+        model,
+        appUrl: process.env.OPENROUTER_APP_URL,
+        appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
+      })
+      const latencyMs = Date.now() - startedAt
+
+      if (!result.toolCall) {
+        console.warn('OpenRouter returned an invalid procedural tool call', {
+          caseSessionId: args.caseSessionId,
+        })
+        await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+          caseSessionId: args.caseSessionId,
+          actorId: 'openrouter',
+          model,
+          promptHash: promptHashForSession(session),
+          toolCallJson: result.rawText,
+          accepted: false,
+          issues: ['The AI service returned text, but no valid procedural event.'],
+          costCents: estimatedOpenRouterCostCents,
+          latencyMs,
+          errorClass: 'tool_validation_rejected',
+          createdAt: new Date().toISOString(),
+        })
+        return {
+          session,
+          toolCall: null,
+          rawText: result.rawText,
+        }
+      }
+
+      const validation = validateToolCall(session, result.toolCall)
+      if (!validation.accepted) {
+        console.warn('OpenRouter tool call rejected', {
+          caseSessionId: args.caseSessionId,
+          issues: validation.issues,
+        })
+        await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+          caseSessionId: args.caseSessionId,
+          actorId: result.toolCall.actorId,
+          model,
+          promptHash: promptHashForSession(session),
+          toolCallJson: result.rawText,
+          accepted: false,
+          issues: validation.issues.length
+            ? validation.issues
+            : ['Invalid procedural tool call.'],
+          costCents: estimatedOpenRouterCostCents,
+          latencyMs,
+          errorClass: 'tool_validation_rejected',
+          createdAt: new Date().toISOString(),
+        })
+        return {
+          session,
+          toolCall: null,
+          rawText: result.rawText,
+        }
+      }
+
+      const nextSession = (await ctx.runMutation(
+        (internal as any).caseSessions.applyLiveToolCallForCurrentUser,
+        {
+          caseSessionId: args.caseSessionId,
+          toolCall: result.toolCall,
+          model,
+          rawText: result.rawText,
+          latencyMs,
+          costCents: estimatedOpenRouterCostCents,
+          createdAt: new Date().toISOString(),
+        },
+      )) as CaseSession
+
+      return {
+        session: nextSession,
+        toolCall: result.toolCall,
+        rawText: result.rawText,
+      }
+    } catch (error) {
+      const latencyMs = Date.now() - startedAt
+      console.error('OpenRouter action failed', {
+        caseSessionId: args.caseSessionId,
+        error: errorMessage(error),
+      })
+      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+        caseSessionId: args.caseSessionId,
+        actorId: 'openrouter',
+        model,
+        promptHash: promptHashForSession(session),
+        toolCallJson: '',
+        accepted: false,
+        issues: [errorMessage(error)],
+        costCents: 0,
+        latencyMs,
+        errorClass: 'provider_error',
+        createdAt: new Date().toISOString(),
+      })
+      throw new Error('Live AI is temporarily unavailable.')
+    }
+  },
+})
