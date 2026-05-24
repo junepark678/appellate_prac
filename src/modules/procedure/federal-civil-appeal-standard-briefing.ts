@@ -1,0 +1,185 @@
+import type { CaseSession } from '../../domain/types'
+import { ruleRefs } from '../../domain/packs'
+import type { AvailableFilingEvent, ProcedureModule } from '../types'
+
+function activeFiledEventSet(session: CaseSession) {
+  return new Set(
+    session.filings
+      .filter((filing) => filing.outcome !== 'rejected')
+      .map((filing) => filing.eventId),
+  )
+}
+
+function eventAvailability(
+  eventId: string,
+  label: string,
+  available: boolean,
+  reasons: string[] = [],
+): AvailableFilingEvent {
+  return { eventId, label, available, reasons }
+}
+
+export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
+  id: 'federal-civil-appeal-standard-briefing',
+  domain: 'civil_appeal',
+  initialState: 'case_opened',
+  transitions: [
+    {
+      id: 'case-opening-notice',
+      fromState: 'case_opened',
+      toState: 'notice_validated',
+      filingEventId: 'notice_of_appeal',
+      guard: 'notice is timely and contains required notice signal',
+      effect: 'satisfy notice deadline and open disclosure branch',
+      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4],
+    },
+    {
+      id: 'disclosure-filed',
+      fromState: 'notice_validated',
+      toState: 'disclosure_complete',
+      filingEventId: 'appearance_disclosure',
+      guard: 'appearance/disclosure is filed by a party',
+      effect: 'enable briefing schedule',
+      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+    },
+    {
+      id: 'briefing-schedule',
+      fromState: 'disclosure_complete',
+      toState: 'opening-brief-due',
+      actorToolName: 'setDeadline',
+      guard: 'no opening brief deadline is already open',
+      effect: 'set opening brief and appendix deadline',
+      ruleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
+    },
+    {
+      id: 'opening-brief-filed',
+      fromState: 'opening-brief-due',
+      toState: 'appendix-review',
+      filingEventId: 'opening_brief',
+      guard: 'opening brief is accepted or accepted with deficiency',
+      effect: 'check appendix branch and appellee briefing readiness',
+      ruleRefs: [ruleRefs.frap28, ruleRefs.frap31, ruleRefs.frap32],
+    },
+    {
+      id: 'appendix-filed',
+      fromState: 'appendix-review',
+      toState: 'appellee-brief-due',
+      filingEventId: 'joint_appendix',
+      guard: 'joint appendix is filed',
+      effect: 'allow appellee brief',
+      ruleRefs: [ruleRefs.frap30, ruleRefs.ca4Local30],
+    },
+    {
+      id: 'motion-response-branch',
+      fromState: 'any-active-state',
+      toState: 'motion-response-due',
+      filingEventId: 'motion',
+      guard: 'motion requires response or panel referral',
+      effect: 'set motion response deadline',
+      ruleRefs: [ruleRefs.frap27, ruleRefs.ca4Local27],
+    },
+    {
+      id: 'motion-response-filed',
+      fromState: 'motion-response-due',
+      toState: 'prior-active-state',
+      filingEventId: 'motion_response',
+      guard: 'response is filed by an allowed role',
+      effect: 'return motion package to clerk or panel',
+      ruleRefs: [ruleRefs.frap27],
+    },
+    {
+      id: 'appellee-brief-filed',
+      fromState: 'appellee-brief-due',
+      toState: 'reply-brief-due',
+      filingEventId: 'appellee_brief',
+      guard: 'appellee brief is accepted',
+      effect: 'set reply deadline',
+      ruleRefs: [ruleRefs.frap31],
+    },
+    {
+      id: 'reply-brief-filed',
+      fromState: 'reply-brief-due',
+      toState: 'ready-for-submission',
+      filingEventId: 'reply_brief',
+      guard: 'reply brief is accepted after appellee brief',
+      effect: 'case is eligible for panel submission',
+      ruleRefs: [ruleRefs.frap31, ruleRefs.frap34],
+    },
+    {
+      id: 'panel-submission',
+      fromState: 'ready-for-submission',
+      toState: 'submitted',
+      actorToolName: 'submitToPanel',
+      guard: 'briefing sequence is complete',
+      effect: 'submit case to panel',
+      ruleRefs: [ruleRefs.frap34],
+    },
+    {
+      id: 'panel-disposition',
+      fromState: 'submitted',
+      toState: 'judgment-entered',
+      actorToolName: 'disposeCase',
+      guard: 'valid panel votes and relief option exist',
+      effect: 'enter judgment and open rehearing/mandate branch',
+      ruleRefs: [ruleRefs.frap36, ruleRefs.frap41],
+    },
+    {
+      id: 'rehearing-petition',
+      fromState: 'judgment-entered',
+      toState: 'rehearing-pending',
+      filingEventId: 'petition_rehearing',
+      guard: 'petition is timely and available after disposition',
+      effect: 'distribute petition to panel',
+      ruleRefs: [ruleRefs.frap40],
+    },
+  ],
+  availableEvents(session: CaseSession) {
+    const filedEvents = activeFiledEventSet(session)
+
+    return [
+      eventAvailability(
+        'notice_of_appeal',
+        'Notice of Appeal',
+        !filedEvents.has('notice_of_appeal'),
+        filedEvents.has('notice_of_appeal') ? ['Notice already filed.'] : [],
+      ),
+      eventAvailability(
+        'appearance_disclosure',
+        'Appearance / Disclosure Statement',
+        filedEvents.has('notice_of_appeal') && !filedEvents.has('appearance_disclosure'),
+        filedEvents.has('notice_of_appeal')
+          ? []
+          : ['Notice of appeal should be filed first.'],
+      ),
+      eventAvailability(
+        'opening_brief',
+        'Opening Brief',
+        filedEvents.has('appearance_disclosure') && !filedEvents.has('opening_brief'),
+        filedEvents.has('appearance_disclosure')
+          ? []
+          : ['Appearance/disclosure remains pending.'],
+      ),
+      eventAvailability(
+        'joint_appendix',
+        'Joint Appendix',
+        filedEvents.has('opening_brief') && !filedEvents.has('joint_appendix'),
+        filedEvents.has('opening_brief') ? [] : ['Opening brief should be filed first.'],
+      ),
+      eventAvailability(
+        'reply_brief',
+        'Reply Brief',
+        filedEvents.has('appellee_brief') && !filedEvents.has('reply_brief'),
+        filedEvents.has('appellee_brief') ? [] : ['Appellee brief is not on file.'],
+      ),
+      eventAvailability('motion', 'Motion', session.status === 'active'),
+      eventAvailability('motion_response', 'Response to Motion', session.status === 'active'),
+      eventAvailability('amicus_brief', 'Amicus Brief', session.status === 'active'),
+      eventAvailability(
+        'petition_rehearing',
+        'Panel or En Banc Rehearing Petition',
+        session.status === 'closed',
+        session.status === 'closed' ? [] : ['Disposition has not been entered.'],
+      ),
+    ]
+  },
+}

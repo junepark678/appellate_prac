@@ -1,4 +1,11 @@
-import { getCourtPack, getFilingEvent, getScenario, openingBriefDeadline, ruleRefs } from './packs'
+import {
+  getCourtPack,
+  getFilingEvent,
+  getScenario,
+  openingBriefDeadline,
+  ruleRefs,
+} from '../modules/registry'
+import { isImplementedAiTool } from '../modules/tools'
 import type {
   Assessment,
   CaseSession,
@@ -17,15 +24,6 @@ import type {
 } from './types'
 
 const simulatorStart = '2026-05-23T09:00:00.000Z'
-const implementedToolNames = new Set([
-  'issueClerkOrder',
-  'fileCounterpartyDocument',
-  'setDeadline',
-  'submitToPanel',
-  'issuePanelOrder',
-  'disposeCase',
-])
-
 type RuntimeToolCall = {
   tool: string
   actorId?: string
@@ -84,7 +82,18 @@ function createDeadline(
 }
 
 function isImplementedToolName(tool: string): tool is ToolCall['tool'] {
-  return implementedToolNames.has(tool)
+  return isImplementedAiTool(tool) && isSupportedRuntimeTool(tool)
+}
+
+function isSupportedRuntimeTool(tool: string): tool is ToolCall['tool'] {
+  return [
+    'issueClerkOrder',
+    'fileCounterpartyDocument',
+    'setDeadline',
+    'submitToPanel',
+    'issuePanelOrder',
+    'disposeCase',
+  ].includes(tool)
 }
 
 function isString(value: unknown): value is string {

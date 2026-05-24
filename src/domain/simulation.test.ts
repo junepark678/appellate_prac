@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { courtPacks, getScenario, scenarios } from './packs'
+import { courtPacks, getScenario, scenarios } from '../modules/registry'
 import {
   applyToolCall,
   createInitialSession,

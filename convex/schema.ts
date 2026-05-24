@@ -20,14 +20,65 @@ export default defineSchema({
 
   rulePacks: defineTable({
     packId: v.string(),
+    moduleId: v.optional(v.string()),
     label: v.string(),
     courtSystem: v.string(),
     courtLevel: v.optional(v.string()),
     procedureDomain: v.optional(v.string()),
     version: v.string(),
     sourceUrl: v.string(),
+    sourceVersionIds: v.optional(v.array(v.string())),
     published: v.boolean(),
   }).index('by_pack_version', ['packId', 'version']),
+
+  legalSourceVersions: defineTable({
+    sourceVersionId: v.string(),
+    moduleId: v.string(),
+    label: v.string(),
+    jurisdiction: v.string(),
+    version: v.string(),
+    effectiveFrom: v.string(),
+    effectiveTo: v.optional(v.string()),
+    sourceUrl: v.string(),
+    sourceSystem: v.union(
+      v.literal('court'),
+      v.literal('uscourts'),
+      v.literal('courtlistener'),
+      v.literal('recap'),
+      v.literal('manual'),
+    ),
+    reviewed: v.boolean(),
+    metadataJson: v.optional(v.string()),
+  })
+    .index('by_source_version', ['sourceVersionId'])
+    .index('by_module', ['moduleId']),
+
+  ruleConstraints: defineTable({
+    constraintId: v.string(),
+    ruleModuleId: v.string(),
+    ruleId: v.string(),
+    sourceVersionId: v.string(),
+    topic: v.string(),
+    kind: v.string(),
+    value: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+    executableJson: v.optional(v.string()),
+  })
+    .index('by_constraint', ['constraintId'])
+    .index('by_rule_module', ['ruleModuleId'])
+    .index('by_rule', ['ruleId']),
+
+  moduleManifests: defineTable({
+    moduleId: v.string(),
+    type: v.string(),
+    label: v.string(),
+    version: v.string(),
+    dependenciesJson: v.optional(v.string()),
+    enabled: v.boolean(),
+    published: v.boolean(),
+  })
+    .index('by_module_id', ['moduleId'])
+    .index('by_type', ['type']),
 
   ruleItems: defineTable({
     packId: v.string(),
@@ -45,6 +96,7 @@ export default defineSchema({
 
   courtPacks: defineTable({
     packId: v.string(),
+    moduleId: v.optional(v.string()),
     label: v.string(),
     courtSystem: v.string(),
     courtLevel: v.string(),
@@ -52,6 +104,7 @@ export default defineSchema({
     baseCourtPackIds: v.array(v.string()),
     includedRulePackIds: v.array(v.string()),
     rulePackIds: v.array(v.string()),
+    procedureModuleIds: v.optional(v.array(v.string())),
     participantRoles: v.optional(v.array(participantRoleValidator)),
     filingEventsJson: v.optional(v.string()),
     aiActorsJson: v.optional(v.string()),
@@ -119,6 +172,23 @@ export default defineSchema({
     validationJson: v.optional(v.string()),
   }).index('by_case', ['caseSessionId']),
 
+  documentAnalyses: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    documentId: v.optional(v.id('documents')),
+    analyzerId: v.string(),
+    pageCount: v.optional(v.number()),
+    fileSizeBytes: v.number(),
+    mimeType: v.string(),
+    searchableText: v.boolean(),
+    certificateOfServiceDetected: v.boolean(),
+    certificateOfComplianceDetected: v.boolean(),
+    sealedOrRedactionWarning: v.boolean(),
+    warnings: v.array(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_document', ['documentId']),
+
   filings: defineTable({
     caseSessionId: v.id('caseSessions'),
     eventId: v.string(),
@@ -129,10 +199,26 @@ export default defineSchema({
     certificateOfCompliance: v.boolean(),
     sealed: v.boolean(),
     notes: v.string(),
+    submissionJson: v.optional(v.string()),
+    documentAnalysisIds: v.optional(v.array(v.id('documentAnalyses'))),
     filedAt: v.string(),
     outcome: filingOutcomeValidator,
     validationIssues: v.array(validationIssueValidator),
   }).index('by_case', ['caseSessionId']),
+
+  procedureTransitions: defineTable({
+    transitionId: v.string(),
+    procedureModuleId: v.string(),
+    fromState: v.string(),
+    toState: v.string(),
+    filingEventId: v.optional(v.string()),
+    actorToolName: v.optional(v.string()),
+    guard: v.string(),
+    effect: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+  })
+    .index('by_transition', ['transitionId'])
+    .index('by_procedure_module', ['procedureModuleId']),
 
   docketEntries: defineTable({
     caseSessionId: v.id('caseSessions'),
@@ -161,6 +247,10 @@ export default defineSchema({
     actorId: v.string(),
     model: v.string(),
     provider: v.string(),
+    providerId: v.optional(v.string()),
+    actorModuleId: v.optional(v.string()),
+    toolName: v.optional(v.string()),
+    stateTransitionId: v.optional(v.string()),
     promptHash: v.string(),
     toolCallJson: v.string(),
     accepted: v.boolean(),
@@ -194,10 +284,64 @@ export default defineSchema({
     importedAt: v.string(),
   }).index('by_case', ['caseSessionId']),
 
+  panelVotes: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    actorModuleId: v.string(),
+    vote: v.string(),
+    reliefOption: v.string(),
+    rationale: v.string(),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_actor_module', ['actorModuleId']),
+
+  meritsEvaluations: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    meritsModuleId: v.string(),
+    issueFindings: v.array(v.string()),
+    availableRelief: v.array(v.string()),
+    barredRelief: v.array(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_module', ['meritsModuleId']),
+
+  scenarioDrafts: defineTable({
+    sourceSystem: v.union(v.literal('courtlistener'), v.literal('recap'), v.literal('manual')),
+    importerId: v.string(),
+    title: v.string(),
+    courtPackId: v.string(),
+    draftJson: v.string(),
+    provenanceJson: v.string(),
+    reviewStatus: v.union(
+      v.literal('draft'),
+      v.literal('reviewed'),
+      v.literal('published'),
+      v.literal('rejected'),
+    ),
+    reviewedByUserId: v.optional(v.id('users')),
+    createdAt: v.string(),
+    reviewedAt: v.optional(v.string()),
+  })
+    .index('by_status', ['reviewStatus'])
+    .index('by_source', ['sourceSystem']),
+
+  sourceDocuments: defineTable({
+    sourceSystem: v.union(v.literal('courtlistener'), v.literal('recap'), v.literal('manual')),
+    externalId: v.string(),
+    sourceUrl: v.optional(v.string()),
+    title: v.string(),
+    metadataJson: v.string(),
+    importedAt: v.string(),
+  })
+    .index('by_external', ['sourceSystem', 'externalId']),
+
   assessments: defineTable({
     caseSessionId: v.id('caseSessions'),
+    rubricId: v.optional(v.string()),
     disposition: v.string(),
     score: v.number(),
+    scoreBreakdownJson: v.optional(v.string()),
     proceduralFindings: v.array(v.string()),
     meritsFindings: v.array(v.string()),
     nextPracticeTargets: v.array(v.string()),

@@ -87,12 +87,14 @@ export type RuleItem = {
 
 export type RulePack = {
   id: string
+  moduleId?: string
   label: string
   courtSystem: CourtSystem
   courtLevel?: CourtLevel
   procedureDomain?: ProcedureDomain
   version: string
   sourceUrl: string
+  sourceVersionIds?: string[]
   items: RuleItem[]
 }
 
@@ -151,6 +153,7 @@ export type AiActor = {
 
 export type CourtPack = {
   id: string
+  moduleId?: string
   label: string
   courtSystem: CourtSystem
   courtLevel: CourtLevel
@@ -158,6 +161,7 @@ export type CourtPack = {
   baseCourtPackIds: string[]
   includedRulePackIds: string[]
   rulePackIds: string[]
+  procedureModuleIds?: string[]
   participantRoles: ParticipantRole[]
   filingEvents: FilingEvent[]
   aiActors: AiActor[]
@@ -201,6 +205,8 @@ export type FilingRecord = FilingDraft & {
   filedAt: string
   outcome: FilingOutcome
   validationIssues: ValidationIssue[]
+  submissionJson?: string
+  documentAnalysisIds?: string[]
 }
 
 export type DocketEntry = {
@@ -252,8 +258,10 @@ export type CaseSession = {
 }
 
 export type Assessment = {
+  rubricId?: string
   disposition: string
   score: number
+  scoreBreakdownJson?: string
   proceduralFindings: string[]
   meritsFindings: string[]
   nextPracticeTargets: string[]

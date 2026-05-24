@@ -4,7 +4,14 @@ import { mutation, query } from './_generated/server'
 import type { Doc } from './_generated/dataModel'
 import type { MutationCtx } from './_generated/server'
 import { upsertCurrentUserDoc } from './authHelpers'
-import { courtPacks, rulePacks, scenarios } from '../src/domain/packs'
+import {
+  courtPacks,
+  moduleManifests,
+  procedureModules,
+  ruleModules,
+  rulePacks,
+  scenarios,
+} from '../src/modules/registry'
 import type { CourtPack, RuleItem, RulePack, Scenario } from '../src/domain/types'
 
 type SeedCounts = {
@@ -32,12 +39,14 @@ function sameRecord(left: Record<string, unknown>, right: Record<string, unknown
 function rulePackDoc(pack: RulePack) {
   return {
     packId: pack.id,
+    ...(pack.moduleId ? { moduleId: pack.moduleId } : {}),
     label: pack.label,
     courtSystem: pack.courtSystem,
     ...(pack.courtLevel ? { courtLevel: pack.courtLevel } : {}),
     ...(pack.procedureDomain ? { procedureDomain: pack.procedureDomain } : {}),
     version: pack.version,
     sourceUrl: pack.sourceUrl,
+    sourceVersionIds: pack.sourceVersionIds ?? [],
     published: true,
   }
 }
@@ -45,12 +54,14 @@ function rulePackDoc(pack: RulePack) {
 function rulePackCurrent(doc: Doc<'rulePacks'>) {
   return {
     packId: doc.packId,
+    ...(doc.moduleId ? { moduleId: doc.moduleId } : {}),
     label: doc.label,
     courtSystem: doc.courtSystem,
     ...(doc.courtLevel ? { courtLevel: doc.courtLevel } : {}),
     ...(doc.procedureDomain ? { procedureDomain: doc.procedureDomain } : {}),
     version: doc.version,
     sourceUrl: doc.sourceUrl,
+    sourceVersionIds: doc.sourceVersionIds ?? [],
     published: doc.published,
   }
 }
@@ -90,6 +101,7 @@ function ruleItemCurrent(doc: Doc<'ruleItems'>) {
 function courtPackDoc(pack: CourtPack) {
   return {
     packId: pack.id,
+    ...(pack.moduleId ? { moduleId: pack.moduleId } : {}),
     label: pack.label,
     courtSystem: pack.courtSystem,
     courtLevel: pack.courtLevel,
@@ -97,6 +109,7 @@ function courtPackDoc(pack: CourtPack) {
     baseCourtPackIds: pack.baseCourtPackIds,
     includedRulePackIds: pack.includedRulePackIds,
     rulePackIds: pack.rulePackIds,
+    procedureModuleIds: pack.procedureModuleIds ?? [],
     participantRoles: pack.participantRoles,
     filingEventsJson: JSON.stringify(pack.filingEvents),
     aiActorsJson: JSON.stringify(pack.aiActors),
@@ -108,6 +121,7 @@ function courtPackDoc(pack: CourtPack) {
 function courtPackCurrent(doc: Doc<'courtPacks'>) {
   return {
     packId: doc.packId,
+    ...(doc.moduleId ? { moduleId: doc.moduleId } : {}),
     label: doc.label,
     courtSystem: doc.courtSystem,
     courtLevel: doc.courtLevel,
@@ -115,6 +129,7 @@ function courtPackCurrent(doc: Doc<'courtPacks'>) {
     baseCourtPackIds: doc.baseCourtPackIds,
     includedRulePackIds: doc.includedRulePackIds,
     rulePackIds: doc.rulePackIds,
+    procedureModuleIds: doc.procedureModuleIds ?? [],
     ...(doc.participantRoles ? { participantRoles: doc.participantRoles } : {}),
     ...(doc.filingEventsJson ? { filingEventsJson: doc.filingEventsJson } : {}),
     ...(doc.aiActorsJson ? { aiActorsJson: doc.aiActorsJson } : {}),
@@ -263,6 +278,224 @@ async function upsertCourtPacks(ctx: MutationCtx) {
   return counts
 }
 
+async function upsertModuleManifests(ctx: MutationCtx) {
+  const counts = emptyCounts()
+
+  for (const manifest of moduleManifests) {
+    const doc = {
+      moduleId: manifest.moduleId,
+      type: manifest.type,
+      label: manifest.label,
+      version: manifest.version,
+      enabled: true,
+      published: true,
+    }
+    const matches = await ctx.db
+      .query('moduleManifests')
+      .withIndex('by_module_id', (index) => index.eq('moduleId', manifest.moduleId))
+      .collect()
+    const existing = matches[0]
+
+    for (const duplicate of matches.slice(1)) {
+      await ctx.db.delete(duplicate._id)
+      counts.deleted += 1
+    }
+
+    if (!existing) {
+      await ctx.db.insert('moduleManifests', doc)
+      counts.inserted += 1
+    } else if (
+      !sameRecord(
+        {
+          moduleId: existing.moduleId,
+          type: existing.type,
+          label: existing.label,
+          version: existing.version,
+          enabled: existing.enabled,
+          published: existing.published,
+        },
+        doc,
+      )
+    ) {
+      await ctx.db.patch(existing._id, doc)
+      counts.updated += 1
+    }
+  }
+
+  return counts
+}
+
+async function upsertLegalSourceVersions(ctx: MutationCtx) {
+  const counts = emptyCounts()
+
+  for (const module of ruleModules) {
+    for (const source of module.sources) {
+      const doc = {
+        sourceVersionId: source.id,
+        moduleId: module.id,
+        label: source.label,
+        jurisdiction: source.jurisdiction,
+        version: source.version,
+        effectiveFrom: source.effectiveFrom,
+        ...(source.effectiveTo ? { effectiveTo: source.effectiveTo } : {}),
+        sourceUrl: source.sourceUrl,
+        sourceSystem: source.sourceSystem,
+        reviewed: source.reviewed,
+      }
+      const matches = await ctx.db
+        .query('legalSourceVersions')
+        .withIndex('by_source_version', (index) =>
+          index.eq('sourceVersionId', source.id),
+        )
+        .collect()
+      const existing = matches[0]
+
+      for (const duplicate of matches.slice(1)) {
+        await ctx.db.delete(duplicate._id)
+        counts.deleted += 1
+      }
+
+      if (!existing) {
+        await ctx.db.insert('legalSourceVersions', doc)
+        counts.inserted += 1
+      } else if (
+        !sameRecord(
+          {
+            sourceVersionId: existing.sourceVersionId,
+            moduleId: existing.moduleId,
+            label: existing.label,
+            jurisdiction: existing.jurisdiction,
+            version: existing.version,
+            effectiveFrom: existing.effectiveFrom,
+            ...(existing.effectiveTo ? { effectiveTo: existing.effectiveTo } : {}),
+            sourceUrl: existing.sourceUrl,
+            sourceSystem: existing.sourceSystem,
+            reviewed: existing.reviewed,
+          },
+          doc,
+        )
+      ) {
+        await ctx.db.patch(existing._id, doc)
+        counts.updated += 1
+      }
+    }
+  }
+
+  return counts
+}
+
+async function upsertRuleConstraints(ctx: MutationCtx) {
+  const counts = emptyCounts()
+
+  for (const module of ruleModules) {
+    for (const constraint of module.constraints) {
+      const doc = {
+        constraintId: constraint.id,
+        ruleModuleId: module.id,
+        ruleId: constraint.ruleId,
+        sourceVersionId: constraint.sourceVersionId,
+        topic: constraint.topic,
+        kind: constraint.kind,
+        value: constraint.value,
+        ruleRefs: constraint.ruleRefs,
+      }
+      const matches = await ctx.db
+        .query('ruleConstraints')
+        .withIndex('by_constraint', (index) =>
+          index.eq('constraintId', constraint.id),
+        )
+        .collect()
+      const existing = matches[0]
+
+      for (const duplicate of matches.slice(1)) {
+        await ctx.db.delete(duplicate._id)
+        counts.deleted += 1
+      }
+
+      if (!existing) {
+        await ctx.db.insert('ruleConstraints', doc)
+        counts.inserted += 1
+      } else if (
+        !sameRecord(
+          {
+            constraintId: existing.constraintId,
+            ruleModuleId: existing.ruleModuleId,
+            ruleId: existing.ruleId,
+            sourceVersionId: existing.sourceVersionId,
+            topic: existing.topic,
+            kind: existing.kind,
+            value: existing.value,
+            ruleRefs: existing.ruleRefs,
+          },
+          doc,
+        )
+      ) {
+        await ctx.db.patch(existing._id, doc)
+        counts.updated += 1
+      }
+    }
+  }
+
+  return counts
+}
+
+async function upsertProcedureTransitions(ctx: MutationCtx) {
+  const counts = emptyCounts()
+
+  for (const module of procedureModules) {
+    for (const transition of module.transitions) {
+      const doc = {
+        transitionId: transition.id,
+        procedureModuleId: module.id,
+        fromState: transition.fromState,
+        toState: transition.toState,
+        ...(transition.filingEventId ? { filingEventId: transition.filingEventId } : {}),
+        ...(transition.actorToolName ? { actorToolName: transition.actorToolName } : {}),
+        guard: transition.guard,
+        effect: transition.effect,
+        ruleRefs: transition.ruleRefs,
+      }
+      const matches = await ctx.db
+        .query('procedureTransitions')
+        .withIndex('by_transition', (index) =>
+          index.eq('transitionId', transition.id),
+        )
+        .collect()
+      const existing = matches[0]
+
+      for (const duplicate of matches.slice(1)) {
+        await ctx.db.delete(duplicate._id)
+        counts.deleted += 1
+      }
+
+      if (!existing) {
+        await ctx.db.insert('procedureTransitions', doc)
+        counts.inserted += 1
+      } else if (
+        !sameRecord(
+          {
+            transitionId: existing.transitionId,
+            procedureModuleId: existing.procedureModuleId,
+            fromState: existing.fromState,
+            toState: existing.toState,
+            ...(existing.filingEventId ? { filingEventId: existing.filingEventId } : {}),
+            ...(existing.actorToolName ? { actorToolName: existing.actorToolName } : {}),
+            guard: existing.guard,
+            effect: existing.effect,
+            ruleRefs: existing.ruleRefs,
+          },
+          doc,
+        )
+      ) {
+        await ctx.db.patch(existing._id, doc)
+        counts.updated += 1
+      }
+    }
+  }
+
+  return counts
+}
+
 async function upsertScenarios(ctx: MutationCtx) {
   const counts = emptyCounts()
 
@@ -296,6 +529,10 @@ export const all = mutation({
   returns: v.object({
     rulePacks: countValidator,
     ruleItems: countValidator,
+    moduleManifests: countValidator,
+    legalSourceVersions: countValidator,
+    ruleConstraints: countValidator,
+    procedureTransitions: countValidator,
     courtPacks: countValidator,
     scenarios: countValidator,
   }),
@@ -304,12 +541,20 @@ export const all = mutation({
 
     const seededRulePacks = await upsertRulePacks(ctx)
     const seededRuleItems = await upsertRuleItems(ctx)
+    const seededModuleManifests = await upsertModuleManifests(ctx)
+    const seededLegalSourceVersions = await upsertLegalSourceVersions(ctx)
+    const seededRuleConstraints = await upsertRuleConstraints(ctx)
+    const seededProcedureTransitions = await upsertProcedureTransitions(ctx)
     const seededCourtPacks = await upsertCourtPacks(ctx)
     const seededScenarios = await upsertScenarios(ctx)
 
     return {
       rulePacks: seededRulePacks,
       ruleItems: seededRuleItems,
+      moduleManifests: seededModuleManifests,
+      legalSourceVersions: seededLegalSourceVersions,
+      ruleConstraints: seededRuleConstraints,
+      procedureTransitions: seededProcedureTransitions,
       courtPacks: seededCourtPacks,
       scenarios: seededScenarios,
     }
@@ -321,6 +566,10 @@ export const status = query({
   returns: v.object({
     rulePacks: v.number(),
     ruleItems: v.number(),
+    moduleManifests: v.number(),
+    legalSourceVersions: v.number(),
+    ruleConstraints: v.number(),
+    procedureTransitions: v.number(),
     courtPacks: v.number(),
     scenarios: v.number(),
     publishedRulePacks: v.number(),
@@ -328,10 +577,23 @@ export const status = query({
     publishedScenarios: v.number(),
   }),
   handler: async (ctx) => {
-    const [rulePackDocs, ruleItemDocs, courtPackDocs, scenarioDocs] =
+    const [
+      rulePackDocs,
+      ruleItemDocs,
+      moduleManifestDocs,
+      legalSourceVersionDocs,
+      ruleConstraintDocs,
+      procedureTransitionDocs,
+      courtPackDocs,
+      scenarioDocs,
+    ] =
       await Promise.all([
         ctx.db.query('rulePacks').collect(),
         ctx.db.query('ruleItems').collect(),
+        ctx.db.query('moduleManifests').collect(),
+        ctx.db.query('legalSourceVersions').collect(),
+        ctx.db.query('ruleConstraints').collect(),
+        ctx.db.query('procedureTransitions').collect(),
         ctx.db.query('courtPacks').collect(),
         ctx.db.query('scenarios').collect(),
       ])
@@ -339,6 +601,10 @@ export const status = query({
     return {
       rulePacks: rulePackDocs.length,
       ruleItems: ruleItemDocs.length,
+      moduleManifests: moduleManifestDocs.length,
+      legalSourceVersions: legalSourceVersionDocs.length,
+      ruleConstraints: ruleConstraintDocs.length,
+      procedureTransitions: procedureTransitionDocs.length,
       courtPacks: courtPackDocs.length,
       scenarios: scenarioDocs.length,
       publishedRulePacks: rulePackDocs.filter((pack) => pack.published).length,

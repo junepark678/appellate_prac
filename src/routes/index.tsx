@@ -37,7 +37,11 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
-import { getCourtPack, getRuleItemsForCourt, scenarios } from '../domain/packs'
+import {
+  getCourtPack,
+  getRuleItemsForCourt,
+  scenarios,
+} from '../modules/registry'
 import {
   createInitialSession,
   inferDocumentSignals,
