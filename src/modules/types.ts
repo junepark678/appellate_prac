@@ -112,7 +112,24 @@ export type ProcedureModule = {
 export type UploadedFile = Pick<
   UploadedDocument,
   'fileName' | 'mimeType' | 'sizeBytes' | 'pageCount' | 'extractedSignals'
->
+> & {
+  arrayBuffer?: () => Promise<ArrayBuffer>
+}
+
+export type DocumentTextExtractionStatus =
+  | 'not_started'
+  | 'extracted'
+  | 'not_searchable'
+  | 'failed'
+  | 'fallback'
+
+export type DocumentSection = {
+  id: string
+  label: string
+  startIndex: number
+  endIndex?: number
+  textSnippet: string
+}
 
 export type DocumentAnalysis = {
   analyzerId: string
@@ -120,9 +137,20 @@ export type DocumentAnalysis = {
   fileSizeBytes: number
   mimeType: string
   searchableText: boolean
+  extractedPageText?: Array<{ pageNumber: number; text: string }>
+  normalizedText?: string
+  wordCount?: number
+  sectionMap?: DocumentSection[]
   certificateOfServiceDetected: boolean
   certificateOfComplianceDetected: boolean
+  certificateSnippets?: string[]
+  legalCitations?: string[]
+  recordCitations?: string[]
+  appendixCitations?: string[]
   sealedOrRedactionWarning: boolean
+  privacySealWarnings?: string[]
+  textExtractionStatus?: DocumentTextExtractionStatus
+  extractionConfidence?: number
   warnings: string[]
 }
 

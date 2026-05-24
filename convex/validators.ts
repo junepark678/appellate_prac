@@ -72,13 +72,73 @@ export const validationIssueValidator = v.object({
   cureSuggestion: v.optional(v.string()),
 })
 
+export const textExtractionStatusValidator = v.union(
+  v.literal('not_started'),
+  v.literal('extracted'),
+  v.literal('not_searchable'),
+  v.literal('failed'),
+  v.literal('fallback'),
+)
+
+export const documentSectionValidator = v.object({
+  id: v.string(),
+  label: v.string(),
+  startIndex: v.number(),
+  endIndex: v.optional(v.number()),
+  textSnippet: v.string(),
+})
+
+export const documentAnalysisValidator = v.object({
+  analyzerId: v.string(),
+  pageCount: v.optional(v.number()),
+  fileSizeBytes: v.number(),
+  mimeType: v.string(),
+  searchableText: v.boolean(),
+  extractedPageText: v.optional(
+    v.array(
+      v.object({
+        pageNumber: v.number(),
+        text: v.string(),
+      }),
+    ),
+  ),
+  normalizedText: v.optional(v.string()),
+  wordCount: v.optional(v.number()),
+  sectionMap: v.optional(v.array(documentSectionValidator)),
+  certificateOfServiceDetected: v.boolean(),
+  certificateOfComplianceDetected: v.boolean(),
+  certificateSnippets: v.optional(v.array(v.string())),
+  legalCitations: v.optional(v.array(v.string())),
+  recordCitations: v.optional(v.array(v.string())),
+  appendixCitations: v.optional(v.array(v.string())),
+  sealedOrRedactionWarning: v.boolean(),
+  privacySealWarnings: v.optional(v.array(v.string())),
+  textExtractionStatus: v.optional(textExtractionStatusValidator),
+  extractionConfidence: v.optional(v.number()),
+  warnings: v.array(v.string()),
+})
+
+export const documentAnalysisRecordValidator = v.object({
+  id: v.string(),
+  caseSessionId: v.string(),
+  documentId: v.optional(v.string()),
+  analysis: documentAnalysisValidator,
+  createdAt: v.string(),
+})
+
 export const uploadedDocumentValidator = v.object({
   id: v.string(),
   fileName: v.string(),
   mimeType: v.string(),
   sizeBytes: v.number(),
+  storageId: v.optional(v.string()),
+  sha256: v.optional(v.string()),
   pageCount: v.optional(v.number()),
   extractedText: v.optional(v.string()),
+  textExtractionStatus: v.optional(textExtractionStatusValidator),
+  wordCount: v.optional(v.number()),
+  analysisId: v.optional(v.string()),
+  analysis: v.optional(documentAnalysisValidator),
   extractedSignals: v.array(v.string()),
 })
 
@@ -165,6 +225,99 @@ export const filingRecordValidator = v.object({
   filedAt: v.string(),
   outcome: filingOutcomeValidator,
   validationIssues: v.array(validationIssueValidator),
+  submissionJson: v.optional(v.string()),
+  documentAnalysisIds: v.optional(v.array(v.string())),
+})
+
+export const actorWorkProductKindValidator = v.union(
+  v.literal('counterparty_strategy'),
+  v.literal('counterparty_filing_draft'),
+  v.literal('amicus_recommendation'),
+  v.literal('amicus_filing_draft'),
+  v.literal('bench_memo'),
+  v.literal('judge_vote_memo'),
+  v.literal('panel_disposition_draft'),
+  v.literal('assessment_feedback'),
+)
+
+export const actorWorkProductStatusValidator = v.union(
+  v.literal('proposed'),
+  v.literal('accepted'),
+  v.literal('rejected'),
+  v.literal('superseded'),
+)
+
+export const actorCitationValidator = v.object({
+  id: v.string(),
+  label: v.string(),
+  sourceType: v.union(
+    v.literal('filing'),
+    v.literal('document_analysis'),
+    v.literal('rule'),
+    v.literal('record_excerpt'),
+    v.literal('docket_entry'),
+  ),
+  sourceId: v.optional(v.string()),
+  ruleRef: v.optional(ruleRefValidator),
+  quote: v.optional(v.string()),
+  pin: v.optional(v.string()),
+})
+
+export const generatedFilingDraftValidator = v.object({
+  eventId: v.string(),
+  participantRole: participantRoleValidator,
+  title: v.string(),
+  documentFileName: v.string(),
+  documentText: v.string(),
+  attachmentTexts: v.optional(
+    v.array(
+      v.object({
+        label: v.string(),
+        fileName: v.string(),
+        text: v.string(),
+        attachmentType: v.union(
+          v.literal('main'),
+          v.literal('appendix'),
+          v.literal('exhibit'),
+          v.literal('certificate'),
+          v.literal('motion_attachment'),
+          v.literal('other'),
+        ),
+      }),
+    ),
+  ),
+  certificateOfService: v.boolean(),
+  certificateOfCompliance: v.boolean(),
+  sealed: v.boolean(),
+  notes: v.string(),
+  citations: v.array(actorCitationValidator),
+  ruleRefs: v.array(ruleRefValidator),
+})
+
+export const actorReasoningMemoValidator = v.object({
+  title: v.string(),
+  summary: v.string(),
+  reasoning: v.array(v.string()),
+  recommendations: v.array(v.string()),
+  citations: v.array(actorCitationValidator),
+  ruleRefs: v.array(ruleRefValidator),
+  proceduralClaims: v.optional(v.array(v.string())),
+  requestedDisposition: v.optional(v.string()),
+  reliefOption: v.optional(v.string()),
+  confidence: v.optional(v.number()),
+})
+
+export const actorWorkProductValidator = v.object({
+  id: v.string(),
+  caseSessionId: v.string(),
+  actorId: v.string(),
+  kind: actorWorkProductKindValidator,
+  status: actorWorkProductStatusValidator,
+  workProduct: v.union(generatedFilingDraftValidator, actorReasoningMemoValidator),
+  sourceDocumentAnalysisIds: v.array(v.string()),
+  sourceFilingIds: v.array(v.string()),
+  createdAt: v.string(),
+  validationIssues: v.optional(v.array(validationIssueValidator)),
 })
 
 export const scenarioRecordExcerptValidator = v.object({
@@ -446,6 +599,7 @@ export const caseSessionValidator = v.object({
   panelDeliberation: v.optional(panelDeliberationValidator),
   panelDisposition: v.optional(panelDispositionRecordValidator),
   assessment: v.optional(assessmentValidator),
+  actorWorkProducts: v.optional(v.array(actorWorkProductValidator)),
 })
 
 export const toolCallValidator = v.union(

@@ -22,9 +22,21 @@ export const pdfSignalAnalyzer: DocumentAnalyzer = {
       fileSizeBytes: file.sizeBytes,
       mimeType: file.mimeType,
       searchableText,
+      normalizedText: signals.join(' '),
+      wordCount: signals.join(' ').split(/\s+/).filter(Boolean).length,
+      sectionMap: [],
       certificateOfServiceDetected,
       certificateOfComplianceDetected,
+      certificateSnippets: [],
+      legalCitations: [],
+      recordCitations: signals.filter((signal) => signal.includes('record citation')),
+      appendixCitations: signals.filter((signal) => signal.includes('appendix')),
       sealedOrRedactionWarning,
+      privacySealWarnings: sealedOrRedactionWarning
+        ? ['Filename suggests seal, redaction, or confidentiality review.']
+        : [],
+      textExtractionStatus: searchableText ? 'fallback' : 'not_searchable',
+      extractionConfidence: searchableText ? 0.25 : 0.1,
       warnings: [
         ...(file.mimeType !== 'application/pdf' ? ['Document is not a PDF.'] : []),
         ...(file.sizeBytes > 25 * 1024 * 1024

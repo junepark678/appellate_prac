@@ -1,5 +1,6 @@
 import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
 import { validateAmicusSubmission } from '../amicus/workflow'
+import { briefAnalysisIssues } from '../documents/brief-analysis'
 import type {
   CaseSession,
   FilingMetadata,
@@ -21,7 +22,15 @@ function allSubmissionDocuments(submission: FilingSubmission) {
 }
 
 function documentText(document: UploadedDocument) {
-  return [document.fileName, document.extractedText, ...document.extractedSignals]
+  return [
+    document.fileName,
+    document.analysis?.normalizedText,
+    document.extractedText,
+    ...(document.analysis?.sectionMap?.map((section) => section.label) ?? []),
+    ...(document.analysis?.recordCitations ?? []),
+    ...(document.analysis?.appendixCitations ?? []),
+    ...document.extractedSignals,
+  ]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
@@ -385,6 +394,11 @@ function roleAndCourtIssues(session: CaseSession, submission: FilingSubmission) 
 }
 
 function legalRealismIssues(submission: FilingSubmission) {
+  const hasDocumentAnalysis = allSubmissionDocuments(submission).some(
+    (document) => document.analysis || document.analysisId || document.textExtractionStatus,
+  )
+  if (hasDocumentAnalysis) return []
+
   const text = allSubmissionDocuments(submission)
     .map(documentText)
     .join(' ')
@@ -452,6 +466,7 @@ export function preflightFilingSubmission(
     ...sequenceIssues(session, submission),
     ...deadlineIssues(session, submission, nowIso),
     ...validateAmicusSubmission(session, submission),
+    ...briefAnalysisIssues(session, submission),
     ...legalRealismIssues(submission),
   ]
   const outcome = outcomeForIssues(issues)

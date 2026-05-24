@@ -229,8 +229,14 @@ export type UploadedDocument = {
   fileName: string
   mimeType: string
   sizeBytes: number
+  storageId?: string
+  sha256?: string
   pageCount?: number
   extractedText?: string
+  textExtractionStatus?: 'not_started' | 'extracted' | 'not_searchable' | 'failed' | 'fallback'
+  wordCount?: number
+  analysisId?: string
+  analysis?: import('../modules/types').DocumentAnalysis
   extractedSignals: string[]
 }
 
@@ -390,6 +396,84 @@ export type CaseSession = {
   panelDeliberation?: PanelDeliberation
   panelDisposition?: PanelDispositionRecord
   assessment?: Assessment
+  actorWorkProducts?: ActorWorkProduct[]
+}
+
+export type ActorWorkProductKind =
+  | 'counterparty_strategy'
+  | 'counterparty_filing_draft'
+  | 'amicus_recommendation'
+  | 'amicus_filing_draft'
+  | 'bench_memo'
+  | 'judge_vote_memo'
+  | 'panel_disposition_draft'
+  | 'assessment_feedback'
+
+export type ActorWorkProductStatus =
+  | 'proposed'
+  | 'accepted'
+  | 'rejected'
+  | 'superseded'
+
+export type ActorCitation = {
+  id: string
+  label: string
+  sourceType:
+    | 'filing'
+    | 'document_analysis'
+    | 'rule'
+    | 'record_excerpt'
+    | 'docket_entry'
+  sourceId?: string
+  ruleRef?: RuleRef
+  quote?: string
+  pin?: string
+}
+
+export type GeneratedFilingDraft = {
+  eventId: string
+  participantRole: ParticipantRole
+  title: string
+  documentFileName: string
+  documentText: string
+  attachmentTexts?: Array<{
+    label: string
+    fileName: string
+    text: string
+    attachmentType: FilingAttachment['attachmentType']
+  }>
+  certificateOfService: boolean
+  certificateOfCompliance: boolean
+  sealed: boolean
+  notes: string
+  citations: ActorCitation[]
+  ruleRefs: RuleRef[]
+}
+
+export type ActorReasoningMemo = {
+  title: string
+  summary: string
+  reasoning: string[]
+  recommendations: string[]
+  citations: ActorCitation[]
+  ruleRefs: RuleRef[]
+  proceduralClaims?: string[]
+  requestedDisposition?: string
+  reliefOption?: string
+  confidence?: number
+}
+
+export type ActorWorkProduct = {
+  id: string
+  caseSessionId: string
+  actorId: string
+  kind: ActorWorkProductKind
+  status: ActorWorkProductStatus
+  workProduct: GeneratedFilingDraft | ActorReasoningMemo
+  sourceDocumentAnalysisIds: string[]
+  sourceFilingIds: string[]
+  createdAt: string
+  validationIssues?: ValidationIssue[]
 }
 
 export type Assessment = {

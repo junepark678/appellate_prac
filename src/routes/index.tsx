@@ -48,12 +48,15 @@ import {
   inferDocumentSignals,
   validateFiling,
 } from '../domain/simulation'
+import { nextActorWorkProductTask, type ActorWorkProductTask } from '../domain/actors/orchestration'
+import { preflightFilingSubmission } from '../domain/rules/executable-constraints'
 import {
   ecfEventDefinitionFromFilingEvent,
   filingDraftToSubmission,
 } from '../domain/filing/ecf'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import type {
+  ActorWorkProduct,
   CaseSession,
   FilingDraft,
   FilingEvent,
@@ -63,6 +66,7 @@ import type {
   UploadedDocument,
   ValidationIssue,
 } from '../domain/types'
+import type { DocumentAnalysis } from '../modules/types'
 import type { CourtListenerSearchResult } from '../integrations/courtlistener'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -95,6 +99,36 @@ type AdvanceLiveEventAction = (args: {
   toolCall: ToolCall | null
   rawText: string
 }>
+
+type GenerateActorWorkProductAction = (args: {
+  caseSessionId: Id<'caseSessions'>
+}) => Promise<ActorWorkProduct>
+
+type DocumentUploadUrlMutation = (args: {
+  caseSessionId: Id<'caseSessions'>
+}) => Promise<string>
+
+type PersistDocumentAnalysisMutation = (args: {
+  caseSessionId: Id<'caseSessions'>
+  document: UploadedDocument
+  analysis: DocumentAnalysis
+}) => Promise<{
+  document: UploadedDocument
+  analysisId: string
+}>
+
+type AcceptActorWorkProductMutation = (args: {
+  caseSessionId: Id<'caseSessions'>
+  workProductId: string
+}) => Promise<{
+  session: CaseSession
+  workProduct: ActorWorkProduct
+}>
+
+type RejectActorWorkProductMutation = (args: {
+  caseSessionId: Id<'caseSessions'>
+  workProductId: string
+}) => Promise<ActorWorkProduct>
 
 type TrialDocketEntry = {
   entryNumber: number
@@ -139,6 +173,10 @@ function Home() {
   const [recapError, setRecapError] = useState('')
   const [aiPending, setAiPending] = useState(false)
   const [aiError, setAiError] = useState('')
+  const [actorPending, setActorPending] = useState(false)
+  const [actorError, setActorError] = useState('')
+  const [documentPending, setDocumentPending] = useState(false)
+  const [documentError, setDocumentError] = useState('')
   const [sessionPending, setSessionPending] = useState(false)
   const [sessionError, setSessionError] = useState('')
   const [draft, setDraft] = useState<FilingDraft>(() =>
@@ -149,10 +187,25 @@ function Home() {
   const submitFiling = useMutation(api.caseSessions.submitFiling)
   const submitEcfFiling = useMutation(api.caseSessions.submitEcfFiling)
   const advanceProcedure = useMutation(api.caseSessions.advanceProcedure)
+  const generateDocumentUploadUrl = useMutation(
+    (api as any).caseSessions.generateDocumentUploadUrl,
+  ) as DocumentUploadUrlMutation
+  const persistDocumentAnalysis = useMutation(
+    (api as any).caseSessions.persistDocumentAnalysis,
+  ) as PersistDocumentAnalysisMutation
+  const acceptActorWorkProduct = useMutation(
+    (api as any).caseSessions.acceptActorWorkProduct,
+  ) as AcceptActorWorkProductMutation
+  const rejectActorWorkProduct = useMutation(
+    (api as any).caseSessions.rejectActorWorkProduct,
+  ) as RejectActorWorkProductMutation
   const importCourtListenerSource = useMutation(
     api.caseSessions.importCourtListenerSource,
   )
   const advanceLive = useAction(api.caseSessions.advanceLiveEvent) as AdvanceLiveEventAction
+  const generateActorWorkProduct = useAction(
+    (api as any).caseSessions.generateActorWorkProduct,
+  ) as GenerateActorWorkProductAction
   const searchCourtListener = useAction(
     api.integrations.searchLiveCourtListenerDockets,
   ) as CourtListenerSearchAction
@@ -197,8 +250,15 @@ function Home() {
     event.allowedParticipantRoles.includes(learnerRole),
   )
   const activeToolCall = activeSession ? nextProcedureToolCall(activeSession) : null
+  const activeActorTask = activeSession ? nextActorWorkProductTask(activeSession) : null
   const validationIssues = useMemo(
-    () => (activeSession ? validateFiling(activeSession, draft) : []),
+    () => {
+      if (!activeSession) return []
+      const submission = filingDraftToSubmission(draft)
+      return submission
+        ? preflightFilingSubmission(activeSession, submission).issues
+        : validateFiling(activeSession, draft)
+    },
     [activeSession, draft],
   )
   const liveAiReady =
@@ -334,6 +394,133 @@ function Home() {
     }
   }
 
+  async function generateNextActorWorkProduct() {
+    if (!activeSession) return
+    if (!liveAiReady) {
+      setActorError(liveAiUnavailableReason)
+      return
+    }
+    setActorPending(true)
+    setActorError('')
+    try {
+      await generateActorWorkProduct({
+        caseSessionId: activeSession.id as Id<'caseSessions'>,
+      })
+    } catch (error) {
+      setActorError(
+        error instanceof Error ? error.message : 'Actor work product generation failed',
+      )
+    } finally {
+      setActorPending(false)
+    }
+  }
+
+  async function acceptWorkProduct(workProductId: string) {
+    if (!activeSession) return
+    setActorPending(true)
+    setActorError('')
+    try {
+      const result = await acceptActorWorkProduct({
+        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        workProductId,
+      })
+      if (result.session.status === 'closed') {
+        setActiveView('assessment')
+      }
+    } catch (error) {
+      setActorError(
+        error instanceof Error ? error.message : 'Unable to accept actor work product',
+      )
+    } finally {
+      setActorPending(false)
+    }
+  }
+
+  async function rejectWorkProduct(workProductId: string) {
+    if (!activeSession) return
+    setActorPending(true)
+    setActorError('')
+    try {
+      await rejectActorWorkProduct({
+        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        workProductId,
+      })
+    } catch (error) {
+      setActorError(
+        error instanceof Error ? error.message : 'Unable to reject actor work product',
+      )
+    } finally {
+      setActorPending(false)
+    }
+  }
+
+  async function analyzeAndAttachDocuments(files: FileList | null) {
+    if (!activeSession) return
+    setDocumentPending(true)
+    setDocumentError('')
+    try {
+      const documents = await Promise.all(
+        Array.from(files ?? []).map((file) =>
+          analyzeUploadAndPersistDocument(activeSession.id as Id<'caseSessions'>, file),
+        ),
+      )
+      setDraft((current) => ({ ...current, documents }))
+    } catch (error) {
+      setDocumentError(
+        error instanceof Error ? error.message : 'PDF analysis failed; using filename signals',
+      )
+      const documents: UploadedDocument[] = Array.from(files ?? []).map(inferDocumentSignals)
+      setDraft((current) => ({ ...current, documents }))
+    } finally {
+      setDocumentPending(false)
+    }
+  }
+
+  async function analyzeUploadAndPersistDocument(
+    caseSessionId: Id<'caseSessions'>,
+    file: File,
+  ): Promise<UploadedDocument> {
+    const base = inferDocumentSignals(file)
+    const { pdfJsAnalyzer } = await import('../modules/documents/pdfjs-analyzer')
+    const [analysis, sha256, storageId] = await Promise.all([
+      pdfJsAnalyzer.analyze({
+        fileName: file.name,
+        mimeType: file.type || 'application/pdf',
+        sizeBytes: file.size,
+        extractedSignals: base.extractedSignals,
+        arrayBuffer: () => file.arrayBuffer(),
+      }),
+      sha256File(file),
+      uploadToConvexStorage(caseSessionId, file),
+    ])
+    const document = documentFromAnalysis(base, analysis, storageId, sha256)
+
+    try {
+      const persisted = await persistDocumentAnalysis({
+        caseSessionId,
+        document,
+        analysis,
+      })
+      return persisted.document
+    } catch {
+      return document
+    }
+  }
+
+  async function uploadToConvexStorage(caseSessionId: Id<'caseSessions'>, file: File) {
+    const uploadUrl = await generateDocumentUploadUrl({ caseSessionId })
+    const response = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/pdf' },
+      body: file,
+    })
+    if (!response.ok) {
+      throw new Error('Unable to store PDF in Convex storage.')
+    }
+    const payload = (await response.json()) as { storageId?: string }
+    return payload.storageId
+  }
+
   async function searchRecap() {
     if (!courtListenerReady) {
       setRecapError(courtListenerUnavailableReason)
@@ -466,21 +653,28 @@ function Home() {
                     <DocketView
                       session={activeSession}
                       activeToolCall={activeToolCall}
+                      activeActorTask={activeActorTask}
                       aiError={aiError}
                       aiPending={aiPending}
+                      actorError={actorError}
+                      actorPending={actorPending}
                       liveAiEnabled={liveAiReady}
                       liveAiUnavailableReason={liveAiUnavailableReason}
                       onAdvanceExpected={advanceExpectedEvent}
                       onAdvanceLive={advanceLiveEvent}
+                      onGenerateActorWorkProduct={generateNextActorWorkProduct}
                     />
                   ) : null}
 
                   {selectedView === 'file' ? (
                     <FilingView
                       draft={draft}
+                      documentError={documentError}
+                      documentPending={documentPending}
                       events={availableEvents}
                       validationIssues={validationIssues}
                       onDraftChange={setDraft}
+                      onDocumentsSelected={analyzeAndAttachDocuments}
                       onReset={resetDraft}
                       onSubmit={submitDraft}
                     />
@@ -491,11 +685,23 @@ function Home() {
                   ) : null}
 
                   {selectedView === 'panel' ? (
-                    <PanelView session={activeSession} />
+                    <PanelView
+                      actorBusy={actorPending}
+                      actorError={actorError}
+                      session={activeSession}
+                      onAcceptWorkProduct={acceptWorkProduct}
+                      onRejectWorkProduct={rejectWorkProduct}
+                    />
                   ) : null}
 
                   {selectedView === 'parties' ? (
-                    <PartiesView session={activeSession} />
+                    <PartiesView
+                      actorBusy={actorPending}
+                      actorError={actorError}
+                      session={activeSession}
+                      onAcceptWorkProduct={acceptWorkProduct}
+                      onRejectWorkProduct={rejectWorkProduct}
+                    />
                   ) : null}
 
                   {selectedView === 'rules' ? (
@@ -821,6 +1027,46 @@ function createTrialDocket(session: CaseSession): TrialDocket {
   }
 }
 
+async function sha256File(file: File) {
+  if (!globalThis.crypto?.subtle) return undefined
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+function signalsFromAnalysis(base: UploadedDocument, analysis: DocumentAnalysis) {
+  return [
+    ...base.extractedSignals,
+    ...(analysis.sectionMap?.map((section) => section.label.toLowerCase()) ?? []),
+    ...(analysis.certificateOfServiceDetected ? ['certificate of service'] : []),
+    ...(analysis.certificateOfComplianceDetected ? ['certificate of compliance'] : []),
+    ...((analysis.recordCitations?.length ?? 0) > 0 ? ['record citation'] : []),
+    ...((analysis.appendixCitations?.length ?? 0) > 0 ? ['appendix'] : []),
+  ].filter((signal, index, values) => values.indexOf(signal) === index)
+}
+
+function documentFromAnalysis(
+  base: UploadedDocument,
+  analysis: DocumentAnalysis,
+  storageId?: string,
+  sha256?: string,
+): UploadedDocument {
+  return {
+    ...base,
+    ...(storageId ? { storageId } : {}),
+    ...(sha256 ? { sha256 } : {}),
+    ...(typeof analysis.pageCount === 'number' ? { pageCount: analysis.pageCount } : {}),
+    ...(analysis.normalizedText ? { extractedText: analysis.normalizedText } : {}),
+    ...(analysis.textExtractionStatus
+      ? { textExtractionStatus: analysis.textExtractionStatus }
+      : {}),
+    ...(typeof analysis.wordCount === 'number' ? { wordCount: analysis.wordCount } : {}),
+    extractedSignals: signalsFromAnalysis(base, analysis),
+    analysis,
+  }
+}
+
 function statusClass(status: CaseSession['status']) {
   const base = 'rounded-md px-3 py-2 text-sm font-semibold'
   if (status === 'closed') return `${base} bg-[#dceadf] text-[#285b38]`
@@ -846,7 +1092,10 @@ function hasPanelActivity(session: CaseSession) {
       session.panelAssignment ||
       session.benchMemo ||
       session.panelDeliberation ||
-      session.panelDisposition,
+      session.panelDisposition ||
+      session.actorWorkProducts?.some((product) =>
+        ['bench_memo', 'judge_vote_memo', 'panel_disposition_draft'].includes(product.kind),
+      ),
   )
 }
 
@@ -854,6 +1103,14 @@ function hasPartyActivity(session: CaseSession) {
   return Boolean(
     session.counterpartyStrategy ||
       (session.amicusParticipation?.candidates.length ?? 0) > 0 ||
+      session.actorWorkProducts?.some((product) =>
+        [
+          'counterparty_strategy',
+          'counterparty_filing_draft',
+          'amicus_recommendation',
+          'amicus_filing_draft',
+        ].includes(product.kind),
+      ) ||
       acceptedFilings(session).some((filing) =>
         ['appellee', 'amicus'].includes(filing.participantRole),
       ),
@@ -1005,21 +1262,29 @@ function ViewTabs({
 function DocketView({
   session,
   activeToolCall,
+  activeActorTask,
   aiError,
   aiPending,
+  actorError,
+  actorPending,
   liveAiEnabled,
   liveAiUnavailableReason,
   onAdvanceExpected,
   onAdvanceLive,
+  onGenerateActorWorkProduct,
 }: {
   session: CaseSession
   activeToolCall: ToolCall
+  activeActorTask: ActorWorkProductTask | null
   aiError: string
   aiPending: boolean
+  actorError: string
+  actorPending: boolean
   liveAiEnabled: boolean
   liveAiUnavailableReason: string
   onAdvanceExpected: () => void
   onAdvanceLive: () => void
+  onGenerateActorWorkProduct: () => void
 }) {
   return (
     <div className="space-y-4">
@@ -1067,6 +1332,35 @@ function DocketView({
           </div>
         </div>
       </section>
+
+      {activeActorTask ? (
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+                <Bot className="h-4 w-4" aria-hidden="true" />
+                Actor Work Product
+              </div>
+              <div className="mt-1 text-lg font-semibold">{activeActorTask.label}</div>
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-[#59625d]">
+                {formatLabel(activeActorTask.actorId)} will draft a source-linked {formatLabel(activeActorTask.kind)} for review.
+              </p>
+              {actorError ? (
+                <p className="mt-2 text-sm font-medium text-[#8a321f]">{actorError}</p>
+              ) : null}
+            </div>
+            <button
+              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#5d5c28] px-4 text-sm font-semibold text-white hover:bg-[#4b4a20] disabled:cursor-not-allowed disabled:bg-[#aaa982]"
+              disabled={actorPending || !liveAiEnabled}
+              onClick={onGenerateActorWorkProduct}
+              type="button"
+            >
+              <Bot className="h-4 w-4" aria-hidden="true" />
+              {actorPending ? 'Drafting' : 'Generate Work Product'}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
         <div className="grid grid-cols-[80px_160px_1fr] border-b border-[#d8d1c4] px-4 py-3 text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
@@ -1211,16 +1505,22 @@ function StatusTile({
 
 function FilingView({
   draft,
+  documentError,
+  documentPending,
   events,
   validationIssues,
   onDraftChange,
+  onDocumentsSelected,
   onReset,
   onSubmit,
 }: {
   draft: FilingDraft
+  documentError: string
+  documentPending: boolean
   events: FilingEvent[]
   validationIssues: ValidationIssue[]
   onDraftChange: (draft: FilingDraft) => void
+  onDocumentsSelected: (files: FileList | null) => void
   onReset: (eventId?: string) => void
   onSubmit: () => void
 }) {
@@ -1229,11 +1529,21 @@ function FilingView({
   const ecfDefinition = selectedEvent
     ? ecfEventDefinitionFromFilingEvent(selectedEvent)
     : null
-
-  function setDocuments(files: FileList | null) {
-    const documents: UploadedDocument[] = Array.from(files ?? []).map(inferDocumentSignals)
-    onDraftChange({ ...draft, documents })
-  }
+  const briefWarnings = validationIssues.filter((issue) =>
+    [
+      'jurisdictional_statement_missing',
+      'issues_presented_missing',
+      'standard_of_review_missing',
+      'argument_section_missing',
+      'conclusion_relief_missing',
+      'record_citations_missing',
+      'appendix_references_missing',
+    ].includes(issue.code ?? ''),
+  )
+  const appendixWarnings = validationIssues.filter((issue) =>
+    (issue.code ?? '').startsWith('appendix_support_') ||
+    (issue.code ?? '').startsWith('issue_coverage_'),
+  )
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
@@ -1325,10 +1635,21 @@ function FilingView({
               <input
                 accept="application/pdf"
                 className="mt-4 w-full max-w-sm text-sm"
+                disabled={documentPending}
                 multiple
-                onChange={(event) => setDocuments(event.target.files)}
+                onChange={(event) => onDocumentsSelected(event.target.files)}
                 type="file"
               />
+              {documentPending ? (
+                <div className="mt-3 text-xs font-semibold text-[#68716c]">
+                  Extracting PDF text and storing upload...
+                </div>
+              ) : null}
+              {documentError ? (
+                <div className="mt-3 text-xs font-semibold text-[#8a321f]">
+                  {documentError}
+                </div>
+              ) : null}
             </div>
           </div>
         </label>
@@ -1340,8 +1661,20 @@ function FilingView({
                 <div>
                   <div className="font-semibold">{document.fileName}</div>
                   <div className="text-xs text-[#68716c]">
-                    {(document.sizeBytes / 1024).toFixed(1)} KB ·{' '}
-                    {document.extractedSignals.join(', ') || 'metadata only'}
+                    {(document.sizeBytes / 1024).toFixed(1)} KB · {formatDocumentAnalysis(document)}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <DocumentMetric label="Text" value={formatLabel(document.textExtractionStatus ?? document.analysis?.textExtractionStatus ?? 'fallback')} />
+                    <DocumentMetric label="Pages" value={String(document.pageCount ?? document.analysis?.pageCount ?? 'n/a')} />
+                    <DocumentMetric label="Words" value={String(document.wordCount ?? document.analysis?.wordCount ?? 'n/a')} />
+                    <DocumentMetric
+                      label="Certificates"
+                      value={certificateStatus(document)}
+                    />
+                    <DocumentMetric
+                      label="Record cites"
+                      value={String(document.analysis?.recordCitations?.length ?? 0)}
+                    />
                   </div>
                 </div>
                 <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
@@ -1350,6 +1683,21 @@ function FilingView({
               </div>
             ))}
           </div>
+        ) : null}
+
+        {[...briefWarnings, ...appendixWarnings].length ? (
+          <section className="mt-4 rounded-lg border border-[#ead7a7] bg-[#fff8e5] p-3">
+            <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#785b16]">
+              Brief Analysis Warnings
+            </div>
+            <div className="space-y-2">
+              {[...briefWarnings, ...appendixWarnings].slice(0, 6).map((warning, index) => (
+                <div className="text-sm leading-5 text-[#785b16]" key={`${warning.code}-${index}`}>
+                  {warning.message}
+                </div>
+              ))}
+            </div>
+          </section>
         ) : null}
 
         <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -1400,7 +1748,7 @@ function FilingView({
         <div className="mt-4 flex justify-end">
           <button
             className="flex h-11 items-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173e40] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
-            disabled={errors.length > 0}
+            disabled={errors.length > 0 || documentPending}
             onClick={onSubmit}
             type="button"
           >
@@ -1456,6 +1804,31 @@ function Toggle({
   )
 }
 
+function DocumentMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="rounded border border-[#d8d1c4] bg-[#fbfaf7] px-2 py-1 text-xs font-medium text-[#3e4843]">
+      {label}: {value}
+    </span>
+  )
+}
+
+function formatDocumentAnalysis(document: UploadedDocument) {
+  const status = document.textExtractionStatus ?? document.analysis?.textExtractionStatus
+  const recordCites = document.analysis?.recordCitations?.length ?? 0
+  const appendixCites = document.analysis?.appendixCitations?.length ?? 0
+  if (!status) return document.extractedSignals.join(', ') || 'metadata only'
+  return `${formatLabel(status)} · ${recordCites} record cite${recordCites === 1 ? '' : 's'} · ${appendixCites} appendix cite${appendixCites === 1 ? '' : 's'}`
+}
+
+function certificateStatus(document: UploadedDocument) {
+  const service = document.analysis?.certificateOfServiceDetected
+  const compliance = document.analysis?.certificateOfComplianceDetected
+  if (service && compliance) return 'service + compliance'
+  if (service) return 'service'
+  if (compliance) return 'compliance'
+  return 'not detected'
+}
+
 function ValidationItem({ issue }: { issue: ValidationIssue }) {
   const Icon =
     issue.severity === 'error'
@@ -1477,6 +1850,12 @@ function ValidationItem({ issue }: { issue: ValidationIssue }) {
         <div>
           <div className="font-semibold">{formatLabel(issue.severity)}</div>
           <p className="mt-1 leading-5">{issue.message}</p>
+          {issue.code ? (
+            <div className="mt-1 font-mono text-xs opacity-80">{issue.code}</div>
+          ) : null}
+          {issue.cureSuggestion ? (
+            <p className="mt-2 leading-5">{issue.cureSuggestion}</p>
+          ) : null}
           {issue.ruleRefs.length ? (
             <div className="mt-2 flex flex-wrap gap-1">
               {issue.ruleRefs.map((rule) => (
@@ -1555,58 +1934,74 @@ function ReceiptView({ session }: { session: CaseSession }) {
   )
 }
 
-function PanelView({ session }: { session: CaseSession }) {
+function PanelView({
+  actorBusy,
+  actorError,
+  session,
+  onAcceptWorkProduct,
+  onRejectWorkProduct,
+}: {
+  actorBusy: boolean
+  actorError: string
+  session: CaseSession
+  onAcceptWorkProduct: (workProductId: string) => void
+  onRejectWorkProduct: (workProductId: string) => void
+}) {
   const votes = session.panelDeliberation?.votes ?? []
+  const panelWorkProducts = (session.actorWorkProducts ?? []).filter((product) =>
+    ['bench_memo', 'judge_vote_memo', 'panel_disposition_draft'].includes(product.kind),
+  )
   return (
-    <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
-      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
-        <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
-          <Gavel className="h-4 w-4" aria-hidden="true" />
-          Panel Status
-        </div>
-        <div className="space-y-3 text-sm">
-          <InfoRow
-            label="Assignment"
-            value={
-              session.panelAssignment?.judgeActorIds.map(formatLabel).join(', ') ??
-              'Not Assigned'
-            }
-          />
-          <InfoRow
-            label="Presiding judge"
-            value={
-              session.panelAssignment?.presidingJudgeActorId
-                ? formatLabel(session.panelAssignment.presidingJudgeActorId)
-                : 'Pending'
-            }
-          />
-          <InfoRow
-            label="Oral argument"
-            value={
-              session.panelAssignment?.oralArgumentDisposition
-                ? formatLabel(session.panelAssignment.oralArgumentDisposition)
-                : 'Pending'
-            }
-          />
-          <InfoRow
-            label="Disposition"
-            value={
-              session.panelDisposition?.disposition
-                ? formatLabel(session.panelDisposition.disposition)
-                : 'Pending'
-            }
-          />
-          <InfoRow
-            label="Mandate"
-            value={
-              session.panelDeliberation?.mandateStatus
-                ? formatLabel(session.panelDeliberation.mandateStatus)
-                : 'Not Started'
-            }
-          />
-        </div>
-      </section>
-      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+    <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            <Gavel className="h-4 w-4" aria-hidden="true" />
+            Panel Status
+          </div>
+          <div className="space-y-3 text-sm">
+            <InfoRow
+              label="Assignment"
+              value={
+                session.panelAssignment?.judgeActorIds.map(formatLabel).join(', ') ??
+                'Not Assigned'
+              }
+            />
+            <InfoRow
+              label="Presiding judge"
+              value={
+                session.panelAssignment?.presidingJudgeActorId
+                  ? formatLabel(session.panelAssignment.presidingJudgeActorId)
+                  : 'Pending'
+              }
+            />
+            <InfoRow
+              label="Oral argument"
+              value={
+                session.panelAssignment?.oralArgumentDisposition
+                  ? formatLabel(session.panelAssignment.oralArgumentDisposition)
+                  : 'Pending'
+              }
+            />
+            <InfoRow
+              label="Disposition"
+              value={
+                session.panelDisposition?.disposition
+                  ? formatLabel(session.panelDisposition.disposition)
+                  : 'Pending'
+              }
+            />
+            <InfoRow
+              label="Mandate"
+              value={
+                session.panelDeliberation?.mandateStatus
+                  ? formatLabel(session.panelDeliberation.mandateStatus)
+                  : 'Not Started'
+              }
+            />
+          </div>
+        </section>
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
         <div className="border-b border-[#d8d1c4] p-4">
           <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
             Deliberation
@@ -1653,21 +2048,61 @@ function PanelView({ session }: { session: CaseSession }) {
             </article>
           ) : null}
         </div>
-      </section>
+        </section>
+      </div>
+      <WorkProductsSection
+        actorBusy={actorBusy}
+        actorError={actorError}
+        products={panelWorkProducts}
+        session={session}
+        title="Panel AI Work Products"
+        onAcceptWorkProduct={onAcceptWorkProduct}
+        onRejectWorkProduct={onRejectWorkProduct}
+      />
     </div>
   )
 }
 
-function PartiesView({ session }: { session: CaseSession }) {
+function PartiesView({
+  actorBusy,
+  actorError,
+  session,
+  onAcceptWorkProduct,
+  onRejectWorkProduct,
+}: {
+  actorBusy: boolean
+  actorError: string
+  session: CaseSession
+  onAcceptWorkProduct: (workProductId: string) => void
+  onRejectWorkProduct: (workProductId: string) => void
+}) {
   const strategy = session.counterpartyStrategy
   const candidates = session.amicusParticipation?.candidates ?? []
+  const partyWorkProducts = (session.actorWorkProducts ?? []).filter((product) =>
+    [
+      'counterparty_strategy',
+      'counterparty_filing_draft',
+      'amicus_recommendation',
+      'amicus_filing_draft',
+    ].includes(product.kind),
+  )
 
-  if (!strategy && !candidates.length) {
+  if (!strategy && !candidates.length && !partyWorkProducts.length) {
     return <EmptyState text="Party activity will appear after a relevant accepted filing." />
   }
 
   return (
     <div className="space-y-4">
+      <WorkProductsSection
+        actorBusy={actorBusy}
+        actorError={actorError}
+        products={partyWorkProducts}
+        session={session}
+        title="Party AI Work Products"
+        onAcceptWorkProduct={onAcceptWorkProduct}
+        onRejectWorkProduct={onRejectWorkProduct}
+      />
+
       {strategy ? (
         <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
@@ -1736,6 +2171,164 @@ function PartiesView({ session }: { session: CaseSession }) {
       ) : null}
     </div>
   )
+}
+
+function WorkProductsSection({
+  actorBusy,
+  actorError,
+  products,
+  session,
+  title,
+  onAcceptWorkProduct,
+  onRejectWorkProduct,
+}: {
+  actorBusy: boolean
+  actorError: string
+  products: ActorWorkProduct[]
+  session: CaseSession
+  title: string
+  onAcceptWorkProduct: (workProductId: string) => void
+  onRejectWorkProduct: (workProductId: string) => void
+}) {
+  if (!products.length) return null
+
+  return (
+    <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+      <div className="border-b border-[#d8d1c4] p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+          <Bot className="h-4 w-4" aria-hidden="true" />
+          {title}
+        </div>
+        {actorError ? (
+          <p className="mt-2 text-sm font-medium text-[#8a321f]">{actorError}</p>
+        ) : null}
+      </div>
+      <div className="divide-y divide-[#e2dbcf]">
+        {products.map((product) => (
+          <WorkProductCard
+            actorBusy={actorBusy}
+            key={product.id}
+            product={product}
+            session={session}
+            onAcceptWorkProduct={onAcceptWorkProduct}
+            onRejectWorkProduct={onRejectWorkProduct}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function WorkProductCard({
+  actorBusy,
+  product,
+  session,
+  onAcceptWorkProduct,
+  onRejectWorkProduct,
+}: {
+  actorBusy: boolean
+  product: ActorWorkProduct
+  session: CaseSession
+  onAcceptWorkProduct: (workProductId: string) => void
+  onRejectWorkProduct: (workProductId: string) => void
+}) {
+  const filing = isGeneratedFilingWorkProduct(product)
+  const sourceLabels = sourceLabelsForWorkProduct(session, product)
+
+  return (
+    <article className="grid gap-3 p-4 text-sm lg:grid-cols-[220px_1fr]">
+      <div>
+        <div className="font-semibold">{formatLabel(product.kind)}</div>
+        <div className="mt-1 text-xs text-[#68716c]">
+          {formatLabel(product.actorId)} · {new Date(product.createdAt).toLocaleString()}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+            {formatLabel(product.status)}
+          </span>
+          <span className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs font-semibold text-[#3e4843]">
+            {filing ? 'AI Draft' : 'Reasoning Memo'}
+          </span>
+          {filing && product.status === 'accepted' ? (
+            <span className="rounded bg-[#dceadf] px-2 py-1 text-xs font-semibold text-[#285b38]">
+              Accepted Filing
+            </span>
+          ) : null}
+        </div>
+        {product.status === 'proposed' ? (
+          <div className="mt-3 grid gap-2">
+            <button
+              className="h-9 rounded-md bg-[#1d4d4f] px-3 text-xs font-semibold text-white hover:bg-[#173f41] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
+              disabled={actorBusy}
+              onClick={() => onAcceptWorkProduct(product.id)}
+              type="button"
+            >
+              Accept
+            </button>
+            <button
+              className="h-9 rounded-md border border-[#8a321f] px-3 text-xs font-semibold text-[#8a321f] hover:bg-[#fff1ee] disabled:cursor-not-allowed disabled:border-[#b9988f] disabled:text-[#b9988f]"
+              disabled={actorBusy}
+              onClick={() => onRejectWorkProduct(product.id)}
+              type="button"
+            >
+              Reject
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <div>
+        <div className="font-semibold">{workProductTitle(product)}</div>
+        <p className="mt-2 leading-6 text-[#59625d]">{workProductSummary(product)}</p>
+        {sourceLabels.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {sourceLabels.map((label) => (
+              <span
+                className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs"
+                key={label}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {product.validationIssues?.length ? (
+          <div className="mt-3 space-y-2">
+            {product.validationIssues.map((issue, index) => (
+              <ValidationItem issue={issue} key={`${issue.code ?? issue.message}-${index}`} />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  )
+}
+
+function isGeneratedFilingWorkProduct(product: ActorWorkProduct) {
+  return 'documentText' in product.workProduct
+}
+
+function workProductTitle(product: ActorWorkProduct) {
+  return 'title' in product.workProduct ? product.workProduct.title : formatLabel(product.kind)
+}
+
+function workProductSummary(product: ActorWorkProduct) {
+  if ('documentText' in product.workProduct) {
+    return product.workProduct.documentText.slice(0, 520)
+  }
+  return [
+    product.workProduct.summary,
+    ...product.workProduct.recommendations.slice(0, 2),
+  ].join(' ')
+}
+
+function sourceLabelsForWorkProduct(session: CaseSession, product: ActorWorkProduct) {
+  const filingById = new Map(session.filings.map((filing) => [filing.id, filing.title]))
+  return [
+    ...product.sourceFilingIds.map(
+      (sourceId) => `Filing: ${filingById.get(sourceId) ?? sourceId}`,
+    ),
+    ...product.sourceDocumentAnalysisIds.map((sourceId) => `Analysis: ${sourceId}`),
+  ].slice(0, 8)
 }
 
 function StrategyList({ title, items }: { title: string; items: string[] }) {

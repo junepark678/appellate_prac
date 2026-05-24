@@ -3,6 +3,8 @@ import { v } from 'convex/values'
 
 import {
   caseStatusValidator,
+  actorWorkProductKindValidator,
+  actorWorkProductStatusValidator,
   amicusCandidateValidator,
   amicusParticipationValidator,
   benchMemoValidator,
@@ -272,11 +274,23 @@ export default defineSchema({
   documents: defineTable({
     caseSessionId: v.id('caseSessions'),
     storageId: v.optional(v.id('_storage')),
+    sha256: v.optional(v.string()),
     fileName: v.string(),
     mimeType: v.string(),
     sizeBytes: v.number(),
     pageCount: v.optional(v.number()),
     extractedText: v.optional(v.string()),
+    textExtractionStatus: v.optional(
+      v.union(
+        v.literal('not_started'),
+        v.literal('extracted'),
+        v.literal('not_searchable'),
+        v.literal('failed'),
+        v.literal('fallback'),
+      ),
+    ),
+    wordCount: v.optional(v.number()),
+    analysisId: v.optional(v.id('documentAnalyses')),
     extractedSignals: v.array(v.string()),
     validationJson: v.optional(v.string()),
   }).index('by_case', ['caseSessionId']),
@@ -324,10 +338,30 @@ export default defineSchema({
     certificateOfComplianceDetected: v.boolean(),
     sealedOrRedactionWarning: v.boolean(),
     warnings: v.array(v.string()),
+    analysisJson: v.optional(v.string()),
+    extractedTextHash: v.optional(v.string()),
+    wordCount: v.optional(v.number()),
+    citationCount: v.optional(v.number()),
+    recordCitationCount: v.optional(v.number()),
+    appendixCitationCount: v.optional(v.number()),
     createdAt: v.string(),
   })
     .index('by_case', ['caseSessionId'])
     .index('by_document', ['documentId']),
+
+  actorWorkProducts: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    actorId: v.string(),
+    kind: actorWorkProductKindValidator,
+    status: actorWorkProductStatusValidator,
+    workProductJson: v.string(),
+    sourceDocumentAnalysisIds: v.array(v.string()),
+    sourceFilingIds: v.array(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_case_kind', ['caseSessionId', 'kind'])
+    .index('by_case_actor', ['caseSessionId', 'actorId']),
 
   filings: defineTable({
     caseSessionId: v.id('caseSessions'),

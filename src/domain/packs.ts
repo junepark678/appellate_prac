@@ -936,7 +936,12 @@ const aiActors: AiActor[] = [
     label: 'Staff Attorney',
     role: 'judge',
     authorityScope: ['screening memos', 'procedural recommendations'],
-    allowedTools: ['draftBenchMemo', 'draftStaffMemo', 'recommendClerkAction'],
+    allowedTools: [
+      'draftBenchMemo',
+      'draftStaffMemo',
+      'recommendClerkAction',
+      'draftAssessmentFeedback',
+    ],
   },
   {
     id: 'ca4_judge_1',

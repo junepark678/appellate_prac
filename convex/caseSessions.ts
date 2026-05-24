@@ -6,16 +6,27 @@ import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { getCurrentUser, requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
 import {
+  actorWorkProductKindValidator,
+  actorWorkProductValidator,
   caseSessionSummaryValidator,
   caseSessionValidator,
   courtListenerSearchResultValidator,
+  documentAnalysisValidator,
+  documentAnalysisRecordValidator,
   ecfReceiptValidator,
   filingDraftValidator,
   filingSubmissionValidator,
   preflightCheckResultValidator,
   toolCallValidator,
   trialDocketValidator,
+  uploadedDocumentValidator,
+  validationIssueValidator,
 } from './validators'
+import { generateActorWorkProductWithProvider } from '../src/domain/actors/orchestration'
+import {
+  canAcceptActorWorkProduct,
+  generatedFilingToSubmission,
+} from '../src/domain/actors/work-products'
 import {
   applyToolCall,
   createInitialSession,
@@ -25,7 +36,9 @@ import {
   validateToolCall,
 } from '../src/domain/simulation'
 import { requestProceduralToolCall } from '../src/integrations/openrouter'
+import { OpenRouterProvider } from '../src/modules/ai-providers/openrouter'
 import type {
+  ActorWorkProduct,
   CaseSession,
   FilingRecord,
   FilingSubmission,
@@ -35,6 +48,7 @@ import type {
   Scenario,
   UploadedDocument,
 } from '../src/domain/types'
+import type { DocumentAnalysis } from '../src/modules/types'
 import { submitEcfFiling as submitEcfFilingDomain } from '../src/domain/filing/ecf'
 import { preflightFilingSubmission } from '../src/domain/rules/executable-constraints'
 import {
@@ -74,6 +88,14 @@ function createdMonth(isoDate: string) {
 
 function makeRecordId(prefix: string, count: number) {
   return `${prefix}_${String(count + 1).padStart(4, '0')}`
+}
+
+function hashText(value: string) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (Math.imul(31, hash) + value.charCodeAt(index)) | 0
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0')
 }
 
 function scenarioFromDoc(
@@ -207,14 +229,42 @@ async function requireAuthorizedSessionDoc(
   return caseSession
 }
 
-function documentFromDoc(doc: Doc<'documents'>): UploadedDocument {
+function analysisFromDoc(doc: Doc<'documentAnalyses'>): DocumentAnalysis {
+  if (doc.analysisJson) {
+    return JSON.parse(doc.analysisJson) as DocumentAnalysis
+  }
+
+  return {
+    analyzerId: doc.analyzerId,
+    ...(typeof doc.pageCount === 'number' ? { pageCount: doc.pageCount } : {}),
+    fileSizeBytes: doc.fileSizeBytes,
+    mimeType: doc.mimeType,
+    searchableText: doc.searchableText,
+    certificateOfServiceDetected: doc.certificateOfServiceDetected,
+    certificateOfComplianceDetected: doc.certificateOfComplianceDetected,
+    sealedOrRedactionWarning: doc.sealedOrRedactionWarning,
+    warnings: doc.warnings,
+  }
+}
+
+function documentFromDoc(
+  doc: Doc<'documents'>,
+  analysis?: Doc<'documentAnalyses'>,
+): UploadedDocument {
+  const parsedAnalysis = analysis ? analysisFromDoc(analysis) : undefined
   return {
     id: doc._id,
     fileName: doc.fileName,
     mimeType: doc.mimeType,
     sizeBytes: doc.sizeBytes,
+    ...(doc.storageId ? { storageId: doc.storageId } : {}),
+    ...(doc.sha256 ? { sha256: doc.sha256 } : {}),
     ...(typeof doc.pageCount === 'number' ? { pageCount: doc.pageCount } : {}),
     ...(doc.extractedText ? { extractedText: doc.extractedText } : {}),
+    ...(doc.textExtractionStatus ? { textExtractionStatus: doc.textExtractionStatus } : {}),
+    ...(typeof doc.wordCount === 'number' ? { wordCount: doc.wordCount } : {}),
+    ...(doc.analysisId ? { analysisId: doc.analysisId } : {}),
+    ...(parsedAnalysis ? { analysis: parsedAnalysis } : {}),
     extractedSignals: doc.extractedSignals,
   }
 }
@@ -233,6 +283,7 @@ async function assembleCaseSession(
     scenarioRecordExcerpts,
     participants,
     filings,
+    documentAnalyses,
     docketEntries,
     deadlines,
     receipts,
@@ -241,6 +292,7 @@ async function assembleCaseSession(
     panelDeliberations,
     panelDispositions,
     assessments,
+    actorWorkProducts,
   ] = await Promise.all([
     ctx.db
       .query('scenarioIssues')
@@ -256,6 +308,10 @@ async function assembleCaseSession(
       .collect(),
     ctx.db
       .query('filings')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('documentAnalyses')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
       .collect(),
     ctx.db
@@ -290,7 +346,18 @@ async function assembleCaseSession(
       .query('assessments')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
       .collect(),
+    ctx.db
+      .query('actorWorkProducts')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
   ])
+  const analysisByDocumentId = new Map(
+    documentAnalyses
+      .filter((analysis): analysis is Doc<'documentAnalyses'> & { documentId: Id<'documents'> } =>
+        Boolean(analysis.documentId),
+      )
+      .map((analysis) => [analysis.documentId, analysis]),
+  )
 
   const filingRecords = await Promise.all(
     filings
@@ -306,7 +373,9 @@ async function assembleCaseSession(
           eventId: filing.eventId,
           participantRole: filing.participantRole,
           title: filing.title,
-          documents: persistedDocuments.map(documentFromDoc),
+          documents: persistedDocuments.map((document) =>
+            documentFromDoc(document, analysisByDocumentId.get(document._id)),
+          ),
           certificateOfService: filing.certificateOfService,
           certificateOfCompliance: filing.certificateOfCompliance,
           sealed: filing.sealed,
@@ -314,6 +383,10 @@ async function assembleCaseSession(
           filedAt: filing.filedAt,
           outcome: filing.outcome,
           validationIssues: filing.validationIssues,
+          ...(filing.submissionJson ? { submissionJson: filing.submissionJson } : {}),
+          ...(filing.documentAnalysisIds
+            ? { documentAnalysisIds: filing.documentAnalysisIds }
+            : {}),
         }
       }),
   )
@@ -437,6 +510,20 @@ async function assembleCaseSession(
           },
         }
       : {}),
+    actorWorkProducts: actorWorkProducts
+      .slice()
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((product): ActorWorkProduct => ({
+        id: product._id,
+        caseSessionId: product.caseSessionId,
+        actorId: product.actorId,
+        kind: product.kind,
+        status: product.status,
+        workProduct: JSON.parse(product.workProductJson) as ActorWorkProduct['workProduct'],
+        sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
+        sourceFilingIds: product.sourceFilingIds,
+        createdAt: product.createdAt,
+      })),
   }
 }
 
@@ -565,16 +652,55 @@ async function replaceSessionState(
   const filingIdMap = new Map<string, Id<'filings'>>()
   for (const filing of session.filings) {
     const documentIds: Array<Id<'documents'>> = []
+    const documentAnalysisIds: Array<Id<'documentAnalyses'>> = []
     for (const document of filing.documents) {
       const documentId = await ctx.db.insert('documents', {
         caseSessionId,
+        ...(document.storageId ? { storageId: document.storageId as Id<'_storage'> } : {}),
+        ...(document.sha256 ? { sha256: document.sha256 } : {}),
         fileName: document.fileName,
         mimeType: document.mimeType,
         sizeBytes: document.sizeBytes,
         ...(typeof document.pageCount === 'number' ? { pageCount: document.pageCount } : {}),
         ...(document.extractedText ? { extractedText: document.extractedText } : {}),
+        ...(document.textExtractionStatus
+          ? { textExtractionStatus: document.textExtractionStatus }
+          : {}),
+        ...(typeof document.wordCount === 'number' ? { wordCount: document.wordCount } : {}),
         extractedSignals: document.extractedSignals,
+        ...(document.analysis ? { validationJson: JSON.stringify(document.analysis) } : {}),
       })
+      if (document.analysis) {
+        const analysis = document.analysis
+        const analysisId = await ctx.db.insert('documentAnalyses', {
+          caseSessionId,
+          documentId,
+          analyzerId: analysis.analyzerId,
+          ...(typeof analysis.pageCount === 'number' ? { pageCount: analysis.pageCount } : {}),
+          fileSizeBytes: analysis.fileSizeBytes,
+          mimeType: analysis.mimeType,
+          searchableText: analysis.searchableText,
+          certificateOfServiceDetected: analysis.certificateOfServiceDetected,
+          certificateOfComplianceDetected: analysis.certificateOfComplianceDetected,
+          sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
+          warnings: analysis.warnings,
+          analysisJson: JSON.stringify(analysis),
+          ...(analysis.normalizedText ? { extractedTextHash: hashText(analysis.normalizedText) } : {}),
+          ...(typeof analysis.wordCount === 'number' ? { wordCount: analysis.wordCount } : {}),
+          ...(analysis.legalCitations
+            ? { citationCount: analysis.legalCitations.length }
+            : {}),
+          ...(analysis.recordCitations
+            ? { recordCitationCount: analysis.recordCitations.length }
+            : {}),
+          ...(analysis.appendixCitations
+            ? { appendixCitationCount: analysis.appendixCitations.length }
+            : {}),
+          createdAt: filing.filedAt,
+        })
+        documentAnalysisIds.push(analysisId)
+        await ctx.db.patch(documentId, { analysisId })
+      }
       documentIds.push(documentId)
     }
 
@@ -591,6 +717,8 @@ async function replaceSessionState(
       filedAt: filing.filedAt,
       outcome: filing.outcome,
       validationIssues: filing.validationIssues,
+      ...(filing.submissionJson ? { submissionJson: filing.submissionJson } : {}),
+      ...(documentAnalysisIds.length ? { documentAnalysisIds } : {}),
     })
     filingIdMap.set(filing.id, filingId)
   }
@@ -964,6 +1092,121 @@ export const preflightFiling = query({
   },
 })
 
+export const generateDocumentUploadUrl = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.string(),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    return ctx.storage.generateUploadUrl()
+  },
+})
+
+export const persistDocumentAnalysis = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    document: uploadedDocumentValidator,
+    analysis: documentAnalysisValidator,
+  },
+  returns: v.object({
+    document: uploadedDocumentValidator,
+    analysisId: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const documentId = await ctx.db.insert('documents', {
+      caseSessionId: args.caseSessionId,
+      ...(args.document.storageId
+        ? { storageId: args.document.storageId as Id<'_storage'> }
+        : {}),
+      ...(args.document.sha256 ? { sha256: args.document.sha256 } : {}),
+      fileName: args.document.fileName,
+      mimeType: args.document.mimeType,
+      sizeBytes: args.document.sizeBytes,
+      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
+      ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
+      ...(args.analysis.textExtractionStatus
+        ? { textExtractionStatus: args.analysis.textExtractionStatus }
+        : {}),
+      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
+      extractedSignals: args.document.extractedSignals,
+      validationJson: JSON.stringify(args.analysis),
+    })
+    const analysisId = await ctx.db.insert('documentAnalyses', {
+      caseSessionId: args.caseSessionId,
+      documentId,
+      analyzerId: args.analysis.analyzerId,
+      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
+      fileSizeBytes: args.analysis.fileSizeBytes,
+      mimeType: args.analysis.mimeType,
+      searchableText: args.analysis.searchableText,
+      certificateOfServiceDetected: args.analysis.certificateOfServiceDetected,
+      certificateOfComplianceDetected: args.analysis.certificateOfComplianceDetected,
+      sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
+      warnings: args.analysis.warnings,
+      analysisJson: JSON.stringify(args.analysis),
+      ...(args.analysis.normalizedText
+        ? { extractedTextHash: hashText(args.analysis.normalizedText) }
+        : {}),
+      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
+      ...(args.analysis.legalCitations
+        ? { citationCount: args.analysis.legalCitations.length }
+        : {}),
+      ...(args.analysis.recordCitations
+        ? { recordCitationCount: args.analysis.recordCitations.length }
+        : {}),
+      ...(args.analysis.appendixCitations
+        ? { appendixCitationCount: args.analysis.appendixCitations.length }
+        : {}),
+      createdAt: new Date().toISOString(),
+    })
+    await ctx.db.patch(documentId, { analysisId })
+
+    const document: UploadedDocument = {
+      ...args.document,
+      id: documentId,
+      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
+      ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
+      ...(args.analysis.textExtractionStatus
+        ? { textExtractionStatus: args.analysis.textExtractionStatus }
+        : {}),
+      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
+      analysisId,
+      analysis: args.analysis,
+    }
+
+    return { document, analysisId }
+  },
+})
+
+export const getDocumentAnalysesForCurrentUser = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.array(documentAnalysisRecordValidator),
+  handler: async (ctx, args) => {
+    const { user } = await getCurrentUser(ctx)
+    if (!user) return []
+
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const analyses = await ctx.db
+      .query('documentAnalyses')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
+      .collect()
+
+    return analyses.map((analysis) => ({
+      id: analysis._id,
+      caseSessionId: analysis.caseSessionId,
+      ...(analysis.documentId ? { documentId: analysis.documentId } : {}),
+      analysis: analysisFromDoc(analysis),
+      createdAt: analysis.createdAt,
+    }))
+  },
+})
+
 export const submitEcfFiling = mutation({
   args: {
     caseSessionId: v.id('caseSessions'),
@@ -1298,6 +1541,253 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
       user._id,
     )
     return saved
+  },
+})
+
+export const persistActorWorkProductForCurrentUser = internalMutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    actorId: v.string(),
+    kind: actorWorkProductKindValidator,
+    workProductJson: v.string(),
+    sourceDocumentAnalysisIds: v.array(v.string()),
+    sourceFilingIds: v.array(v.string()),
+    validationIssues: v.array(validationIssueValidator),
+    createdAt: v.string(),
+  },
+  returns: actorWorkProductValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const productId = await ctx.db.insert('actorWorkProducts', {
+      caseSessionId: args.caseSessionId,
+      actorId: args.actorId,
+      kind: args.kind,
+      status: 'proposed' as const,
+      workProductJson: args.workProductJson,
+      sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
+      sourceFilingIds: args.sourceFilingIds,
+      createdAt: args.createdAt,
+    })
+
+    return {
+      id: productId,
+      caseSessionId: args.caseSessionId,
+      actorId: args.actorId,
+      kind: args.kind,
+      status: 'proposed' as const,
+      workProduct: JSON.parse(args.workProductJson) as ActorWorkProduct['workProduct'],
+      sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
+      sourceFilingIds: args.sourceFilingIds,
+      createdAt: args.createdAt,
+      validationIssues: args.validationIssues,
+    }
+  },
+})
+
+export const generateActorWorkProduct = action({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    kind: v.optional(actorWorkProductKindValidator),
+  },
+  returns: actorWorkProductValidator,
+  handler: async (ctx, args) => {
+    await requireIdentity(ctx)
+    const nowIso = new Date().toISOString()
+    const session = (await ctx.runQuery((api as any).caseSessions.getForCurrentUser, {
+      caseSessionId: args.caseSessionId,
+    })) as CaseSession | null
+    if (!session) {
+      throw new Error('Case session not found')
+    }
+
+    const gate = (await ctx.runQuery((internal as any).caseSessions.getAiGateForCurrentUser, {
+      nowIso,
+      cooldownMs: openRouterCooldownMs,
+    })) as { allowed: boolean; reason?: string }
+    if (!gate.allowed) {
+      throw new Error(gate.reason ?? 'Live AI is temporarily unavailable.')
+    }
+
+    const model = requireEnv('OPENROUTER_MODEL')
+    const provider = new OpenRouterProvider({
+      apiKey: requireEnv('OPENROUTER_API_KEY'),
+      model,
+      appUrl: process.env.OPENROUTER_APP_URL,
+      appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
+    })
+    const startedAt = Date.now()
+
+    try {
+      const product = await generateActorWorkProductWithProvider({
+        session,
+        provider,
+        kind: args.kind,
+        nowIso,
+        model,
+      })
+      const persisted = (await ctx.runMutation(
+        (internal as any).caseSessions.persistActorWorkProductForCurrentUser,
+        {
+          caseSessionId: args.caseSessionId,
+          actorId: product.actorId,
+          kind: product.kind,
+          workProductJson: JSON.stringify(product.workProduct),
+          sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
+          sourceFilingIds: product.sourceFilingIds,
+          validationIssues: product.validationIssues ?? [],
+          createdAt: product.createdAt,
+        },
+      )) as ActorWorkProduct
+      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+        caseSessionId: args.caseSessionId,
+        actorId: product.actorId,
+        model,
+        promptHash: promptHashForSession(session),
+        toolCallJson: JSON.stringify(product.workProduct),
+        accepted: !(product.validationIssues ?? []).some((issue) => issue.severity === 'error'),
+        issues: (product.validationIssues ?? []).map((issue) => issue.code ?? issue.message),
+        costCents: estimatedOpenRouterCostCents,
+        latencyMs: Date.now() - startedAt,
+        createdAt: nowIso,
+      })
+      return persisted
+    } catch (error) {
+      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+        caseSessionId: args.caseSessionId,
+        actorId: 'openrouter',
+        model,
+        promptHash: promptHashForSession(session),
+        toolCallJson: '',
+        accepted: false,
+        issues: [errorMessage(error)],
+        costCents: 0,
+        latencyMs: Date.now() - startedAt,
+        errorClass: 'provider_error',
+        createdAt: nowIso,
+      })
+      throw new Error('Actor work product generation is temporarily unavailable.')
+    }
+  },
+})
+
+export const acceptActorWorkProduct = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    workProductId: v.id('actorWorkProducts'),
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    workProduct: actorWorkProductValidator,
+    receipt: v.union(ecfReceiptValidator, v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const productDoc = await ctx.db.get(args.workProductId)
+    if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
+      throw new Error('Actor work product not found')
+    }
+
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const product: ActorWorkProduct = {
+      id: productDoc._id,
+      caseSessionId: productDoc.caseSessionId,
+      actorId: productDoc.actorId,
+      kind: productDoc.kind,
+      status: productDoc.status,
+      workProduct: JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct'],
+      sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
+      sourceFilingIds: productDoc.sourceFilingIds,
+      createdAt: productDoc.createdAt,
+    }
+    const acceptance = canAcceptActorWorkProduct(session, product)
+    if (!acceptance.accepted) {
+      await ctx.db.patch(productDoc._id, { status: 'rejected' })
+      throw new Error(
+        acceptance.validationIssues.map((issue) => issue.message).join(' ') ||
+          'Actor work product failed deterministic validation.',
+      )
+    }
+
+    let nextSession = session
+    let receipt: ReturnType<typeof submitEcfFilingDomain>['receipt'] = null
+    const submission = generatedFilingToSubmission(session, product)
+    if (submission) {
+      const result = submitEcfFilingDomain(session, submission)
+      if (!result.preflight.accepted) {
+        await ctx.db.patch(productDoc._id, { status: 'rejected' })
+        throw new Error(result.preflight.issues.map((issue) => issue.message).join(' '))
+      }
+      nextSession = transitionAfterFiling(result.session)
+      receipt = result.receipt
+    }
+
+    await ctx.db.patch(productDoc._id, { status: 'accepted' })
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'actor_work_product_accepted',
+      {
+        workProductId: productDoc._id,
+        kind: productDoc.kind,
+        actorId: productDoc.actorId,
+        convertedToFiling: Boolean(submission),
+      },
+      user._id,
+    )
+
+    return {
+      session: saved,
+      workProduct: {
+        ...product,
+        status: 'accepted' as const,
+        validationIssues: acceptance.validationIssues,
+      },
+      receipt,
+    }
+  },
+})
+
+export const rejectActorWorkProduct = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    workProductId: v.id('actorWorkProducts'),
+  },
+  returns: actorWorkProductValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const productDoc = await ctx.db.get(args.workProductId)
+    if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
+      throw new Error('Actor work product not found')
+    }
+
+    await ctx.db.patch(productDoc._id, { status: 'rejected' })
+    await appendCaseSessionEvent(
+      ctx,
+      args.caseSessionId,
+      'actor_work_product_rejected',
+      {
+        workProductId: productDoc._id,
+        kind: productDoc.kind,
+        actorId: productDoc.actorId,
+      },
+      user._id,
+    )
+
+    return {
+      id: productDoc._id,
+      caseSessionId: productDoc.caseSessionId,
+      actorId: productDoc.actorId,
+      kind: productDoc.kind,
+      status: 'rejected' as const,
+      workProduct: JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct'],
+      sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
+      sourceFilingIds: productDoc.sourceFilingIds,
+      createdAt: productDoc.createdAt,
+    }
   },
 })
 
