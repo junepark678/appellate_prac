@@ -5,6 +5,7 @@ import {
   caseStatusValidator,
   actorWorkProductKindValidator,
   actorWorkProductStatusValidator,
+  autonomyModeValidator,
   amicusCandidateValidator,
   amicusParticipationValidator,
   benchMemoValidator,
@@ -17,7 +18,9 @@ import {
   filingOutcomeValidator,
   participantRoleValidator,
   procedureStateValidator,
+  qualityStateValidator,
   ruleRefValidator,
+  turnPolicyValidator,
   validationIssueValidator,
 } from './validators'
 
@@ -63,6 +66,10 @@ export default defineSchema({
     dueAt: v.optional(v.string()),
     rubricId: v.optional(v.string()),
     published: v.boolean(),
+    autonomyMode: v.optional(autonomyModeValidator),
+    simulationPolicyId: v.optional(v.id('simulationPolicies')),
+    budgetCapCents: v.optional(v.number()),
+    hideAiReasoning: v.optional(v.boolean()),
     createdByUserId: v.id('users'),
     createdAt: v.string(),
   })
@@ -122,6 +129,7 @@ export default defineSchema({
     fetchedAt: v.string(),
     contentHash: v.string(),
     rawText: v.string(),
+    rawStorageId: v.optional(v.id('_storage')),
     parserVersion: v.string(),
     reviewStatus: v.union(
       v.literal('draft'),
@@ -145,6 +153,13 @@ export default defineSchema({
     ruleModuleId: v.string(),
     ruleId: v.string(),
     sourceVersionId: v.string(),
+    provenance: v.optional(
+      v.union(
+        v.literal('source-backed'),
+        v.literal('simulator-only'),
+        v.literal('expert-authored'),
+      ),
+    ),
     topic: v.string(),
     kind: v.string(),
     value: v.string(),
@@ -294,6 +309,11 @@ export default defineSchema({
     courtPackId: v.string(),
     status: caseStatusValidator,
     procedureState: v.optional(procedureStateValidator),
+    autonomyMode: v.optional(autonomyModeValidator),
+    turnPolicy: v.optional(turnPolicyValidator),
+    sourceProfileId: v.optional(v.string()),
+    qualityState: v.optional(qualityStateValidator),
+    legalTrainingDisclaimerAcceptedAt: v.optional(v.string()),
     simulatedDate: v.string(),
   })
     .index('by_user', ['userId'])
@@ -388,7 +408,21 @@ export default defineSchema({
     actorId: v.string(),
     kind: actorWorkProductKindValidator,
     status: actorWorkProductStatusValidator,
+    reviewStatus: v.optional(
+      v.union(
+        v.literal('proposed'),
+        v.literal('auto_applied'),
+        v.literal('accepted'),
+        v.literal('rejected'),
+        v.literal('needs_review'),
+      ),
+    ),
     workProductJson: v.string(),
+    citationsJson: v.optional(v.string()),
+    ruleRefs: v.optional(v.array(ruleRefValidator)),
+    recordRefs: v.optional(v.array(v.string())),
+    confidence: v.optional(v.number()),
+    roleAuthority: v.optional(v.string()),
     sourceDocumentAnalysisIds: v.array(v.string()),
     sourceFilingIds: v.array(v.string()),
     createdAt: v.string(),
@@ -401,6 +435,8 @@ export default defineSchema({
     caseSessionId: v.id('caseSessions'),
     eventId: v.string(),
     participantRole: participantRoleValidator,
+    filerPartyId: v.optional(v.string()),
+    partyIds: v.optional(v.array(v.string())),
     title: v.string(),
     documentIds: v.array(v.id('documents')),
     certificateOfService: v.boolean(),
@@ -479,6 +515,13 @@ export default defineSchema({
     kind: v.string(),
     status: v.string(),
     payloadJson: v.string(),
+    inputSnapshotHash: v.optional(v.string()),
+    outputSnapshotHash: v.optional(v.string()),
+    validatorVersion: v.optional(v.string()),
+    retryCount: v.optional(v.number()),
+    stoppedReason: v.optional(v.string()),
+    rawActorPacketStorageId: v.optional(v.id('_storage')),
+    rawProviderResultStorageId: v.optional(v.id('_storage')),
     createdAt: v.string(),
   })
     .index('by_case', ['caseSessionId'])
@@ -489,6 +532,8 @@ export default defineSchema({
     turnId: v.id('simulationTurns'),
     actorId: v.string(),
     packetJson: v.string(),
+    packetHash: v.optional(v.string()),
+    rawStorageId: v.optional(v.id('_storage')),
     createdAt: v.string(),
   })
     .index('by_case', ['caseSessionId'])
@@ -499,6 +544,8 @@ export default defineSchema({
     turnId: v.id('simulationTurns'),
     actorId: v.string(),
     decisionJson: v.string(),
+    decisionHash: v.optional(v.string()),
+    rawProviderResultStorageId: v.optional(v.id('_storage')),
     accepted: v.boolean(),
     issues: v.array(v.string()),
     createdAt: v.string(),
@@ -621,4 +668,75 @@ export default defineSchema({
     meritsFindings: v.array(v.string()),
     nextPracticeTargets: v.array(v.string()),
   }).index('by_case', ['caseSessionId']),
+
+  sourceArtifacts: defineTable({
+    sourceVersionId: v.string(),
+    label: v.string(),
+    url: v.string(),
+    fetchedAt: v.string(),
+    contentHash: v.string(),
+    parserVersion: v.string(),
+    effectiveDate: v.optional(v.string()),
+    mediaType: v.optional(v.string()),
+    rawStorageId: v.optional(v.id('_storage')),
+    rawText: v.optional(v.string()),
+    reviewStatus: v.union(
+      v.literal('draft'),
+      v.literal('reviewed'),
+      v.literal('published'),
+      v.literal('rejected'),
+    ),
+  })
+    .index('by_source_version', ['sourceVersionId'])
+    .index('by_status', ['reviewStatus'])
+    .index('by_hash', ['contentHash']),
+
+  sourceReviewDecisions: defineTable({
+    sourceArtifactId: v.id('sourceArtifacts'),
+    reviewerUserId: v.id('users'),
+    decision: v.union(v.literal('reviewed'), v.literal('published'), v.literal('rejected')),
+    notes: v.string(),
+    changedConstraintsJson: v.optional(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_source_artifact', ['sourceArtifactId'])
+    .index('by_reviewer', ['reviewerUserId']),
+
+  simulationPolicies: defineTable({
+    scope: v.union(v.literal('course'), v.literal('assignment'), v.literal('session')),
+    scopeId: v.string(),
+    autonomyMode: autonomyModeValidator,
+    maxTurnsPerRun: v.number(),
+    maxCostCentsPerRun: v.number(),
+    requireHumanApprovalFor: v.array(v.string()),
+    stopOnDeficiency: v.boolean(),
+    createdByUserId: v.id('users'),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+  })
+    .index('by_scope', ['scope', 'scopeId'])
+    .index('by_creator', ['createdByUserId']),
+
+  simulationEvalRuns: defineTable({
+    scenarioId: v.id('scenarios'),
+    model: v.string(),
+    pass: v.boolean(),
+    legalRiskLabels: v.array(v.string()),
+    regressionMetadataJson: v.string(),
+    criticalFailureCount: v.number(),
+    validTurnRate: v.number(),
+    createdAt: v.string(),
+  })
+    .index('by_scenario', ['scenarioId'])
+    .index('by_model', ['model'])
+    .index('by_pass', ['pass']),
+
+  userDisclaimers: defineTable({
+    userId: v.id('users'),
+    version: v.string(),
+    acceptedAt: v.string(),
+    trainingOnly: v.boolean(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_version', ['userId', 'version']),
 })

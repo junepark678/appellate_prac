@@ -40,6 +40,21 @@ export type CaseStatus =
   | 'closed'
   | 'dismissed'
 
+export type AutonomyMode = 'paused' | 'supervised' | 'autonomous'
+
+export type TurnPolicy = {
+  maxTurnsPerRun: number
+  requireHumanApprovalFor: string[]
+  stopOnDeficiency: boolean
+}
+
+export type QualityState =
+  | 'draft'
+  | 'source_review_pending'
+  | 'source_reviewed'
+  | 'eval_ready'
+  | 'beta_approved'
+
 export type ProcedureState =
   | 'case_opened'
   | 'notice_pending'
@@ -373,14 +388,36 @@ export type FilingAttachment = {
 export type FilingMetadata = {
   filingAttorneyName?: string
   representedPartyId?: string
+  representedPartyIds?: string[]
+  selectedReliefs?: string[]
   feePaymentStatus?: 'not_required' | 'paid' | 'deferred' | 'waived' | 'pending'
+  feeTransactionStub?: {
+    transactionId: string
+    amountCents: number
+    status: 'simulated_paid' | 'waived' | 'deferred' | 'pending'
+  }
   reliefRequested?: string
   serviceMethod: 'cm_ecf' | 'mail' | 'email' | 'hand_delivery' | 'none'
   relatedDocketEntryId?: string
+  relatedDocketEntryIds?: string[]
+  serviceRecipientIds?: string[]
   consentStatus?: 'all_parties_consent' | 'partial_consent' | 'no_consent' | 'unknown'
   sealedDocumentType?: string
+  sealedAccessMode?: 'public' | 'sealed' | 'court_only' | 'selected_parties'
   privacyAcknowledged?: boolean
+  privacyReview?: {
+    completed: boolean
+    reviewerRole: 'learner' | 'instructor' | 'clerk_ai'
+    warnings: string[]
+  }
   publicRedactedVersionIncluded?: boolean
+  redactedPublicVersionDocumentId?: string
+  paperCopyRequirement?: {
+    required: boolean
+    copies: number
+    dueDate?: string
+    notes?: string
+  }
   serviceListOverrides?: {
     additionalRecipients?: string[]
     suppressedParticipantIds?: string[]
@@ -397,6 +434,8 @@ export type FilingMetadata = {
 export type FilingSubmission = {
   eventId: string
   participantRole: ParticipantRole
+  filerPartyId?: string
+  partyIds?: string[]
   title: string
   mainDocument: UploadedDocument
   attachments: FilingAttachment[]
@@ -438,6 +477,8 @@ export type FilingRecord = FilingDraft & {
   validationIssues: ValidationIssue[]
   submissionJson?: string
   documentAnalysisIds?: string[]
+  filerPartyId?: string
+  partyIds?: string[]
 }
 
 export type EcfReceipt = {
@@ -517,6 +558,11 @@ export type CaseSession = {
   courtPackId: string
   status: CaseStatus
   procedureState?: ProcedureState
+  autonomyMode: AutonomyMode
+  turnPolicy: TurnPolicy
+  sourceProfileId?: string
+  qualityState: QualityState
+  legalTrainingDisclaimerAcceptedAt?: string
   simulatedDate: string
   participants: Participant[]
   docketEntries: DocketEntry[]
@@ -546,8 +592,10 @@ export type ActorWorkProductKind =
 
 export type ActorWorkProductStatus =
   | 'proposed'
+  | 'auto_applied'
   | 'accepted'
   | 'rejected'
+  | 'needs_review'
   | 'superseded'
 
 export type ActorCitation = {
@@ -583,6 +631,9 @@ export type GeneratedFilingDraft = {
   notes: string
   citations: ActorCitation[]
   ruleRefs: RuleRef[]
+  recordRefs?: string[]
+  confidence?: number
+  roleAuthority?: string
 }
 
 export type ActorReasoningMemo = {
@@ -596,6 +647,8 @@ export type ActorReasoningMemo = {
   requestedDisposition?: string
   reliefOption?: string
   confidence?: number
+  recordRefs?: string[]
+  roleAuthority?: string
 }
 
 export type ActorWorkProduct = {
@@ -604,7 +657,13 @@ export type ActorWorkProduct = {
   actorId: string
   kind: ActorWorkProductKind
   status: ActorWorkProductStatus
+  reviewStatus: 'proposed' | 'auto_applied' | 'accepted' | 'rejected' | 'needs_review'
   workProduct: GeneratedFilingDraft | ActorReasoningMemo
+  citations: ActorCitation[]
+  ruleRefs: RuleRef[]
+  recordRefs: string[]
+  confidence: number
+  roleAuthority: string
   sourceDocumentAnalysisIds: string[]
   sourceFilingIds: string[]
   createdAt: string
@@ -1053,6 +1112,44 @@ export type SimulationTurn = {
   startedAt: string
   completedAt?: string
   effects: string[]
+  inputSnapshotHash: string
+  outputSnapshotHash: string
+  validatorVersion: string
+  retryCount: number
+  stoppedReason?: string
+  rawActorPacketStorageId?: string
+  rawProviderResultStorageId?: string
+}
+
+export type SimulationPolicy = {
+  id: string
+  scope: 'course' | 'assignment' | 'session'
+  scopeId: string
+  autonomyMode: AutonomyMode
+  maxTurnsPerRun: number
+  maxCostCentsPerRun: number
+  requireHumanApprovalFor: string[]
+  stopOnDeficiency: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type AutonomousRunStopReason =
+  | 'autonomy_paused'
+  | 'learner_required'
+  | 'human_approval_required'
+  | 'deficiency_detected'
+  | 'budget_limit'
+  | 'turn_limit'
+  | 'validator_rejection'
+  | 'instructor_pause'
+  | 'unhandled_legal_issue'
+
+export type AutonomousSimulationRun = {
+  session: CaseSession
+  turns: SimulationTurn[]
+  stoppedReason: AutonomousRunStopReason
+  budgetSpentCents: number
 }
 
 export type ActorPacket = {

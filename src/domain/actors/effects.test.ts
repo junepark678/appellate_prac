@@ -136,24 +136,31 @@ function memoProduct(
   workProduct: Partial<ActorReasoningMemo> = {},
 ): ActorWorkProduct {
   const session = createInitialSession()
+  const memo = {
+    title: workProduct.title ?? kind,
+    summary: workProduct.summary ?? 'Source-linked recommendation.',
+    reasoning: workProduct.reasoning ?? ['The accepted filings support the recommendation.'],
+    recommendations: workProduct.recommendations ?? ['Proceed under the available posture.'],
+    citations: workProduct.citations ?? [],
+    ruleRefs: workProduct.ruleRefs ?? [],
+    proceduralClaims: workProduct.proceduralClaims,
+    requestedDisposition: workProduct.requestedDisposition,
+    reliefOption: workProduct.reliefOption,
+    confidence: workProduct.confidence,
+  }
   return {
     id: `${kind}_${actorId}`,
     caseSessionId: session.id,
     actorId,
     kind,
     status: 'proposed',
-    workProduct: {
-      title: workProduct.title ?? kind,
-      summary: workProduct.summary ?? 'Source-linked recommendation.',
-      reasoning: workProduct.reasoning ?? ['The accepted filings support the recommendation.'],
-      recommendations: workProduct.recommendations ?? ['Proceed under the available posture.'],
-      citations: workProduct.citations ?? [],
-      ruleRefs: workProduct.ruleRefs ?? [],
-      proceduralClaims: workProduct.proceduralClaims,
-      requestedDisposition: workProduct.requestedDisposition,
-      reliefOption: workProduct.reliefOption,
-      confidence: workProduct.confidence,
-    },
+    reviewStatus: 'proposed',
+    workProduct: memo,
+    citations: memo.citations,
+    ruleRefs: memo.ruleRefs,
+    recordRefs: [],
+    confidence: memo.confidence ?? 0.75,
+    roleAuthority: 'test_actor',
     sourceDocumentAnalysisIds: [],
     sourceFilingIds: [],
     createdAt: '2026-05-24T10:00:00.000Z',
@@ -171,7 +178,13 @@ function filingProduct(
     actorId,
     kind,
     status: 'proposed',
+    reviewStatus: 'proposed',
     workProduct: draftProduct,
+    citations: draftProduct.citations,
+    ruleRefs: draftProduct.ruleRefs,
+    recordRefs: draftProduct.recordRefs ?? [],
+    confidence: draftProduct.confidence ?? 0.75,
+    roleAuthority: 'test_actor',
     sourceDocumentAnalysisIds: [],
     sourceFilingIds: [],
     createdAt: '2026-05-24T10:00:00.000Z',
@@ -360,4 +373,3 @@ describe('accepted actor work product effects', () => {
     expect(result.session.assessment?.proceduralFindings[0]).toContain('ECF sequence')
   })
 })
-

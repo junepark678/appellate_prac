@@ -20,6 +20,28 @@ import type {
 } from '../types'
 import type { AiProvider, StructuredAiRequest, StructuredAiResult } from '../../modules/types'
 
+function actorProduct(
+  input: Omit<
+    ActorWorkProduct,
+    'reviewStatus' | 'citations' | 'ruleRefs' | 'recordRefs' | 'confidence' | 'roleAuthority'
+  >,
+): ActorWorkProduct {
+  return {
+    ...input,
+    reviewStatus:
+      input.status === 'accepted'
+        ? 'accepted'
+        : input.status === 'rejected'
+          ? 'rejected'
+          : 'proposed',
+    citations: input.workProduct.citations,
+    ruleRefs: input.workProduct.ruleRefs,
+    recordRefs: input.workProduct.recordRefs ?? [],
+    confidence: input.workProduct.confidence ?? 0.75,
+    roleAuthority: input.workProduct.roleAuthority ?? 'test_actor',
+  }
+}
+
 const noticePdf: UploadedDocument = {
   id: 'notice',
   fileName: 'notice-of-appeal.pdf',
@@ -137,7 +159,7 @@ class FakeProvider implements AiProvider {
 describe('actor work products', () => {
   it('validates AI work products by actor role and procedure state', () => {
     const session = createInitialSession()
-    const product: ActorWorkProduct = {
+    const product = actorProduct({
       id: 'wp1',
       caseSessionId: session.id,
       actorId: 'ca4_judge_1',
@@ -154,7 +176,7 @@ describe('actor work products', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: [],
       createdAt: session.simulatedDate,
-    }
+    })
 
     const issues = validateActorWorkProduct(session, product)
     expect(issues.some((issue) => issue.code === 'actor_role_not_authorized')).toBe(true)
@@ -165,7 +187,7 @@ describe('actor work products', () => {
 
   it('converts a generated appellee brief into an ECF submission', () => {
     const session = briefedSession()
-    const product: ActorWorkProduct = {
+    const product = actorProduct({
       id: 'wp2',
       caseSessionId: session.id,
       actorId: 'appellee_ai',
@@ -188,7 +210,7 @@ describe('actor work products', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: [session.filings[2]?.id ?? 'missing'],
       createdAt: session.simulatedDate,
-    }
+    })
 
     const submission = generatedFilingToSubmission(session, product)
     expect(submission?.eventId).toBe('appellee_brief')
@@ -203,7 +225,7 @@ describe('actor work products', () => {
     let session = createInitialSession()
     session = fileDraft(session, draft('notice_of_appeal', noticePdf))
     session = assignPanel({ ...session, status: 'submitted', procedureState: 'panel_deliberation' })
-    const product: ActorWorkProduct = {
+    const product = actorProduct({
       id: 'wp3',
       caseSessionId: session.id,
       actorId: 'ca4_judge_1',
@@ -223,7 +245,7 @@ describe('actor work products', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: [],
       createdAt: session.simulatedDate,
-    }
+    })
 
     expect(validateActorWorkProduct(session, product).map((issue) => issue.code)).toContain(
       'barred_relief_requested',
@@ -264,7 +286,7 @@ describe('actor work products', () => {
       assignPanel({ ...session, status: 'submitted', procedureState: 'panel_deliberation' }),
     )
 
-    const product: ActorWorkProduct = {
+    const product = actorProduct({
       id: 'wp4',
       caseSessionId: session.id,
       actorId: 'ca4_panel',
@@ -283,7 +305,7 @@ describe('actor work products', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: [],
       createdAt: session.simulatedDate,
-    }
+    })
 
     const withoutVotes = validateActorWorkProduct(session, product)
     expect(withoutVotes.map((issue) => issue.code)).toContain(

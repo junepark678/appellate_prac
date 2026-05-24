@@ -60,7 +60,11 @@ import {
   inferProcedureState,
   transitionAfterFiling,
 } from '../src/domain/procedure/state-machine'
-import { advanceSimulationTurn as advanceSimulationTurnDomain } from '../src/domain/simulation/director'
+import {
+  advanceAutonomousSimulation as advanceAutonomousSimulationDomain,
+  advanceSimulationTurn as advanceSimulationTurnDomain,
+  snapshotHash,
+} from '../src/domain/simulation/director'
 import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -101,6 +105,12 @@ function hashText(value: string) {
     hash = (Math.imul(31, hash) + value.charCodeAt(index)) | 0
   }
   return Math.abs(hash).toString(16).padStart(8, '0')
+}
+
+const defaultTurnPolicy = {
+  maxTurnsPerRun: 6,
+  requireHumanApprovalFor: ['disposeCase', 'enterJudgment'],
+  stopOnDeficiency: true,
 }
 
 function scenarioFromDoc(
@@ -460,6 +470,13 @@ async function assembleCaseSession(
     courtPackId: caseSession.courtPackId,
     status: caseSession.status,
     ...(caseSession.procedureState ? { procedureState: caseSession.procedureState } : {}),
+    autonomyMode: caseSession.autonomyMode ?? 'supervised',
+    turnPolicy: caseSession.turnPolicy ?? defaultTurnPolicy,
+    ...(caseSession.sourceProfileId ? { sourceProfileId: caseSession.sourceProfileId } : {}),
+    qualityState: caseSession.qualityState ?? 'source_review_pending',
+    ...(caseSession.legalTrainingDisclaimerAcceptedAt
+      ? { legalTrainingDisclaimerAcceptedAt: caseSession.legalTrainingDisclaimerAcceptedAt }
+      : {}),
     simulatedDate: caseSession.simulatedDate,
     participants: participants.map((participant) => ({
       id: participant._id,
@@ -544,17 +561,34 @@ async function assembleCaseSession(
     actorWorkProducts: actorWorkProducts
       .slice()
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .map((product): ActorWorkProduct => ({
-        id: product._id,
-        caseSessionId: product.caseSessionId,
-        actorId: product.actorId,
-        kind: product.kind,
-        status: product.status,
-        workProduct: JSON.parse(product.workProductJson) as ActorWorkProduct['workProduct'],
-        sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
-        sourceFilingIds: product.sourceFilingIds,
-        createdAt: product.createdAt,
-      })),
+      .map((product): ActorWorkProduct => {
+        const workProduct = JSON.parse(product.workProductJson) as ActorWorkProduct['workProduct']
+        return {
+          id: product._id,
+          caseSessionId: product.caseSessionId,
+          actorId: product.actorId,
+          kind: product.kind,
+          status: product.status,
+          reviewStatus:
+            product.reviewStatus ??
+            (product.status === 'accepted'
+              ? 'accepted'
+              : product.status === 'rejected'
+                ? 'rejected'
+                : 'proposed'),
+          workProduct,
+          citations: product.citationsJson
+            ? (JSON.parse(product.citationsJson) as ActorWorkProduct['citations'])
+            : workProduct.citations,
+          ruleRefs: product.ruleRefs ?? workProduct.ruleRefs,
+          recordRefs: product.recordRefs ?? workProduct.recordRefs ?? [],
+          confidence: product.confidence ?? workProduct.confidence ?? 0.75,
+          roleAuthority: product.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
+          sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
+          sourceFilingIds: product.sourceFilingIds,
+          createdAt: product.createdAt,
+        }
+      }),
     simulationTurns: simulationTurns
       .slice()
       .sort((a, b) => a.turnNumber - b.turnNumber)
@@ -563,6 +597,11 @@ async function assembleCaseSession(
           startedAt?: string
           completedAt?: string
           effects?: string[]
+          inputSnapshotHash?: string
+          outputSnapshotHash?: string
+          validatorVersion?: string
+          retryCount?: number
+          stoppedReason?: string
         }
         return {
           id: turn._id,
@@ -574,6 +613,19 @@ async function assembleCaseSession(
           startedAt: payload.startedAt ?? turn.createdAt,
           ...(payload.completedAt ? { completedAt: payload.completedAt } : {}),
           effects: payload.effects ?? [],
+          inputSnapshotHash: turn.inputSnapshotHash ?? payload.inputSnapshotHash ?? 'legacy',
+          outputSnapshotHash: turn.outputSnapshotHash ?? payload.outputSnapshotHash ?? 'legacy',
+          validatorVersion: turn.validatorVersion ?? payload.validatorVersion ?? 'legacy',
+          retryCount: turn.retryCount ?? payload.retryCount ?? 0,
+          ...(turn.stoppedReason ?? payload.stoppedReason
+            ? { stoppedReason: turn.stoppedReason ?? payload.stoppedReason }
+            : {}),
+          ...(turn.rawActorPacketStorageId
+            ? { rawActorPacketStorageId: turn.rawActorPacketStorageId }
+            : {}),
+          ...(turn.rawProviderResultStorageId
+            ? { rawProviderResultStorageId: turn.rawProviderResultStorageId }
+            : {}),
         }
       }),
   }
@@ -706,6 +758,13 @@ async function replaceSessionState(
     procedureState: session.procedureState ?? inferProcedureState(session),
     simulatedDate: session.simulatedDate,
     courtPackId: session.courtPackId,
+    autonomyMode: session.autonomyMode,
+    turnPolicy: session.turnPolicy,
+    ...(session.sourceProfileId ? { sourceProfileId: session.sourceProfileId } : {}),
+    qualityState: session.qualityState,
+    ...(session.legalTrainingDisclaimerAcceptedAt
+      ? { legalTrainingDisclaimerAcceptedAt: session.legalTrainingDisclaimerAcceptedAt }
+      : {}),
   })
   await deleteExistingSessionState(ctx, caseSessionId)
 
@@ -778,6 +837,8 @@ async function replaceSessionState(
       caseSessionId,
       eventId: filing.eventId,
       participantRole: filing.participantRole,
+      ...(filing.filerPartyId ? { filerPartyId: filing.filerPartyId } : {}),
+      ...(filing.partyIds ? { partyIds: filing.partyIds } : {}),
       title: filing.title,
       documentIds,
       certificateOfService: filing.certificateOfService,
@@ -924,7 +985,23 @@ async function replaceSessionState(
         startedAt: turn.startedAt,
         completedAt: turn.completedAt,
         effects: turn.effects,
+        inputSnapshotHash: turn.inputSnapshotHash,
+        outputSnapshotHash: turn.outputSnapshotHash,
+        validatorVersion: turn.validatorVersion,
+        retryCount: turn.retryCount,
+        stoppedReason: turn.stoppedReason,
       }),
+      inputSnapshotHash: turn.inputSnapshotHash,
+      outputSnapshotHash: turn.outputSnapshotHash,
+      validatorVersion: turn.validatorVersion,
+      retryCount: turn.retryCount,
+      ...(turn.stoppedReason ? { stoppedReason: turn.stoppedReason } : {}),
+      ...(turn.rawActorPacketStorageId
+        ? { rawActorPacketStorageId: turn.rawActorPacketStorageId as Id<'_storage'> }
+        : {}),
+      ...(turn.rawProviderResultStorageId
+        ? { rawProviderResultStorageId: turn.rawProviderResultStorageId as Id<'_storage'> }
+        : {}),
       createdAt: turn.startedAt,
     })
   }
@@ -954,6 +1031,43 @@ async function appendCaseSessionEvent(
     payloadJson: JSON.stringify(payload),
     createdAt: new Date().toISOString(),
     ...(actorUserId ? { actorUserId } : {}),
+  })
+}
+
+async function persistTurnAudit(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+  turnNumber: number,
+  packet: unknown,
+  decision: { actorId: string; validationIssues: Array<{ message: string }> } & Record<string, unknown>,
+) {
+  const turnDoc = await ctx.db
+    .query('simulationTurns')
+    .withIndex('by_case_turn', (index) =>
+      index.eq('caseSessionId', caseSessionId).eq('turnNumber', turnNumber),
+    )
+    .unique()
+  if (!turnDoc) return
+
+  const packetJson = JSON.stringify(packet)
+  const decisionJson = JSON.stringify(decision)
+  await ctx.db.insert('actorPackets', {
+    caseSessionId,
+    turnId: turnDoc._id,
+    actorId: decision.actorId,
+    packetJson,
+    packetHash: snapshotHash(packet),
+    createdAt: new Date().toISOString(),
+  })
+  await ctx.db.insert('actorDecisions', {
+    caseSessionId,
+    turnId: turnDoc._id,
+    actorId: decision.actorId,
+    decisionJson,
+    decisionHash: snapshotHash(decision),
+    accepted: decision.validationIssues.length === 0,
+    issues: decision.validationIssues.map((issue) => issue.message),
+    createdAt: new Date().toISOString(),
   })
 }
 
@@ -1059,6 +1173,12 @@ export const create = mutation({
       courtPackId: initialSession.courtPackId,
       status: initialSession.status,
       procedureState: initialProcedureState,
+      autonomyMode: initialSession.autonomyMode,
+      turnPolicy: initialSession.turnPolicy,
+      ...(initialSession.sourceProfileId
+        ? { sourceProfileId: initialSession.sourceProfileId }
+        : {}),
+      qualityState: initialSession.qualityState,
       simulatedDate: initialSession.simulatedDate,
     })
 
@@ -1095,6 +1215,46 @@ export const getForCurrentUser = query({
       .collect()
     const latest = sessions.sort((a, b) => b._creationTime - a._creationTime)[0]
     return latest ? assembleCaseSession(ctx, latest) : null
+  },
+})
+
+export const acceptLegalTrainingDisclaimer = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    version: v.string(),
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const acceptedAt = new Date().toISOString()
+    const existing = await ctx.db
+      .query('userDisclaimers')
+      .withIndex('by_user_version', (index) =>
+        index.eq('userId', user._id).eq('version', args.version),
+      )
+      .unique()
+    if (!existing) {
+      await ctx.db.insert('userDisclaimers', {
+        userId: user._id,
+        version: args.version,
+        acceptedAt,
+        trainingOnly: true,
+      })
+    }
+    await ctx.db.patch(caseSessionDoc._id, {
+      legalTrainingDisclaimerAcceptedAt: existing?.acceptedAt ?? acceptedAt,
+    })
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'legal_training_disclaimer_accepted',
+      { version: args.version },
+      user._id,
+    )
+    const updated = await ctx.db.get(caseSessionDoc._id)
+    if (!updated) throw new Error('Case session not found')
+    return assembleCaseSession(ctx, updated)
   },
 })
 
@@ -1401,6 +1561,57 @@ export const advanceProcedure = mutation({
   },
 })
 
+export const advanceAutonomousSimulation = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    maxTurnsPerRun: v.optional(v.number()),
+    maxCostCentsPerRun: v.optional(v.number()),
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    turnsRun: v.number(),
+    stoppedReason: v.string(),
+    budgetSpentCents: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const result = advanceAutonomousSimulationDomain(session, {
+      ...(typeof args.maxTurnsPerRun === 'number'
+        ? { maxTurnsPerRun: args.maxTurnsPerRun }
+        : {}),
+      ...(typeof args.maxCostCentsPerRun === 'number'
+        ? { maxCostCentsPerRun: args.maxCostCentsPerRun }
+        : {}),
+    })
+    const saved =
+      result.turns.length > 0
+        ? await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+        : session
+
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'autonomous_simulation_advanced',
+      {
+        turnsRun: result.turns.length,
+        stoppedReason: result.stoppedReason,
+        budgetSpentCents: result.budgetSpentCents,
+        procedureState: saved.procedureState,
+      },
+      user._id,
+    )
+
+    return {
+      session: saved,
+      turnsRun: result.turns.length,
+      stoppedReason: result.stoppedReason,
+      budgetSpentCents: result.budgetSpentCents,
+    }
+  },
+})
+
 export const advanceSimulationTurn = mutation({
   args: {
     caseSessionId: v.id('caseSessions'),
@@ -1418,6 +1629,13 @@ export const advanceSimulationTurn = mutation({
       debugRejectedAttempts: args.debugRejectedAttempts ?? false,
     })
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+    await persistTurnAudit(
+      ctx,
+      caseSessionDoc._id,
+      result.turn.turnNumber,
+      result.packet,
+      result.decision,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -1695,12 +1913,19 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const workProduct = JSON.parse(args.workProductJson) as ActorWorkProduct['workProduct']
     const productId = await ctx.db.insert('actorWorkProducts', {
       caseSessionId: args.caseSessionId,
       actorId: args.actorId,
       kind: args.kind,
       status: 'proposed' as const,
+      reviewStatus: 'proposed' as const,
       workProductJson: args.workProductJson,
+      citationsJson: JSON.stringify(workProduct.citations),
+      ruleRefs: workProduct.ruleRefs,
+      recordRefs: workProduct.recordRefs ?? [],
+      confidence: workProduct.confidence ?? 0.75,
+      roleAuthority: workProduct.roleAuthority ?? 'simulator_actor',
       sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
       sourceFilingIds: args.sourceFilingIds,
       createdAt: args.createdAt,
@@ -1712,7 +1937,13 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       actorId: args.actorId,
       kind: args.kind,
       status: 'proposed' as const,
-      workProduct: JSON.parse(args.workProductJson) as ActorWorkProduct['workProduct'],
+      reviewStatus: 'proposed' as const,
+      workProduct,
+      citations: workProduct.citations,
+      ruleRefs: workProduct.ruleRefs,
+      recordRefs: workProduct.recordRefs ?? [],
+      confidence: workProduct.confidence ?? 0.75,
+      roleAuthority: workProduct.roleAuthority ?? 'simulator_actor',
       sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
       sourceFilingIds: args.sourceFilingIds,
       createdAt: args.createdAt,
@@ -1827,20 +2058,35 @@ export const acceptActorWorkProduct = mutation({
     }
 
     const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const workProduct = JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct']
     const product: ActorWorkProduct = {
       id: productDoc._id,
       caseSessionId: productDoc.caseSessionId,
       actorId: productDoc.actorId,
       kind: productDoc.kind,
       status: productDoc.status,
-      workProduct: JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct'],
+      reviewStatus:
+        productDoc.reviewStatus ??
+        (productDoc.status === 'accepted'
+          ? 'accepted'
+          : productDoc.status === 'rejected'
+            ? 'rejected'
+            : 'proposed'),
+      workProduct,
+      citations: productDoc.citationsJson
+        ? (JSON.parse(productDoc.citationsJson) as ActorWorkProduct['citations'])
+        : workProduct.citations,
+      ruleRefs: productDoc.ruleRefs ?? workProduct.ruleRefs,
+      recordRefs: productDoc.recordRefs ?? workProduct.recordRefs ?? [],
+      confidence: productDoc.confidence ?? workProduct.confidence ?? 0.75,
+      roleAuthority: productDoc.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
       sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
       sourceFilingIds: productDoc.sourceFilingIds,
       createdAt: productDoc.createdAt,
     }
     const acceptance = canAcceptActorWorkProduct(session, product)
     if (!acceptance.accepted) {
-      await ctx.db.patch(productDoc._id, { status: 'rejected' })
+      await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
       const validationReason =
         acceptance.validationIssues.map((issue) => issue.message).join(' ') ||
         'Actor work product failed deterministic validation.'
@@ -1855,6 +2101,7 @@ export const acceptActorWorkProduct = mutation({
         workProduct: {
           ...product,
           status: 'rejected' as const,
+          reviewStatus: 'rejected' as const,
           validationIssues: acceptance.validationIssues,
         },
         receipt: null,
@@ -1866,7 +2113,7 @@ export const acceptActorWorkProduct = mutation({
     try {
       effect = applyAcceptedActorWorkProduct(session, product)
     } catch (error) {
-      await ctx.db.patch(productDoc._id, { status: 'rejected' })
+      await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
       const validationReason =
         error instanceof Error ? error.message : 'Actor work product effect failed.'
       const rejectedSession = {
@@ -1880,6 +2127,7 @@ export const acceptActorWorkProduct = mutation({
         workProduct: {
           ...product,
           status: 'rejected' as const,
+          reviewStatus: 'rejected' as const,
           validationIssues: [
             {
               severity: 'error' as const,
@@ -1895,7 +2143,7 @@ export const acceptActorWorkProduct = mutation({
       }
     }
 
-    await ctx.db.patch(productDoc._id, { status: 'accepted' })
+    await ctx.db.patch(productDoc._id, { status: 'accepted', reviewStatus: 'accepted' })
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, effect.session)
     await appendCaseSessionEvent(
       ctx,
@@ -1915,6 +2163,7 @@ export const acceptActorWorkProduct = mutation({
       workProduct: {
         ...product,
         status: 'accepted' as const,
+        reviewStatus: 'accepted' as const,
         validationIssues: acceptance.validationIssues,
       },
       receipt: effect.receipt ?? null,
@@ -1936,7 +2185,7 @@ export const rejectActorWorkProduct = mutation({
       throw new Error('Actor work product not found')
     }
 
-    await ctx.db.patch(productDoc._id, { status: 'rejected' })
+    await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
     await appendCaseSessionEvent(
       ctx,
       args.caseSessionId,
@@ -1949,13 +2198,22 @@ export const rejectActorWorkProduct = mutation({
       user._id,
     )
 
+    const workProduct = JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct']
     return {
       id: productDoc._id,
       caseSessionId: productDoc.caseSessionId,
       actorId: productDoc.actorId,
       kind: productDoc.kind,
       status: 'rejected' as const,
-      workProduct: JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct'],
+      reviewStatus: 'rejected' as const,
+      workProduct,
+      citations: productDoc.citationsJson
+        ? (JSON.parse(productDoc.citationsJson) as ActorWorkProduct['citations'])
+        : workProduct.citations,
+      ruleRefs: productDoc.ruleRefs ?? workProduct.ruleRefs,
+      recordRefs: productDoc.recordRefs ?? workProduct.recordRefs ?? [],
+      confidence: productDoc.confidence ?? workProduct.confidence ?? 0.75,
+      roleAuthority: productDoc.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
       sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
       sourceFilingIds: productDoc.sourceFilingIds,
       createdAt: productDoc.createdAt,

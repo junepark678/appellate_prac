@@ -705,8 +705,25 @@ export function submitEcfFiling(
   }
 
   const draft = filingSubmissionToDraft(submission)
-  const nextSession = fileDraft(session, draft)
-  const newestFiling = nextSession.filings.at(-1)
+  const filedSession = fileDraft(session, draft)
+  const newestFiling = filedSession.filings.at(-1)
+  const nextSession =
+    newestFiling && (submission.filerPartyId || submission.partyIds?.length)
+      ? {
+          ...filedSession,
+          filings: filedSession.filings.map((filing) =>
+            filing.id === newestFiling.id
+              ? {
+                  ...filing,
+                  ...(submission.filerPartyId
+                    ? { filerPartyId: submission.filerPartyId }
+                    : {}),
+                  ...(submission.partyIds?.length ? { partyIds: submission.partyIds } : {}),
+                }
+              : filing,
+          ),
+        }
+      : filedSession
   const receipt =
     preflight.accepted && newestFiling
       ? createEcfReceipt(nextSession, submission, newestFiling.id)

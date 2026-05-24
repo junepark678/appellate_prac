@@ -83,6 +83,9 @@ export const generatedFilingDraftSchema = {
     notes: { type: 'string' },
     citations: { type: 'array', items: citationSchema },
     ruleRefs: { type: 'array', items: ruleRefSchema },
+    recordRefs: { type: 'array', items: { type: 'string' } },
+    confidence: { type: 'number' },
+    roleAuthority: { type: 'string' },
   },
 } as const
 
@@ -101,6 +104,8 @@ export const actorReasoningMemoSchema = {
     requestedDisposition: { type: 'string' },
     reliefOption: { type: 'string' },
     confidence: { type: 'number' },
+    recordRefs: { type: 'array', items: { type: 'string' } },
+    roleAuthority: { type: 'string' },
   },
 } as const
 
@@ -156,6 +161,10 @@ export function isGeneratedFilingDraft(value: unknown): value is GeneratedFiling
     candidate.citations.every(isCitation) &&
     Array.isArray(candidate.ruleRefs) &&
     candidate.ruleRefs.every(isRuleRef) &&
+    (!candidate.recordRefs || candidate.recordRefs.every(isString)) &&
+    (candidate.confidence === undefined ||
+      (typeof candidate.confidence === 'number' && Number.isFinite(candidate.confidence))) &&
+    (!candidate.roleAuthority || isString(candidate.roleAuthority)) &&
     (!candidate.attachmentTexts ||
       candidate.attachmentTexts.every(
         (attachment) =>
@@ -187,6 +196,8 @@ export function isActorReasoningMemo(value: unknown): value is ActorReasoningMem
     (!candidate.proceduralClaims || candidate.proceduralClaims.every(isString)) &&
     (!candidate.requestedDisposition || isString(candidate.requestedDisposition)) &&
     (!candidate.reliefOption || isString(candidate.reliefOption)) &&
+    (!candidate.recordRefs || candidate.recordRefs.every(isString)) &&
+    (!candidate.roleAuthority || isString(candidate.roleAuthority)) &&
     (candidate.confidence === undefined ||
       (typeof candidate.confidence === 'number' && Number.isFinite(candidate.confidence)))
   )

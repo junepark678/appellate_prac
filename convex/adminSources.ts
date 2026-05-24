@@ -85,6 +85,85 @@ export const storeSnapshot = mutation({
   },
 })
 
+export const upsertSourceArtifact = mutation({
+  args: {
+    sourceVersionId: v.string(),
+    label: v.string(),
+    url: v.string(),
+    rawText: v.string(),
+    parserVersion: v.string(),
+    effectiveDate: v.optional(v.string()),
+    mediaType: v.optional(v.string()),
+    rawStorageId: v.optional(v.id('_storage')),
+  },
+  returns: v.id('sourceArtifacts'),
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx)
+    const contentHash = simpleHash(args.rawText)
+    const existing = await ctx.db
+      .query('sourceArtifacts')
+      .withIndex('by_hash', (index) => index.eq('contentHash', contentHash))
+      .unique()
+    const doc = {
+      sourceVersionId: args.sourceVersionId,
+      label: args.label,
+      url: args.url,
+      fetchedAt: new Date().toISOString(),
+      contentHash,
+      parserVersion: args.parserVersion,
+      ...(args.effectiveDate ? { effectiveDate: args.effectiveDate } : {}),
+      ...(args.mediaType ? { mediaType: args.mediaType } : {}),
+      ...(args.rawStorageId ? { rawStorageId: args.rawStorageId } : {}),
+      rawText: args.rawText,
+      reviewStatus: 'draft' as const,
+    }
+    if (existing) {
+      await ctx.db.patch(existing._id, doc)
+      return existing._id
+    }
+    return ctx.db.insert('sourceArtifacts', doc)
+  },
+})
+
+export const decideSourceArtifact = mutation({
+  args: {
+    sourceArtifactId: v.id('sourceArtifacts'),
+    decision: v.union(v.literal('reviewed'), v.literal('published'), v.literal('rejected')),
+    notes: v.string(),
+    changedConstraintsJson: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const user = await requireAdmin(ctx)
+    const artifact = await ctx.db.get(args.sourceArtifactId)
+    if (!artifact) {
+      throw new Error('Source artifact not found.')
+    }
+    await ctx.db.patch(args.sourceArtifactId, { reviewStatus: args.decision })
+    await ctx.db.insert('sourceReviewDecisions', {
+      sourceArtifactId: args.sourceArtifactId,
+      reviewerUserId: user._id,
+      decision: args.decision,
+      notes: args.notes,
+      ...(args.changedConstraintsJson
+        ? { changedConstraintsJson: args.changedConstraintsJson }
+        : {}),
+      createdAt: new Date().toISOString(),
+    })
+
+    const source = await ctx.db
+      .query('legalSourceVersions')
+      .withIndex('by_source_version', (index) =>
+        index.eq('sourceVersionId', artifact.sourceVersionId),
+      )
+      .unique()
+    if (source) {
+      await ctx.db.patch(source._id, { reviewed: args.decision !== 'rejected' })
+    }
+    return null
+  },
+})
+
 export const publishSourceSnapshot = mutation({
   args: {
     sourceVersionId: v.string(),
@@ -136,7 +215,18 @@ async function requireReviewedSources(ctx: any, sourceVersionIds: string[]) {
         source.sourceVersionId === sourceVersionId &&
         ['reviewed', 'published'].includes(source.reviewStatus),
     )
-    if (!bundledReviewed && snapshot?.reviewStatus !== 'published') {
+    const artifact = await ctx.db
+      .query('sourceArtifacts')
+      .withIndex('by_source_version', (index: any) =>
+        index.eq('sourceVersionId', sourceVersionId),
+      )
+      .order('desc')
+      .first()
+    if (
+      !bundledReviewed &&
+      snapshot?.reviewStatus !== 'published' &&
+      !['reviewed', 'published'].includes(artifact?.reviewStatus ?? 'draft')
+    ) {
       throw new Error(`Source ${sourceVersionId} must be reviewed before publication.`)
     }
   }
@@ -285,5 +375,43 @@ export const listSources = query({
       sourceUrl: source.sourceUrl,
       reviewed: source.reviewed,
     }))
+  },
+})
+
+export const listSourceArtifacts = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      id: v.id('sourceArtifacts'),
+      sourceVersionId: v.string(),
+      label: v.string(),
+      url: v.string(),
+      contentHash: v.string(),
+      parserVersion: v.string(),
+      fetchedAt: v.string(),
+      reviewStatus: v.union(
+        v.literal('draft'),
+        v.literal('reviewed'),
+        v.literal('published'),
+        v.literal('rejected'),
+      ),
+    }),
+  ),
+  handler: async (ctx) => {
+    await requireCurrentUser(ctx)
+    const artifacts = await ctx.db.query('sourceArtifacts').collect()
+    return artifacts
+      .slice()
+      .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt))
+      .map((artifact) => ({
+        id: artifact._id,
+        sourceVersionId: artifact.sourceVersionId,
+        label: artifact.label,
+        url: artifact.url,
+        contentHash: artifact.contentHash,
+        parserVersion: artifact.parserVersion,
+        fetchedAt: artifact.fetchedAt,
+        reviewStatus: artifact.reviewStatus,
+      }))
   },
 })

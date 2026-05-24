@@ -28,6 +28,28 @@ import { advanceSimulationTurn } from './simulation/director'
 import { nextCounterpartyReaction } from './counterparty/reactive-strategy'
 import type { ActorWorkProduct, FilingDraft, FilingSubmission, UploadedDocument } from './types'
 
+function actorProduct(
+  input: Omit<
+    ActorWorkProduct,
+    'reviewStatus' | 'citations' | 'ruleRefs' | 'recordRefs' | 'confidence' | 'roleAuthority'
+  >,
+): ActorWorkProduct {
+  return {
+    ...input,
+    reviewStatus:
+      input.status === 'accepted'
+        ? 'accepted'
+        : input.status === 'rejected'
+          ? 'rejected'
+          : 'proposed',
+    citations: input.workProduct.citations,
+    ruleRefs: input.workProduct.ruleRefs,
+    recordRefs: input.workProduct.recordRefs ?? [],
+    confidence: input.workProduct.confidence ?? 0.75,
+    roleAuthority: input.workProduct.roleAuthority ?? 'test_actor',
+  }
+}
+
 const noticePdf: UploadedDocument = {
   id: 'notice',
   fileName: 'notice-of-appeal.pdf',
@@ -301,7 +323,7 @@ describe('production appellate flow', () => {
     session = fileDraft(session, draft('opening_brief', briefPdf))
     session = fileDraft(session, draft('joint_appendix', appendixPdf))
 
-    const appelleeProduct: ActorWorkProduct = {
+    const appelleeProduct = actorProduct({
       id: 'appellee_effect',
       caseSessionId: session.id,
       actorId: 'appellee_ai',
@@ -324,7 +346,7 @@ describe('production appellate flow', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: session.filings.map((filing) => filing.id),
       createdAt: session.simulatedDate,
-    }
+    })
     const appelleeEffect = applyAcceptedActorWorkProduct(session, appelleeProduct)
     session = appelleeEffect.session
     expect(appelleeEffect.receipt?.eventId).toBe('appellee_brief')
@@ -335,7 +357,7 @@ describe('production appellate flow', () => {
       actorId: 'ca4_clerk',
       text: 'Briefing is complete and the case is submitted on the briefs.',
     })
-    session = applyAcceptedActorWorkProduct(session, {
+    session = applyAcceptedActorWorkProduct(session, actorProduct({
       id: 'bench_effect',
       caseSessionId: session.id,
       actorId: 'ca4_staff_attorney',
@@ -353,9 +375,9 @@ describe('production appellate flow', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: session.filings.map((filing) => filing.id),
       createdAt: session.simulatedDate,
-    }).session
+    })).session
     for (const judge of ['ca4_judge_1', 'ca4_judge_2', 'ca4_judge_3']) {
-      session = applyAcceptedActorWorkProduct(session, {
+      session = applyAcceptedActorWorkProduct(session, actorProduct({
         id: `vote_effect_${judge}`,
         caseSessionId: session.id,
         actorId: judge,
@@ -375,10 +397,10 @@ describe('production appellate flow', () => {
         sourceDocumentAnalysisIds: [],
         sourceFilingIds: session.filings.map((filing) => filing.id),
         createdAt: session.simulatedDate,
-      }).session
+      })).session
     }
 
-    session = applyAcceptedActorWorkProduct(session, {
+    session = applyAcceptedActorWorkProduct(session, actorProduct({
       id: 'disposition_effect',
       caseSessionId: session.id,
       actorId: 'ca4_panel',
@@ -397,7 +419,7 @@ describe('production appellate flow', () => {
       sourceDocumentAnalysisIds: [],
       sourceFilingIds: session.filings.map((filing) => filing.id),
       createdAt: session.simulatedDate,
-    }).session
+    })).session
     session = applyToolCall(session, {
       tool: 'enterJudgment',
       actorId: 'ca4_panel',

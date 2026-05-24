@@ -31,20 +31,56 @@ export const create = mutation({
     dueAt: v.optional(v.string()),
     rubricId: v.optional(v.string()),
     published: v.boolean(),
+    autonomyMode: v.optional(
+      v.union(v.literal('paused'), v.literal('supervised'), v.literal('autonomous')),
+    ),
+    maxTurnsPerRun: v.optional(v.number()),
+    maxCostCentsPerRun: v.optional(v.number()),
+    requireHumanApprovalFor: v.optional(v.array(v.string())),
+    stopOnDeficiency: v.optional(v.boolean()),
+    budgetCapCents: v.optional(v.number()),
+    hideAiReasoning: v.optional(v.boolean()),
   },
   returns: v.id('assignments'),
   handler: async (ctx, args) => {
     const { user } = await requireCohortRole(ctx, args.cohortId, ['instructor', 'admin'])
-    return ctx.db.insert('assignments', {
+    let simulationPolicyId
+    if (args.autonomyMode) {
+      simulationPolicyId = await ctx.db.insert('simulationPolicies', {
+        scope: 'assignment',
+        scopeId: 'pending',
+        autonomyMode: args.autonomyMode,
+        maxTurnsPerRun: args.maxTurnsPerRun ?? 6,
+        maxCostCentsPerRun: args.maxCostCentsPerRun ?? args.budgetCapCents ?? 25,
+        requireHumanApprovalFor: args.requireHumanApprovalFor ?? ['disposeCase', 'enterJudgment'],
+        stopOnDeficiency: args.stopOnDeficiency ?? true,
+        createdByUserId: user._id,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+    }
+    const assignmentId = await ctx.db.insert('assignments', {
       cohortId: args.cohortId,
       scenarioId: args.scenarioId,
       title: args.title,
       ...(args.dueAt ? { dueAt: args.dueAt } : {}),
       ...(args.rubricId ? { rubricId: args.rubricId } : {}),
       published: args.published,
+      ...(args.autonomyMode ? { autonomyMode: args.autonomyMode } : {}),
+      ...(simulationPolicyId ? { simulationPolicyId } : {}),
+      ...(typeof args.budgetCapCents === 'number'
+        ? { budgetCapCents: args.budgetCapCents }
+        : {}),
+      ...(typeof args.hideAiReasoning === 'boolean'
+        ? { hideAiReasoning: args.hideAiReasoning }
+        : {}),
       createdByUserId: user._id,
       createdAt: new Date().toISOString(),
     })
+    if (simulationPolicyId) {
+      await ctx.db.patch(simulationPolicyId, { scopeId: assignmentId })
+    }
+    return assignmentId
   },
 })
 
@@ -58,6 +94,11 @@ export const listForCohort = query({
       title: v.string(),
       published: v.boolean(),
       dueAt: v.optional(v.string()),
+      autonomyMode: v.optional(
+        v.union(v.literal('paused'), v.literal('supervised'), v.literal('autonomous')),
+      ),
+      budgetCapCents: v.optional(v.number()),
+      hideAiReasoning: v.optional(v.boolean()),
     }),
   ),
   handler: async (ctx, args) => {
@@ -71,6 +112,13 @@ export const listForCohort = query({
       title: assignment.title,
       published: assignment.published,
       ...(assignment.dueAt ? { dueAt: assignment.dueAt } : {}),
+      ...(assignment.autonomyMode ? { autonomyMode: assignment.autonomyMode } : {}),
+      ...(typeof assignment.budgetCapCents === 'number'
+        ? { budgetCapCents: assignment.budgetCapCents }
+        : {}),
+      ...(typeof assignment.hideAiReasoning === 'boolean'
+        ? { hideAiReasoning: assignment.hideAiReasoning }
+        : {}),
     }))
   },
 })
@@ -94,6 +142,19 @@ export const attachSession = mutation({
     const caseSession = await ctx.db.get(args.caseSessionId)
     if (!caseSession || caseSession.userId !== user._id) {
       throw new Error('Case session not found')
+    }
+    const policy = assignment.simulationPolicyId
+      ? await ctx.db.get(assignment.simulationPolicyId)
+      : null
+    if (policy) {
+      await ctx.db.patch(args.caseSessionId, {
+        autonomyMode: policy.autonomyMode,
+        turnPolicy: {
+          maxTurnsPerRun: policy.maxTurnsPerRun,
+          requireHumanApprovalFor: policy.requireHumanApprovalFor,
+          stopOnDeficiency: policy.stopOnDeficiency,
+        },
+      })
     }
     await ctx.db.insert('assignmentSessions', {
       assignmentId: args.assignmentId,

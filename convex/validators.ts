@@ -21,6 +21,26 @@ export const caseStatusValidator = v.union(
   v.literal('dismissed'),
 )
 
+export const autonomyModeValidator = v.union(
+  v.literal('paused'),
+  v.literal('supervised'),
+  v.literal('autonomous'),
+)
+
+export const turnPolicyValidator = v.object({
+  maxTurnsPerRun: v.number(),
+  requireHumanApprovalFor: v.array(v.string()),
+  stopOnDeficiency: v.boolean(),
+})
+
+export const qualityStateValidator = v.union(
+  v.literal('draft'),
+  v.literal('source_review_pending'),
+  v.literal('source_reviewed'),
+  v.literal('eval_ready'),
+  v.literal('beta_approved'),
+)
+
 export const procedureStateValidator = v.union(
   v.literal('case_opened'),
   v.literal('notice_pending'),
@@ -162,6 +182,8 @@ export const filingAttachmentValidator = v.object({
 export const filingMetadataValidator = v.object({
   filingAttorneyName: v.optional(v.string()),
   representedPartyId: v.optional(v.string()),
+  representedPartyIds: v.optional(v.array(v.string())),
+  selectedReliefs: v.optional(v.array(v.string())),
   feePaymentStatus: v.optional(
     v.union(
       v.literal('not_required'),
@@ -170,6 +192,18 @@ export const filingMetadataValidator = v.object({
       v.literal('waived'),
       v.literal('pending'),
     ),
+  ),
+  feeTransactionStub: v.optional(
+    v.object({
+      transactionId: v.string(),
+      amountCents: v.number(),
+      status: v.union(
+        v.literal('simulated_paid'),
+        v.literal('waived'),
+        v.literal('deferred'),
+        v.literal('pending'),
+      ),
+    }),
   ),
   reliefRequested: v.optional(v.string()),
   serviceMethod: v.union(
@@ -180,6 +214,8 @@ export const filingMetadataValidator = v.object({
     v.literal('none'),
   ),
   relatedDocketEntryId: v.optional(v.string()),
+  relatedDocketEntryIds: v.optional(v.array(v.string())),
+  serviceRecipientIds: v.optional(v.array(v.string())),
   consentStatus: v.optional(
     v.union(
       v.literal('all_parties_consent'),
@@ -189,8 +225,32 @@ export const filingMetadataValidator = v.object({
     ),
   ),
   sealedDocumentType: v.optional(v.string()),
+  sealedAccessMode: v.optional(
+    v.union(
+      v.literal('public'),
+      v.literal('sealed'),
+      v.literal('court_only'),
+      v.literal('selected_parties'),
+    ),
+  ),
   privacyAcknowledged: v.optional(v.boolean()),
+  privacyReview: v.optional(
+    v.object({
+      completed: v.boolean(),
+      reviewerRole: v.union(v.literal('learner'), v.literal('instructor'), v.literal('clerk_ai')),
+      warnings: v.array(v.string()),
+    }),
+  ),
   publicRedactedVersionIncluded: v.optional(v.boolean()),
+  redactedPublicVersionDocumentId: v.optional(v.string()),
+  paperCopyRequirement: v.optional(
+    v.object({
+      required: v.boolean(),
+      copies: v.number(),
+      dueDate: v.optional(v.string()),
+      notes: v.optional(v.string()),
+    }),
+  ),
   serviceListOverrides: v.optional(
     v.object({
       additionalRecipients: v.optional(v.array(v.string())),
@@ -209,6 +269,8 @@ export const filingMetadataValidator = v.object({
 export const filingSubmissionValidator = v.object({
   eventId: v.string(),
   participantRole: participantRoleValidator,
+  filerPartyId: v.optional(v.string()),
+  partyIds: v.optional(v.array(v.string())),
   title: v.string(),
   mainDocument: uploadedDocumentValidator,
   attachments: v.array(filingAttachmentValidator),
@@ -249,6 +311,8 @@ export const filingRecordValidator = v.object({
   validationIssues: v.array(validationIssueValidator),
   submissionJson: v.optional(v.string()),
   documentAnalysisIds: v.optional(v.array(v.string())),
+  filerPartyId: v.optional(v.string()),
+  partyIds: v.optional(v.array(v.string())),
 })
 
 export const actorWorkProductKindValidator = v.union(
@@ -264,8 +328,10 @@ export const actorWorkProductKindValidator = v.union(
 
 export const actorWorkProductStatusValidator = v.union(
   v.literal('proposed'),
+  v.literal('auto_applied'),
   v.literal('accepted'),
   v.literal('rejected'),
+  v.literal('needs_review'),
   v.literal('superseded'),
 )
 
@@ -314,6 +380,9 @@ export const generatedFilingDraftValidator = v.object({
   notes: v.string(),
   citations: v.array(actorCitationValidator),
   ruleRefs: v.array(ruleRefValidator),
+  recordRefs: v.optional(v.array(v.string())),
+  confidence: v.optional(v.number()),
+  roleAuthority: v.optional(v.string()),
 })
 
 export const actorReasoningMemoValidator = v.object({
@@ -327,6 +396,8 @@ export const actorReasoningMemoValidator = v.object({
   requestedDisposition: v.optional(v.string()),
   reliefOption: v.optional(v.string()),
   confidence: v.optional(v.number()),
+  recordRefs: v.optional(v.array(v.string())),
+  roleAuthority: v.optional(v.string()),
 })
 
 export const actorWorkProductValidator = v.object({
@@ -335,7 +406,19 @@ export const actorWorkProductValidator = v.object({
   actorId: v.string(),
   kind: actorWorkProductKindValidator,
   status: actorWorkProductStatusValidator,
+  reviewStatus: v.union(
+    v.literal('proposed'),
+    v.literal('auto_applied'),
+    v.literal('accepted'),
+    v.literal('rejected'),
+    v.literal('needs_review'),
+  ),
   workProduct: v.union(generatedFilingDraftValidator, actorReasoningMemoValidator),
+  citations: v.array(actorCitationValidator),
+  ruleRefs: v.array(ruleRefValidator),
+  recordRefs: v.array(v.string()),
+  confidence: v.number(),
+  roleAuthority: v.string(),
   sourceDocumentAnalysisIds: v.array(v.string()),
   sourceFilingIds: v.array(v.string()),
   createdAt: v.string(),
@@ -748,6 +831,11 @@ export const caseSessionValidator = v.object({
   courtPackId: v.string(),
   status: caseStatusValidator,
   procedureState: v.optional(procedureStateValidator),
+  autonomyMode: autonomyModeValidator,
+  turnPolicy: turnPolicyValidator,
+  sourceProfileId: v.optional(v.string()),
+  qualityState: qualityStateValidator,
+  legalTrainingDisclaimerAcceptedAt: v.optional(v.string()),
   simulatedDate: v.string(),
   participants: v.array(participantValidator),
   docketEntries: v.array(docketEntryValidator),
@@ -788,6 +876,13 @@ export const caseSessionValidator = v.object({
         startedAt: v.string(),
         completedAt: v.optional(v.string()),
         effects: v.array(v.string()),
+        inputSnapshotHash: v.string(),
+        outputSnapshotHash: v.string(),
+        validatorVersion: v.string(),
+        retryCount: v.number(),
+        stoppedReason: v.optional(v.string()),
+        rawActorPacketStorageId: v.optional(v.string()),
+        rawProviderResultStorageId: v.optional(v.string()),
       }),
     ),
   ),

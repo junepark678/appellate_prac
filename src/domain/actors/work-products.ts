@@ -464,12 +464,37 @@ function panelDispositionIssues(session: CaseSession, product: ActorWorkProduct)
 }
 
 export function normalizeActorWorkProduct(
-  input: Omit<ActorWorkProduct, 'id' | 'status' | 'validationIssues'> & {
+  input: Omit<
+    ActorWorkProduct,
+    | 'id'
+    | 'status'
+    | 'reviewStatus'
+    | 'citations'
+    | 'ruleRefs'
+    | 'recordRefs'
+    | 'confidence'
+    | 'roleAuthority'
+    | 'validationIssues'
+  > & {
     id?: string
     status?: ActorWorkProduct['status']
+    reviewStatus?: ActorWorkProduct['reviewStatus']
+    citations?: ActorWorkProduct['citations']
+    ruleRefs?: ActorWorkProduct['ruleRefs']
+    recordRefs?: ActorWorkProduct['recordRefs']
+    confidence?: ActorWorkProduct['confidence']
+    roleAuthority?: ActorWorkProduct['roleAuthority']
   },
 ): ActorWorkProduct | null {
   if (!validateWorkProductPayload(input.kind, input.workProduct)) return null
+  const citations = input.citations ?? input.workProduct.citations
+  const ruleRefs = input.ruleRefs ?? input.workProduct.ruleRefs
+  const recordRefs = input.recordRefs ?? input.workProduct.recordRefs ?? []
+  const confidence = input.confidence ?? input.workProduct.confidence ?? 0.75
+  const roleAuthority =
+    input.roleAuthority ??
+    input.workProduct.roleAuthority ??
+    roleByKind[input.kind].join(',')
 
   return {
     id: input.id ?? `work_product_${input.createdAt.replace(/[^0-9]/g, '')}`,
@@ -477,7 +502,13 @@ export function normalizeActorWorkProduct(
     actorId: input.actorId,
     kind: input.kind,
     status: input.status ?? 'proposed',
+    reviewStatus: input.reviewStatus ?? (input.status === 'accepted' ? 'accepted' : input.status === 'rejected' ? 'rejected' : 'proposed'),
     workProduct: input.workProduct,
+    citations,
+    ruleRefs,
+    recordRefs,
+    confidence,
+    roleAuthority,
     sourceDocumentAnalysisIds: input.sourceDocumentAnalysisIds,
     sourceFilingIds: input.sourceFilingIds,
     createdAt: input.createdAt,
