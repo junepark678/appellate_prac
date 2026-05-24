@@ -421,7 +421,6 @@ function Home() {
                 onNewSession={() => startScenario(activeSession.scenario.id)}
                 onResumeSession={resumeSession}
               />
-              <BetaNotice />
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_1fr]">
                 <aside className="space-y-4">
                   <CasePanel session={activeSession} />
@@ -598,15 +597,6 @@ function ConvexAuthSetupPanel() {
         the Clerk JWT template named convex and the Convex CLERK_JWT_ISSUER_DOMAIN
         value.
       </div>
-    </section>
-  )
-}
-
-function BetaNotice() {
-  return (
-    <section className="mb-4 rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] px-4 py-3 text-sm leading-6 text-[#4f5a55]">
-      This beta is an educational practice simulator. It is not legal advice and does
-      not create an attorney-client relationship.
     </section>
   )
 }
