@@ -393,6 +393,46 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_10',
+    topic: 'record_on_appeal',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'The record on appeal defines the materials transmitted for review.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'record and transcript materials' },
+    ],
+    simulatorNotes:
+      'Record disputes and appendix issues are modeled as clerk or panel events.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_25',
+    topic: 'filing_service',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Filing and service rules control how papers are submitted and served.',
+    structuredConstraints: [
+      { kind: 'service', value: 'filing and service requirements' },
+    ],
+    simulatorNotes:
+      'Missing service certificates can trigger filing warnings or deficiency notices.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_26',
+    topic: 'time_computation',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Time-computation rules govern deadlines and extensions.',
+    structuredConstraints: [{ kind: 'deadline', value: 'time computation' }],
+    simulatorNotes:
+      'The simulator uses calendar-day offsets for training deadlines.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_26_1',
     topic: 'disclosure',
     effectiveFrom: '2025-12-01',
@@ -435,6 +475,34 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_29',
+    topic: 'amicus',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Amicus participation is governed by rule and may require leave or consent.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'amicus brief or motion for leave' },
+    ],
+    simulatorNotes:
+      'Amicus filings can be accepted, held for leave, or denied by the panel.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_30',
+    topic: 'appendix',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Appendix rules govern materials submitted with merits briefing.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'appendix materials' },
+    ],
+    simulatorNotes:
+      'The opening brief path expects a joint appendix or a clerk deficiency.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_31',
     topic: 'briefing_deadlines',
     effectiveFrom: '2025-12-01',
@@ -448,6 +516,46 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_32',
+    topic: 'form',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Form rules govern briefs, appendices, and other appellate papers.',
+    structuredConstraints: [
+      { kind: 'certificate', value: 'form and type-volume compliance' },
+    ],
+    simulatorNotes:
+      'Brief filing validation treats missing compliance certificates as warnings.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_34',
+    topic: 'oral_argument',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Oral argument may be set or dispensed with under appellate rules.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'panel submission and argument' },
+    ],
+    simulatorNotes:
+      'Panel submission and optional argument are modeled after briefing is complete.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_36',
+    topic: 'judgment',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Judgment entry and notice are handled under appellate rules.',
+    structuredConstraints: [{ kind: 'event_sequence', value: 'judgment entry' }],
+    simulatorNotes:
+      'Panel dispositions create docket entries and unlock post-judgment practice.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_40',
     topic: 'rehearing',
     effectiveFrom: '2025-12-01',
@@ -457,6 +565,18 @@ const frapItems: RuleItem[] = [
     structuredConstraints: [{ kind: 'deadline', value: 'rehearing petition window' }],
     simulatorNotes:
       'Post-disposition filings unlock only after judgment or panel order.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_41',
+    topic: 'mandate',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Mandate rules govern issuance and stays after appellate judgment.',
+    structuredConstraints: [{ kind: 'deadline', value: 'mandate issuance' }],
+    simulatorNotes:
+      'Mandate-related consequences can be added after rehearing practice.',
   },
 ]
 
@@ -490,6 +610,20 @@ const ca4Items: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_28',
+    topic: 'briefs',
+    effectiveFrom: '2026-05-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Fourth Circuit local briefing rules supplement federal brief requirements.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'local brief requirements' },
+    ],
+    simulatorNotes:
+      'Local brief defects are modeled as clerk deficiency notices or warnings.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_30',
     topic: 'appendix',
     effectiveFrom: '2026-05-23',
@@ -499,6 +633,20 @@ const ca4Items: RuleItem[] = [
     structuredConstraints: [{ kind: 'required_document', value: 'joint appendix' }],
     simulatorNotes:
       'Opening brief without appendix can be accepted with a deficiency or held.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_31',
+    topic: 'briefing_deadlines',
+    effectiveFrom: '2026-05-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Fourth Circuit local practice supplements federal briefing schedules.',
+    structuredConstraints: [
+      { kind: 'deadline', value: 'local briefing schedule handling' },
+    ],
+    simulatorNotes:
+      'The default opening-brief deadline cites both FRAP and Fourth Circuit practice.',
   },
   {
     jurisdiction: 'us-federal-ca4',
