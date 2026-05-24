@@ -8,9 +8,14 @@
  * @module
  */
 
+import type * as adminSources from "../adminSources.js";
+import type * as assignments from "../assignments.js";
 import type * as authHelpers from "../authHelpers.js";
 import type * as caseSessions from "../caseSessions.js";
+import type * as cohorts from "../cohorts.js";
+import type * as instructor from "../instructor.js";
 import type * as integrations from "../integrations.js";
+import type * as scenarioDrafts from "../scenarioDrafts.js";
 import type * as scenarios from "../scenarios.js";
 import type * as seed from "../seed.js";
 import type * as users from "../users.js";
@@ -23,9 +28,14 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  adminSources: typeof adminSources;
+  assignments: typeof assignments;
   authHelpers: typeof authHelpers;
   caseSessions: typeof caseSessions;
+  cohorts: typeof cohorts;
+  instructor: typeof instructor;
   integrations: typeof integrations;
+  scenarioDrafts: typeof scenarioDrafts;
   scenarios: typeof scenarios;
   seed: typeof seed;
   users: typeof users;
