@@ -45,9 +45,10 @@ import {
 import {
   createInitialSession,
   inferDocumentSignals,
-  nextExpectedToolCall,
   validateFiling,
 } from '../domain/simulation'
+import { filingDraftToSubmission } from '../domain/filing/ecf'
+import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import type {
   CaseSession,
   FilingDraft,
@@ -131,7 +132,8 @@ function Home() {
   const upsertCurrentUser = useMutation(api.users.upsertCurrentUser)
   const createCaseSession = useMutation(api.caseSessions.create)
   const submitFiling = useMutation(api.caseSessions.submitFiling)
-  const advanceExpected = useMutation(api.caseSessions.advanceExpectedEvent)
+  const submitEcfFiling = useMutation(api.caseSessions.submitEcfFiling)
+  const advanceProcedure = useMutation(api.caseSessions.advanceProcedure)
   const importCourtListenerSource = useMutation(
     api.caseSessions.importCourtListenerSource,
   )
@@ -172,7 +174,7 @@ function Home() {
   const availableEvents = (courtPack?.filingEvents ?? []).filter((event) =>
     event.allowedParticipantRoles.includes(learnerRole),
   )
-  const activeToolCall = activeSession ? nextExpectedToolCall(activeSession) : null
+  const activeToolCall = activeSession ? nextProcedureToolCall(activeSession) : null
   const validationIssues = useMemo(
     () => (activeSession ? validateFiling(activeSession, draft) : []),
     [activeSession, draft],
@@ -239,10 +241,18 @@ function Home() {
     setSessionPending(true)
     setSessionError('')
     try {
-      const nextSession = await submitFiling({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
-        draft,
-      })
+      const submission = filingDraftToSubmission(draft)
+      const nextSession = submission
+        ? (
+            await submitEcfFiling({
+              caseSessionId: activeSession.id as Id<'caseSessions'>,
+              submission,
+            })
+          ).session
+        : await submitFiling({
+            caseSessionId: activeSession.id as Id<'caseSessions'>,
+            draft,
+          })
       setDraft(createEmptyDraft(nextSession, draft.eventId))
       setActiveView('docket')
     } catch (error) {
@@ -257,9 +267,10 @@ function Home() {
     setSessionPending(true)
     setSessionError('')
     try {
-      const nextSession = await advanceExpected({
+      const result = await advanceProcedure({
         caseSessionId: activeSession.id as Id<'caseSessions'>,
       })
+      const nextSession = result.session
       if (nextSession.status === 'closed') {
         setActiveView('assessment')
       }
@@ -958,7 +969,7 @@ function DocketView({
               type="button"
             >
               <ChevronRight className="h-4 w-4" aria-hidden="true" />
-              Expected Event
+              Procedure Event
             </button>
           </div>
         </div>
@@ -1040,7 +1051,7 @@ function FilingView({
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
             <FileText className="h-4 w-4" aria-hidden="true" />
-            Filing
+            CM/ECF Filing
           </div>
           <button
             className="flex h-9 items-center gap-2 rounded-md border border-[#d8d1c4] bg-white px-3 text-sm font-semibold"
@@ -1152,7 +1163,7 @@ function FilingView({
             type="button"
           >
             <FileCheck2 className="h-4 w-4" aria-hidden="true" />
-            Submit Filing
+            Submit ECF Filing
           </button>
         </div>
       </section>
@@ -1634,12 +1645,29 @@ function toolCallTitle(toolCall: ToolCall) {
   if (toolCall.tool === 'setDeadline') return toolCall.label
   if (toolCall.tool === 'submitToPanel') return 'Submit to Panel'
   if (toolCall.tool === 'disposeCase') return toolCall.disposition
+  if (toolCall.tool === 'recommendClerkAction') return 'Clerk Recommendation'
+  if (toolCall.tool === 'recommendAmicusParticipation') return 'Amicus Recommendation'
+  if (toolCall.tool === 'draftBenchMemo') return 'Bench Memorandum'
+  if (toolCall.tool === 'castPanelVote') return 'Panel Vote'
+  if (toolCall.tool === 'draftPanelDisposition') return toolCall.disposition
+  if (toolCall.tool === 'draftAssessmentFeedback') return 'Assessment Feedback'
   return toolCall.title
 }
 
 function toolCallText(toolCall: ToolCall) {
   if (toolCall.tool === 'setDeadline') {
     return `${toolCall.label}; example offset ${toolCall.offsetDays} days.`
+  }
+  if (toolCall.tool === 'recommendClerkAction') return toolCall.recommendation
+  if (toolCall.tool === 'recommendAmicusParticipation') return toolCall.rationale
+  if (toolCall.tool === 'draftBenchMemo') return toolCall.recommendation
+  if (toolCall.tool === 'castPanelVote') return toolCall.rationale
+  if (toolCall.tool === 'draftAssessmentFeedback') {
+    return [
+      ...toolCall.proceduralFindings,
+      ...toolCall.meritsFindings,
+      ...toolCall.nextPracticeTargets,
+    ].join(' ')
   }
   return toolCall.text
 }

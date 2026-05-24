@@ -22,6 +22,35 @@ export type RecapDocumentSummary = {
   absolute_url?: string
 }
 
+export type CourtListenerDocket = {
+  id: number
+  absolute_url?: string
+  case_name?: string
+  docket_number?: string
+  court_id?: string
+  date_filed?: string
+}
+
+export type CourtListenerDocketEntry = {
+  id: number
+  entry_number?: number
+  date_filed?: string
+  description?: string
+  recap_documents?: RecapDocumentSummary[]
+}
+
+export type CourtListenerParty = {
+  id: number
+  name?: string
+  party_types?: Array<{ name?: string }>
+}
+
+export type CourtListenerAttorney = {
+  id: number
+  name?: string
+  contact_raw?: string
+}
+
 const courtListenerBase = 'https://www.courtlistener.com/api/rest/v4'
 
 export async function searchCourtListenerDockets(
@@ -79,5 +108,57 @@ export async function getRecapDocumentsForDocketEntry(
   }
 
   const payload = (await response.json()) as { results?: RecapDocumentSummary[] }
+  return payload.results ?? []
+}
+
+async function fetchCourtListener<T>(path: string, token?: string): Promise<T> {
+  const response = await fetch(`${courtListenerBase}${path}`, {
+    headers: token ? { Authorization: `Token ${token}` } : undefined,
+  })
+
+  if (!response.ok) {
+    throw new Error(`CourtListener request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<T>
+}
+
+export async function getCourtListenerDocket(
+  docketId: number,
+  token?: string,
+): Promise<CourtListenerDocket> {
+  return fetchCourtListener<CourtListenerDocket>(`/dockets/${docketId}/`, token)
+}
+
+export async function getCourtListenerDocketEntries(
+  docketId: number,
+  token?: string,
+): Promise<CourtListenerDocketEntry[]> {
+  const payload = await fetchCourtListener<{ results?: CourtListenerDocketEntry[] }>(
+    `/docket-entries/?docket=${docketId}`,
+    token,
+  )
+  return payload.results ?? []
+}
+
+export async function getCourtListenerParties(
+  docketId: number,
+  token?: string,
+): Promise<CourtListenerParty[]> {
+  const payload = await fetchCourtListener<{ results?: CourtListenerParty[] }>(
+    `/parties/?docket=${docketId}`,
+    token,
+  )
+  return payload.results ?? []
+}
+
+export async function getCourtListenerAttorneys(
+  docketId: number,
+  token?: string,
+): Promise<CourtListenerAttorney[]> {
+  const payload = await fetchCourtListener<{ results?: CourtListenerAttorney[] }>(
+    `/attorneys/?docket=${docketId}`,
+    token,
+  )
   return payload.results ?? []
 }

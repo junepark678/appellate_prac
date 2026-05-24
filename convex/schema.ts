@@ -6,6 +6,7 @@ import {
   deadlineStatusValidator,
   filingOutcomeValidator,
   participantRoleValidator,
+  procedureStateValidator,
   ruleRefValidator,
   validationIssueValidator,
 } from './validators'
@@ -17,6 +18,59 @@ export default defineSchema({
     role: v.union(v.literal('student'), v.literal('admin'), v.literal('instructor')),
     monthlyAiBudgetCents: v.number(),
   }).index('by_auth_subject', ['authSubject']),
+
+  institutions: defineTable({
+    name: v.string(),
+    slug: v.string(),
+    status: v.union(v.literal('active'), v.literal('paused'), v.literal('archived')),
+    monthlyAiBudgetCents: v.number(),
+  }).index('by_slug', ['slug']),
+
+  cohorts: defineTable({
+    institutionId: v.id('institutions'),
+    title: v.string(),
+    term: v.string(),
+    startsAt: v.string(),
+    endsAt: v.string(),
+    archived: v.boolean(),
+  })
+    .index('by_institution', ['institutionId'])
+    .index('by_archived', ['archived']),
+
+  cohortMemberships: defineTable({
+    cohortId: v.id('cohorts'),
+    userId: v.id('users'),
+    role: v.union(v.literal('learner'), v.literal('instructor'), v.literal('admin')),
+  })
+    .index('by_cohort', ['cohortId'])
+    .index('by_user', ['userId'])
+    .index('by_cohort_user', ['cohortId', 'userId']),
+
+  assignments: defineTable({
+    cohortId: v.id('cohorts'),
+    scenarioId: v.id('scenarios'),
+    title: v.string(),
+    dueAt: v.optional(v.string()),
+    rubricId: v.optional(v.string()),
+    published: v.boolean(),
+    createdByUserId: v.id('users'),
+    createdAt: v.string(),
+  })
+    .index('by_cohort', ['cohortId'])
+    .index('by_published', ['published']),
+
+  assignmentSessions: defineTable({
+    assignmentId: v.id('assignments'),
+    caseSessionId: v.id('caseSessions'),
+    userId: v.id('users'),
+    submittedAt: v.optional(v.string()),
+    reviewedAt: v.optional(v.string()),
+    reviewerUserId: v.optional(v.id('users')),
+    instructorNote: v.optional(v.string()),
+  })
+    .index('by_assignment', ['assignmentId'])
+    .index('by_user', ['userId'])
+    .index('by_case', ['caseSessionId']),
 
   rulePacks: defineTable({
     packId: v.string(),
@@ -52,6 +106,29 @@ export default defineSchema({
   })
     .index('by_source_version', ['sourceVersionId'])
     .index('by_module', ['moduleId']),
+
+  legalSourceSnapshots: defineTable({
+    sourceVersionId: v.string(),
+    fetchedAt: v.string(),
+    contentHash: v.string(),
+    rawText: v.string(),
+    parserVersion: v.string(),
+    reviewStatus: v.union(
+      v.literal('draft'),
+      v.literal('reviewed'),
+      v.literal('published'),
+      v.literal('rejected'),
+    ),
+  })
+    .index('by_source_version', ['sourceVersionId'])
+    .index('by_status', ['reviewStatus']),
+
+  ruleReviewNotes: defineTable({
+    sourceVersionId: v.string(),
+    reviewerUserId: v.id('users'),
+    note: v.string(),
+    createdAt: v.string(),
+  }).index('by_source_version', ['sourceVersionId']),
 
   ruleConstraints: defineTable({
     constraintId: v.string(),
@@ -149,6 +226,7 @@ export default defineSchema({
     userId: v.id('users'),
     courtPackId: v.string(),
     status: caseStatusValidator,
+    procedureState: v.optional(procedureStateValidator),
     simulatedDate: v.string(),
   })
     .index('by_user', ['userId'])
@@ -171,6 +249,29 @@ export default defineSchema({
     extractedSignals: v.array(v.string()),
     validationJson: v.optional(v.string()),
   }).index('by_case', ['caseSessionId']),
+
+  caseSessionEvents: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    sequence: v.number(),
+    eventType: v.string(),
+    payloadJson: v.string(),
+    createdAt: v.string(),
+    actorUserId: v.optional(v.id('users')),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_case_sequence', ['caseSessionId', 'sequence']),
+
+  ecfReceipts: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    filingId: v.id('filings'),
+    receiptNumber: v.string(),
+    noticeOfDocketActivityText: v.string(),
+    serviceListJson: v.string(),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_filing', ['filingId'])
+    .index('by_receipt', ['receiptNumber']),
 
   documentAnalyses: defineTable({
     caseSessionId: v.id('caseSessions'),

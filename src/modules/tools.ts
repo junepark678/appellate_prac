@@ -7,6 +7,14 @@ export const implementedToolNames = new Set<AiToolName>([
   'submitToPanel',
   'issuePanelOrder',
   'disposeCase',
+  'recommendClerkAction',
+  'draftClerkOrder',
+  'draftCounterpartyFiling',
+  'recommendAmicusParticipation',
+  'draftBenchMemo',
+  'castPanelVote',
+  'draftPanelDisposition',
+  'draftAssessmentFeedback',
 ])
 
 export function isImplementedAiTool(tool: string): tool is AiToolName {

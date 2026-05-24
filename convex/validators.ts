@@ -21,11 +21,34 @@ export const caseStatusValidator = v.union(
   v.literal('dismissed'),
 )
 
+export const procedureStateValidator = v.union(
+  v.literal('case_opened'),
+  v.literal('notice_pending'),
+  v.literal('jurisdiction_review'),
+  v.literal('appearance_pending'),
+  v.literal('fee_or_ifp_pending'),
+  v.literal('record_pending'),
+  v.literal('briefing_schedule_pending'),
+  v.literal('opening_brief_pending'),
+  v.literal('appendix_pending'),
+  v.literal('appellee_brief_pending'),
+  v.literal('reply_brief_pending'),
+  v.literal('motion_pending'),
+  v.literal('submitted'),
+  v.literal('panel_deliberation'),
+  v.literal('judgment_entered'),
+  v.literal('rehearing_pending'),
+  v.literal('mandate_pending'),
+  v.literal('closed'),
+  v.literal('dismissed'),
+)
+
 export const filingOutcomeValidator = v.union(
   v.literal('accepted'),
   v.literal('accepted_with_deficiency'),
   v.literal('rejected'),
   v.literal('referred_to_panel'),
+  v.literal('lodged_pending_review'),
 )
 
 export const deadlineStatusValidator = v.union(
@@ -45,6 +68,8 @@ export const validationIssueValidator = v.object({
   severity: v.union(v.literal('error'), v.literal('warning'), v.literal('info')),
   message: v.string(),
   ruleRefs: v.array(ruleRefValidator),
+  code: v.optional(v.string()),
+  cureSuggestion: v.optional(v.string()),
 })
 
 export const uploadedDocumentValidator = v.object({
@@ -53,7 +78,57 @@ export const uploadedDocumentValidator = v.object({
   mimeType: v.string(),
   sizeBytes: v.number(),
   pageCount: v.optional(v.number()),
+  extractedText: v.optional(v.string()),
   extractedSignals: v.array(v.string()),
+})
+
+export const filingAttachmentValidator = v.object({
+  id: v.string(),
+  label: v.string(),
+  document: uploadedDocumentValidator,
+  attachmentType: v.union(
+    v.literal('main'),
+    v.literal('appendix'),
+    v.literal('exhibit'),
+    v.literal('certificate'),
+    v.literal('motion_attachment'),
+    v.literal('other'),
+  ),
+})
+
+export const filingMetadataValidator = v.object({
+  representedPartyId: v.optional(v.string()),
+  reliefRequested: v.optional(v.string()),
+  serviceMethod: v.union(
+    v.literal('cm_ecf'),
+    v.literal('mail'),
+    v.literal('email'),
+    v.literal('hand_delivery'),
+    v.literal('none'),
+  ),
+  relatedDocketEntryId: v.optional(v.string()),
+  emergency: v.boolean(),
+  sealed: v.boolean(),
+  redactionAcknowledged: v.boolean(),
+  certificateOfService: v.boolean(),
+  certificateOfCompliance: v.boolean(),
+})
+
+export const filingSubmissionValidator = v.object({
+  eventId: v.string(),
+  participantRole: participantRoleValidator,
+  title: v.string(),
+  mainDocument: uploadedDocumentValidator,
+  attachments: v.array(filingAttachmentValidator),
+  metadata: filingMetadataValidator,
+  notes: v.string(),
+})
+
+export const preflightCheckResultValidator = v.object({
+  accepted: v.boolean(),
+  outcome: filingOutcomeValidator,
+  issues: v.array(validationIssueValidator),
+  analyzedAt: v.string(),
 })
 
 export const filingDraftValidator = v.object({
@@ -140,12 +215,23 @@ export const caseSessionValidator = v.object({
   scenario: scenarioValidator,
   courtPackId: v.string(),
   status: caseStatusValidator,
+  procedureState: v.optional(procedureStateValidator),
   simulatedDate: v.string(),
   participants: v.array(participantValidator),
   docketEntries: v.array(docketEntryValidator),
   deadlines: v.array(deadlineValidator),
   filings: v.array(filingRecordValidator),
   assessment: v.optional(assessmentValidator),
+})
+
+export const ecfReceiptValidator = v.object({
+  id: v.string(),
+  caseSessionId: v.string(),
+  filingId: v.string(),
+  receiptNumber: v.string(),
+  noticeOfDocketActivityText: v.string(),
+  serviceList: v.array(v.string()),
+  createdAt: v.string(),
 })
 
 export const toolCallValidator = v.union(
@@ -189,6 +275,63 @@ export const toolCallValidator = v.union(
     disposition: v.string(),
     text: v.string(),
     ruleRefs: v.array(ruleRefValidator),
+  }),
+  v.object({
+    tool: v.literal('recommendClerkAction'),
+    actorId: v.string(),
+    recommendation: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+  }),
+  v.object({
+    tool: v.literal('draftClerkOrder'),
+    actorId: v.string(),
+    title: v.string(),
+    text: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+  }),
+  v.object({
+    tool: v.literal('draftCounterpartyFiling'),
+    actorId: v.string(),
+    eventId: v.string(),
+    title: v.string(),
+    text: v.string(),
+  }),
+  v.object({
+    tool: v.literal('recommendAmicusParticipation'),
+    actorId: v.string(),
+    organizationType: v.string(),
+    rationale: v.string(),
+    requiresLeave: v.boolean(),
+  }),
+  v.object({
+    tool: v.literal('draftBenchMemo'),
+    actorId: v.string(),
+    issueSummary: v.string(),
+    recommendation: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+  }),
+  v.object({
+    tool: v.literal('castPanelVote'),
+    actorId: v.string(),
+    vote: v.string(),
+    reliefOption: v.string(),
+    rationale: v.string(),
+    confidence: v.number(),
+  }),
+  v.object({
+    tool: v.literal('draftPanelDisposition'),
+    actorId: v.string(),
+    disposition: v.string(),
+    text: v.string(),
+    reliefOption: v.string(),
+    ruleRefs: v.array(ruleRefValidator),
+  }),
+  v.object({
+    tool: v.literal('draftAssessmentFeedback'),
+    actorId: v.string(),
+    proceduralFindings: v.array(v.string()),
+    meritsFindings: v.array(v.string()),
+    nextPracticeTargets: v.array(v.string()),
   }),
 )
 

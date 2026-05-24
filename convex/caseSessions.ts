@@ -9,7 +9,10 @@ import {
   caseSessionSummaryValidator,
   caseSessionValidator,
   courtListenerSearchResultValidator,
+  ecfReceiptValidator,
   filingDraftValidator,
+  filingSubmissionValidator,
+  preflightCheckResultValidator,
   toolCallValidator,
   trialDocketValidator,
 } from './validators'
@@ -24,10 +27,19 @@ import {
 import { requestProceduralToolCall } from '../src/integrations/openrouter'
 import type {
   CaseSession,
+  EcfReceipt,
   FilingRecord,
+  FilingSubmission,
   Scenario,
   UploadedDocument,
 } from '../src/domain/types'
+import { submitEcfFiling as submitEcfFilingDomain } from '../src/domain/filing/ecf'
+import { preflightFilingSubmission } from '../src/domain/rules/executable-constraints'
+import {
+  advanceProcedure as advanceProcedureStateMachine,
+  inferProcedureState,
+  transitionAfterFiling,
+} from '../src/domain/procedure/state-machine'
 import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -131,6 +143,7 @@ function documentFromDoc(doc: Doc<'documents'>): UploadedDocument {
     mimeType: doc.mimeType,
     sizeBytes: doc.sizeBytes,
     ...(typeof doc.pageCount === 'number' ? { pageCount: doc.pageCount } : {}),
+    ...(doc.extractedText ? { extractedText: doc.extractedText } : {}),
     extractedSignals: doc.extractedSignals,
   }
 }
@@ -200,6 +213,7 @@ async function assembleCaseSession(
     scenario: scenarioFromDoc(scenarioDoc),
     courtPackId: caseSession.courtPackId,
     status: caseSession.status,
+    ...(caseSession.procedureState ? { procedureState: caseSession.procedureState } : {}),
     simulatedDate: caseSession.simulatedDate,
     participants: participants.map((participant) => ({
       id: participant._id,
@@ -250,7 +264,16 @@ async function deleteExistingSessionState(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
 ) {
-  const [participants, documents, filings, docketEntries, deadlines, assessments] =
+  const [
+    participants,
+    documents,
+    documentAnalyses,
+    filings,
+    docketEntries,
+    deadlines,
+    receipts,
+    assessments,
+  ] =
     await Promise.all([
       ctx.db
         .query('participants')
@@ -258,6 +281,10 @@ async function deleteExistingSessionState(
         .collect(),
       ctx.db
         .query('documents')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('documentAnalyses')
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
       ctx.db
@@ -273,15 +300,26 @@ async function deleteExistingSessionState(
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
       ctx.db
+        .query('ecfReceipts')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
         .query('assessments')
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
     ])
 
   await Promise.all(
-    [...participants, ...documents, ...filings, ...docketEntries, ...deadlines, ...assessments].map(
-      (doc) => ctx.db.delete(doc._id),
-    ),
+    [
+      ...participants,
+      ...documents,
+      ...documentAnalyses,
+      ...filings,
+      ...docketEntries,
+      ...deadlines,
+      ...receipts,
+      ...assessments,
+    ].map((doc) => ctx.db.delete(doc._id)),
   )
 }
 
@@ -292,6 +330,7 @@ async function replaceSessionState(
 ) {
   await ctx.db.patch(caseSessionId, {
     status: session.status,
+    procedureState: session.procedureState ?? inferProcedureState(session),
     simulatedDate: session.simulatedDate,
     courtPackId: session.courtPackId,
   })
@@ -317,6 +356,7 @@ async function replaceSessionState(
         mimeType: document.mimeType,
         sizeBytes: document.sizeBytes,
         ...(typeof document.pageCount === 'number' ? { pageCount: document.pageCount } : {}),
+        ...(document.extractedText ? { extractedText: document.extractedText } : {}),
         extractedSignals: document.extractedSignals,
       })
       documentIds.push(documentId)
@@ -384,6 +424,49 @@ async function replaceSessionState(
     throw new Error('Case session was removed while saving state')
   }
   return assembleCaseSession(ctx, updated)
+}
+
+async function appendCaseSessionEvent(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+  eventType: string,
+  payload: Record<string, unknown>,
+  actorUserId?: Id<'users'>,
+) {
+  const existingEvents = await ctx.db
+    .query('caseSessionEvents')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  await ctx.db.insert('caseSessionEvents', {
+    caseSessionId,
+    sequence: existingEvents.length + 1,
+    eventType,
+    payloadJson: JSON.stringify(payload),
+    createdAt: new Date().toISOString(),
+    ...(actorUserId ? { actorUserId } : {}),
+  })
+}
+
+async function insertEcfReceipt(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+  receipt: EcfReceipt,
+) {
+  const filings = await ctx.db
+    .query('filings')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  const newestFiling = filings.sort((a, b) => b.filedAt.localeCompare(a.filedAt))[0]
+  if (!newestFiling) return
+
+  await ctx.db.insert('ecfReceipts', {
+    caseSessionId,
+    filingId: newestFiling._id,
+    receiptNumber: receipt.receiptNumber,
+    noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
+    serviceListJson: JSON.stringify(receipt.serviceList),
+    createdAt: receipt.createdAt,
+  })
 }
 
 function withRejectedFilingAudit(
@@ -481,15 +564,25 @@ export const create = mutation({
     const scenarioKey = args.scenarioId ?? defaultScenarioKey
     const scenario = await ensureScenarioDoc(ctx, scenarioKey)
     const initialSession = createInitialSession(scenario.scenarioKey)
+    const initialProcedureState = inferProcedureState(initialSession)
     const caseSessionId = await ctx.db.insert('caseSessions', {
       scenarioId: scenario._id,
       userId: user._id,
       courtPackId: initialSession.courtPackId,
       status: initialSession.status,
+      procedureState: initialProcedureState,
       simulatedDate: initialSession.simulatedDate,
     })
 
-    return replaceSessionState(ctx, caseSessionId, initialSession)
+    const session = await replaceSessionState(ctx, caseSessionId, {
+      ...initialSession,
+      procedureState: initialProcedureState,
+    })
+    await appendCaseSessionEvent(ctx, caseSessionId, 'session_created', {
+      scenarioKey,
+      procedureState: initialProcedureState,
+    }, user._id)
+    return session
   },
 })
 
@@ -564,8 +657,80 @@ export const submitFiling = mutation({
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    const nextSession = withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft))
-    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const nextSession = transitionAfterFiling(
+      withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft)),
+    )
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'filing_submitted_legacy',
+      {
+        eventId: args.draft.eventId,
+        outcome: saved.filings.at(-1)?.outcome ?? 'rejected',
+        procedureState: saved.procedureState,
+      },
+      user._id,
+    )
+    return saved
+  },
+})
+
+export const preflightFiling = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    submission: filingSubmissionValidator,
+  },
+  returns: preflightCheckResultValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    return preflightFilingSubmission(session, args.submission as FilingSubmission)
+  },
+})
+
+export const submitEcfFiling = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    submission: filingSubmissionValidator,
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    preflight: preflightCheckResultValidator,
+    receipt: v.union(ecfReceiptValidator, v.null()),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const result = submitEcfFilingDomain(session, args.submission as FilingSubmission)
+    const nextSession = transitionAfterFiling(result.session)
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+
+    if (result.receipt) {
+      await insertEcfReceipt(ctx, caseSessionDoc._id, result.receipt)
+    }
+
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'ecf_filing_submitted',
+      {
+        eventId: args.submission.eventId,
+        outcome: result.preflight.outcome,
+        receiptNumber: result.receipt?.receiptNumber ?? null,
+        issueCodes: result.preflight.issues.map((issue) => issue.code ?? issue.message),
+        procedureState: saved.procedureState,
+      },
+      user._id,
+    )
+
+    return {
+      session: saved,
+      preflight: result.preflight,
+      receipt: result.receipt,
+    }
   },
 })
 
@@ -578,8 +743,49 @@ export const advanceExpectedEvent = mutation({
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    const nextSession = applyToolCall(session, nextExpectedToolCall(session))
-    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const toolCall = nextExpectedToolCall(session)
+    const nextSession = transitionAfterFiling(applyToolCall(session, toolCall))
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'expected_event_advanced_legacy',
+      { tool: toolCall.tool, procedureState: saved.procedureState },
+      user._id,
+    )
+    return saved
+  },
+})
+
+export const advanceProcedure = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    toolCall: toolCallValidator,
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const result = advanceProcedureStateMachine(session)
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'procedure_advanced',
+      {
+        tool: result.toolCall.tool,
+        fromState: result.transition.fromState,
+        toState: result.transition.toState,
+      },
+      user._id,
+    )
+    return {
+      session: saved,
+      toolCall: result.toolCall,
+    }
   },
 })
 
@@ -618,7 +824,7 @@ export const importCourtListenerSource = mutation({
       importedAt,
     })
 
-    const nextSession = applyToolCall(session, {
+    const nextSession = transitionAfterFiling(applyToolCall(session, {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'CourtListener Record Imported',
@@ -630,10 +836,22 @@ export const importCourtListenerSource = mutation({
           sourceUrl,
         },
       ],
-    })
+    }))
+
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'courtlistener_source_imported',
+      {
+        externalId: String(args.result.docket_id ?? args.result.id),
+        sourceUrl,
+      },
+      user._id,
+    )
 
     return {
-      session: await replaceSessionState(ctx, caseSessionDoc._id, nextSession),
+      session: saved,
       trialDocket,
     }
   },
@@ -795,8 +1013,21 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
       })
       return session
     }
-    const nextSession = applyToolCall(session, args.toolCall)
-    return replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const nextSession = transitionAfterFiling(applyToolCall(session, args.toolCall))
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'live_ai_tool_applied',
+      {
+        tool: args.toolCall.tool,
+        actorId: args.toolCall.actorId,
+        accepted: true,
+        procedureState: saved.procedureState,
+      },
+      user._id,
+    )
+    return saved
   },
 })
 

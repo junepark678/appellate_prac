@@ -17,6 +17,10 @@ export type ProcedureDomain =
   | 'original_writ'
   | 'post_judgment'
 
+export type UserRole = 'student' | 'admin' | 'instructor'
+
+export type InstitutionRole = 'learner' | 'instructor' | 'admin'
+
 export type ParticipantRole =
   | 'appellant'
   | 'appellee'
@@ -36,11 +40,33 @@ export type CaseStatus =
   | 'closed'
   | 'dismissed'
 
+export type ProcedureState =
+  | 'case_opened'
+  | 'notice_pending'
+  | 'jurisdiction_review'
+  | 'appearance_pending'
+  | 'fee_or_ifp_pending'
+  | 'record_pending'
+  | 'briefing_schedule_pending'
+  | 'opening_brief_pending'
+  | 'appendix_pending'
+  | 'appellee_brief_pending'
+  | 'reply_brief_pending'
+  | 'motion_pending'
+  | 'submitted'
+  | 'panel_deliberation'
+  | 'judgment_entered'
+  | 'rehearing_pending'
+  | 'mandate_pending'
+  | 'closed'
+  | 'dismissed'
+
 export type FilingOutcome =
   | 'accepted'
   | 'accepted_with_deficiency'
   | 'rejected'
   | 'referred_to_panel'
+  | 'lodged_pending_review'
 
 export type DeadlineStatus = 'open' | 'satisfied' | 'missed' | 'vacated'
 
@@ -66,9 +92,14 @@ export type StructuredConstraint = {
     | 'word_limit'
     | 'page_limit'
     | 'certificate'
-    | 'service'
-    | 'jurisdiction'
-    | 'event_sequence'
+      | 'service'
+      | 'jurisdiction'
+      | 'event_sequence'
+      | 'fee_or_ifp'
+      | 'privacy_redaction'
+      | 'sealed_filing'
+      | 'attachment_type'
+      | 'brief_content_section'
   value: string
 }
 
@@ -141,6 +172,14 @@ export type AiToolName =
   | 'issuePanelOrder'
   | 'disposeCase'
   | 'generatePostCaseAssessment'
+  | 'recommendClerkAction'
+  | 'draftClerkOrder'
+  | 'draftCounterpartyFiling'
+  | 'recommendAmicusParticipation'
+  | 'draftBenchMemo'
+  | 'castPanelVote'
+  | 'draftPanelDisposition'
+  | 'draftAssessmentFeedback'
 
 export type AiActor = {
   id: string
@@ -180,7 +219,37 @@ export type UploadedDocument = {
   mimeType: string
   sizeBytes: number
   pageCount?: number
+  extractedText?: string
   extractedSignals: string[]
+}
+
+export type FilingAttachment = {
+  id: string
+  label: string
+  document: UploadedDocument
+  attachmentType: 'main' | 'appendix' | 'exhibit' | 'certificate' | 'motion_attachment' | 'other'
+}
+
+export type FilingMetadata = {
+  representedPartyId?: string
+  reliefRequested?: string
+  serviceMethod: 'cm_ecf' | 'mail' | 'email' | 'hand_delivery' | 'none'
+  relatedDocketEntryId?: string
+  emergency: boolean
+  sealed: boolean
+  redactionAcknowledged: boolean
+  certificateOfService: boolean
+  certificateOfCompliance: boolean
+}
+
+export type FilingSubmission = {
+  eventId: string
+  participantRole: ParticipantRole
+  title: string
+  mainDocument: UploadedDocument
+  attachments: FilingAttachment[]
+  metadata: FilingMetadata
+  notes: string
 }
 
 export type FilingDraft = {
@@ -198,6 +267,15 @@ export type ValidationIssue = {
   severity: 'error' | 'warning' | 'info'
   message: string
   ruleRefs: RuleRef[]
+  code?: string
+  cureSuggestion?: string
+}
+
+export type PreflightCheckResult = {
+  accepted: boolean
+  outcome: FilingOutcome
+  issues: ValidationIssue[]
+  analyzedAt: string
 }
 
 export type FilingRecord = FilingDraft & {
@@ -207,6 +285,23 @@ export type FilingRecord = FilingDraft & {
   validationIssues: ValidationIssue[]
   submissionJson?: string
   documentAnalysisIds?: string[]
+}
+
+export type EcfReceipt = {
+  id: string
+  caseSessionId: string
+  filingId: string
+  receiptNumber: string
+  noticeOfDocketActivityText: string
+  serviceList: string[]
+  createdAt: string
+}
+
+export type NoticeOfDocketActivity = {
+  receiptNumber: string
+  docketText: string
+  recipients: string[]
+  generatedAt: string
 }
 
 export type DocketEntry = {
@@ -249,6 +344,7 @@ export type CaseSession = {
   scenario: Scenario
   courtPackId: string
   status: CaseStatus
+  procedureState?: ProcedureState
   simulatedDate: string
   participants: Participant[]
   docketEntries: DocketEntry[]
@@ -309,8 +405,125 @@ export type ToolCall =
       text: string
       ruleRefs: RuleRef[]
     }
+  | {
+      tool: 'recommendClerkAction'
+      actorId: string
+      recommendation: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'draftClerkOrder'
+      actorId: string
+      title: string
+      text: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'draftCounterpartyFiling'
+      actorId: string
+      eventId: string
+      title: string
+      text: string
+    }
+  | {
+      tool: 'recommendAmicusParticipation'
+      actorId: string
+      organizationType: string
+      rationale: string
+      requiresLeave: boolean
+    }
+  | {
+      tool: 'draftBenchMemo'
+      actorId: string
+      issueSummary: string
+      recommendation: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'castPanelVote'
+      actorId: string
+      vote: string
+      reliefOption: string
+      rationale: string
+      confidence: number
+    }
+  | {
+      tool: 'draftPanelDisposition'
+      actorId: string
+      disposition: string
+      text: string
+      reliefOption: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'draftAssessmentFeedback'
+      actorId: string
+      proceduralFindings: string[]
+      meritsFindings: string[]
+      nextPracticeTargets: string[]
+    }
 
 export type ToolValidationResult = {
   accepted: boolean
   issues: string[]
+}
+
+export type DocketEffect = {
+  type: 'docket_entry'
+  actorRole: ParticipantRole
+  title: string
+  text: string
+  filingId?: string
+  ruleRefs: RuleRef[]
+}
+
+export type DeadlineEffectResult = {
+  type: 'deadline'
+  label: string
+  targetEventId: string
+  offsetDays: number
+  sourceRuleRefs: RuleRef[]
+}
+
+export type StateTransitionResult = {
+  accepted: boolean
+  fromState: ProcedureState
+  toState: ProcedureState
+  warnings: string[]
+  docketEffects: DocketEffect[]
+  deadlineEffects: DeadlineEffectResult[]
+}
+
+export type PanelJudgeVote = {
+  actorModuleId: string
+  vote: string
+  reliefOption: string
+  rationale: string
+  confidence: number
+  createdAt: string
+}
+
+export type PanelDisposition = {
+  disposition: string
+  reliefOption: string
+  text: string
+  votes: PanelJudgeVote[]
+  ruleRefs: RuleRef[]
+}
+
+export type IssueEvaluation = {
+  issueId: string
+  label: string
+  standardOfReview: string
+  preservationStatus: 'preserved' | 'forfeited' | 'waived' | 'unclear'
+  waiverOrForfeitureRisk: 'low' | 'medium' | 'high'
+  recordSupport: 'strong' | 'mixed' | 'weak' | 'missing'
+  harmlessErrorPosture: 'not_applicable' | 'harmless_likely' | 'prejudicial_possible'
+  requestedRelief: string[]
+}
+
+export type ReliefEvaluation = {
+  availableRelief: string[]
+  barredRelief: string[]
+  reasons: string[]
 }
