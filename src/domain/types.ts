@@ -171,9 +171,20 @@ export type AiToolName =
   | 'submitToPanel'
   | 'issuePanelOrder'
   | 'disposeCase'
+  | 'draftStaffMemo'
+  | 'castRuntimePanelVote'
+  | 'draftRuntimePanelDisposition'
+  | 'enterJudgment'
+  | 'setMandateDeadline'
   | 'generatePostCaseAssessment'
   | 'recommendClerkAction'
   | 'draftClerkOrder'
+  | 'analyzeAppellantFiling'
+  | 'draftCounterpartyStrategy'
+  | 'fileResponsiveMotion'
+  | 'fileAppelleeBrief'
+  | 'opposeMotion'
+  | 'respondToRehearing'
   | 'draftCounterpartyFiling'
   | 'recommendAmicusParticipation'
   | 'draftBenchMemo'
@@ -235,6 +246,9 @@ export type FilingMetadata = {
   reliefRequested?: string
   serviceMethod: 'cm_ecf' | 'mail' | 'email' | 'hand_delivery' | 'none'
   relatedDocketEntryId?: string
+  consentStatus?: 'all_parties_consent' | 'partial_consent' | 'no_consent' | 'unknown'
+  sealedDocumentType?: string
+  feeWaiverRequested?: boolean
   emergency: boolean
   sealed: boolean
   redactionAcknowledged: boolean
@@ -292,8 +306,24 @@ export type EcfReceipt = {
   caseSessionId: string
   filingId: string
   receiptNumber: string
+  filedTimestamp?: string
+  filer?: ParticipantRole
+  eventId?: string
+  documentList?: Array<{
+    fileName: string
+    attachmentType: FilingAttachment['attachmentType'] | 'main'
+    sizeBytes: number
+  }>
   noticeOfDocketActivityText: string
   serviceList: string[]
+  docketText?: string
+  warnings?: string[]
+  deficiencies?: string[]
+  nextExpectedDeadline?: {
+    label: string
+    dueDate: string
+    targetEventId: string
+  }
   createdAt: string
 }
 
@@ -336,6 +366,8 @@ export type Scenario = {
   proceduralPosture: string
   issuesPresented: string[]
   meritsRecord: string[]
+  issues?: ScenarioIssue[]
+  recordExcerpts?: ScenarioRecordExcerpt[]
   sourceCaseUrl?: string
 }
 
@@ -350,6 +382,13 @@ export type CaseSession = {
   docketEntries: DocketEntry[]
   deadlines: Deadline[]
   filings: FilingRecord[]
+  ecfReceipts?: EcfReceipt[]
+  counterpartyStrategy?: CounterpartyStrategy
+  amicusParticipation?: AmicusParticipation
+  panelAssignment?: PanelAssignment
+  benchMemo?: BenchMemo
+  panelDeliberation?: PanelDeliberation
+  panelDisposition?: PanelDispositionRecord
   assessment?: Assessment
 }
 
@@ -404,6 +443,46 @@ export type ToolCall =
       disposition: string
       text: string
       ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'draftStaffMemo'
+      actorId: string
+      text: string
+      issueSummaries: string[]
+      recommendedDisposition: string
+      risks: string[]
+    }
+  | {
+      tool: 'castRuntimePanelVote'
+      actorId: string
+      vote: PanelVote['vote']
+      reliefOption: string
+      rationale: string
+      joinsMajority: boolean
+      separateWritingType?: PanelVote['separateWritingType']
+      confidence: number
+    }
+  | {
+      tool: 'draftRuntimePanelDisposition'
+      actorId: string
+      disposition: string
+      text: string
+      judgmentText: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'enterJudgment'
+      actorId: string
+      disposition: string
+      judgmentText: string
+      ruleRefs: RuleRef[]
+    }
+  | {
+      tool: 'setMandateDeadline'
+      actorId: string
+      label: string
+      offsetDays: number
+      sourceRuleRefs: RuleRef[]
     }
   | {
       tool: 'recommendClerkAction'
@@ -525,5 +604,180 @@ export type IssueEvaluation = {
 export type ReliefEvaluation = {
   availableRelief: string[]
   barredRelief: string[]
+  reasons: string[]
+}
+
+export type PanelAssignment = {
+  id: string
+  judgeActorIds: [string, string, string]
+  presidingJudgeActorId: string
+  assignedAt: string
+  oralArgumentDisposition: 'submitted_on_briefs' | 'argument_scheduled' | 'argument_held'
+}
+
+export type BenchMemo = {
+  id: string
+  authorActorId: string
+  issueSummaries: string[]
+  recommendedDisposition: string
+  reliefEvaluation: ReliefEvaluation
+  risks: string[]
+  createdAt: string
+}
+
+export type PanelVote = {
+  id: string
+  judgeActorId: string
+  vote: 'affirm' | 'reverse' | 'vacate' | 'vacate_in_part' | 'dismiss' | 'remand'
+  reliefOption: string
+  rationale: string
+  joinsMajority: boolean
+  separateWritingType?: 'concurrence' | 'dissent' | 'concur_in_judgment'
+  confidence: number
+  createdAt: string
+}
+
+export type PanelDispositionRecord = {
+  id: string
+  disposition: string
+  judgmentText: string
+  majorityJudgeActorIds: string[]
+  separateOpinions: Array<{
+    judgeActorId: string
+    type: 'concurrence' | 'dissent' | 'concur_in_judgment'
+    text: string
+  }>
+  votes: PanelVote[]
+  ruleRefs: RuleRef[]
+  createdAt: string
+}
+
+export type PanelVotePosition =
+  | 'affirm'
+  | 'reverse'
+  | 'vacate'
+  | 'vacate_in_part'
+  | 'dismiss'
+  | 'remand'
+  | 'procedural_order'
+
+export type PanelDeliberation = {
+  id: string
+  caseSessionId: string
+  posture: 'screening' | 'voting' | 'drafting' | 'entered'
+  staffMemo?: string
+  staffMemoRecord?: BenchMemo
+  votes: PanelVote[]
+  majorityPosition?: PanelVotePosition
+  dispositionText?: string
+  separateWritingText?: string
+  judgmentText?: string
+  mandateStatus: 'not_started' | 'pending' | 'issued' | 'stayed'
+}
+
+export type CounterpartyStrategy = {
+  id: string
+  caseSessionId: string
+  preservedIssues: string[]
+  forfeitureArguments: string[]
+  jurisdictionArguments: string[]
+  meritsArguments: string[]
+  proceduralMotions: string[]
+  recommendedNextFilingEventId?: string
+  updatedAt?: string
+}
+
+export type AmicusCandidate = {
+  id: string
+  organizationName: string
+  organizationType:
+    | 'civil_rights_group'
+    | 'trade_association'
+    | 'government'
+    | 'academic_center'
+    | 'public_interest'
+  supportsRole: 'appellant' | 'appellee' | 'neither'
+  interestStatement: string
+  requiresLeave: boolean
+  consentStatus: 'all_parties_consent' | 'partial_consent' | 'no_consent' | 'unknown'
+  recommended: boolean
+  rationale: string
+}
+
+export type AmicusParticipation = {
+  candidates: AmicusCandidate[]
+  acceptedBriefIds: string[]
+  deniedCandidateIds: string[]
+}
+
+export type EcfEventCategory =
+  | 'case_opening'
+  | 'appearance'
+  | 'brief'
+  | 'appendix'
+  | 'motion'
+  | 'response'
+  | 'sealed'
+  | 'post_disposition'
+  | 'amicus'
+
+export type EcfMetadataField = {
+  key: string
+  label: string
+  inputType: 'text' | 'select' | 'checkbox' | 'date' | 'docket_entry_ref'
+  required: boolean
+  options?: string[]
+}
+
+export type EcfEventDefinition = {
+  eventId: string
+  category: EcfEventCategory
+  displayName: string
+  eligibleRoles: ParticipantRole[]
+  requiresMainDocument: boolean
+  requiredAttachments: string[]
+  optionalAttachments: string[]
+  metadataFields: EcfMetadataField[]
+  feeBehavior: 'none' | 'required' | 'waivable' | 'deferred'
+  serviceBehavior: 'cm_ecf' | 'manual_required' | 'mixed'
+}
+
+export type ScenarioRecordExcerpt = {
+  id: string
+  label: string
+  source: 'synthetic' | 'courtlistener' | 'uploaded'
+  text: string
+  citedByIssueIds: string[]
+}
+
+export type ScenarioIssue = {
+  id: string
+  label: string
+  standardOfReview: string
+  preservationFacts: string[]
+  recordSupportFacts: string[]
+  likelyArgumentsForAppellant: string[]
+  likelyArgumentsForAppellee: string[]
+  possibleRelief: string[]
+}
+
+export type PreservationEvaluation = {
+  issueId: string
+  status: IssueEvaluation['preservationStatus']
+  reasons: string[]
+  risk: IssueEvaluation['waiverOrForfeitureRisk']
+}
+
+export type RecordSupportEvaluation = {
+  issueId: string
+  support: IssueEvaluation['recordSupport']
+  missingExcerpts: string[]
+  reasons: string[]
+}
+
+export type DispositionOption = {
+  position: PanelVotePosition
+  relief: string
+  available: boolean
   reasons: string[]
 }

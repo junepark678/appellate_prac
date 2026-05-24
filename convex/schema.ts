@@ -3,7 +3,15 @@ import { v } from 'convex/values'
 
 import {
   caseStatusValidator,
+  amicusCandidateValidator,
+  amicusParticipationValidator,
+  benchMemoValidator,
+  counterpartyStrategyValidator,
   deadlineStatusValidator,
+  panelAssignmentValidator,
+  panelDeliberationValidator,
+  panelDispositionRecordValidator,
+  panelVoteValidator,
   filingOutcomeValidator,
   participantRoleValidator,
   procedureStateValidator,
@@ -212,6 +220,29 @@ export default defineSchema({
     .index('by_scenario_key', ['scenarioKey'])
     .index('by_published', ['published']),
 
+  scenarioIssues: defineTable({
+    scenarioId: v.id('scenarios'),
+    issueId: v.string(),
+    label: v.string(),
+    standardOfReview: v.string(),
+    preservationFacts: v.array(v.string()),
+    recordSupportFacts: v.array(v.string()),
+    likelyArgumentsForAppellant: v.array(v.string()),
+    likelyArgumentsForAppellee: v.array(v.string()),
+    possibleRelief: v.array(v.string()),
+  })
+    .index('by_scenario', ['scenarioId'])
+    .index('by_scenario_issue', ['scenarioId', 'issueId']),
+
+  scenarioRecordExcerpts: defineTable({
+    scenarioId: v.id('scenarios'),
+    excerptId: v.string(),
+    label: v.string(),
+    source: v.union(v.literal('synthetic'), v.literal('courtlistener'), v.literal('uploaded')),
+    text: v.string(),
+    citedByIssueIds: v.array(v.string()),
+  }).index('by_scenario', ['scenarioId']),
+
   sourceCases: defineTable({
     scenarioId: v.id('scenarios'),
     sourceSystem: v.union(v.literal('courtlistener'), v.literal('recap'), v.literal('manual')),
@@ -265,8 +296,16 @@ export default defineSchema({
     caseSessionId: v.id('caseSessions'),
     filingId: v.id('filings'),
     receiptNumber: v.string(),
+    filedTimestamp: v.optional(v.string()),
+    filer: v.optional(participantRoleValidator),
+    eventId: v.optional(v.string()),
+    documentListJson: v.optional(v.string()),
     noticeOfDocketActivityText: v.string(),
     serviceListJson: v.string(),
+    docketText: v.optional(v.string()),
+    warnings: v.optional(v.array(v.string())),
+    deficiencies: v.optional(v.array(v.string())),
+    nextExpectedDeadlineJson: v.optional(v.string()),
     createdAt: v.string(),
   })
     .index('by_case', ['caseSessionId'])
@@ -385,12 +424,45 @@ export default defineSchema({
     importedAt: v.string(),
   }).index('by_case', ['caseSessionId']),
 
+  counterpartyStrategies: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    strategy: counterpartyStrategyValidator,
+    createdAt: v.string(),
+  }).index('by_case', ['caseSessionId']),
+
+  amicusCandidates: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    candidate: amicusCandidateValidator,
+    createdAt: v.string(),
+  }).index('by_case', ['caseSessionId']),
+
+  amicusParticipations: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    participation: amicusParticipationValidator,
+    createdAt: v.string(),
+  }).index('by_case', ['caseSessionId']),
+
+  panelDeliberations: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    assignment: v.optional(panelAssignmentValidator),
+    benchMemo: v.optional(benchMemoValidator),
+    deliberation: v.optional(panelDeliberationValidator),
+    createdAt: v.string(),
+  }).index('by_case', ['caseSessionId']),
+
+  panelDispositions: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    disposition: panelDispositionRecordValidator,
+    createdAt: v.string(),
+  }).index('by_case', ['caseSessionId']),
+
   panelVotes: defineTable({
     caseSessionId: v.id('caseSessions'),
     actorModuleId: v.string(),
     vote: v.string(),
     reliefOption: v.string(),
     rationale: v.string(),
+    voteRecord: v.optional(panelVoteValidator),
     createdAt: v.string(),
   })
     .index('by_case', ['caseSessionId'])

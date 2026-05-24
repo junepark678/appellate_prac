@@ -142,7 +142,8 @@ describe('production appellate flow', () => {
 
   it('constrains relief to preserved issues with record support', () => {
     let session = createInitialSession()
-    expect(evaluateRelief(session).availableRelief).toEqual(['affirm'])
+    expect(evaluateRelief(session).availableRelief).toContain('affirm')
+    expect(evaluateRelief(session).availableRelief).toContain('dismiss for lack of jurisdiction')
 
     session = fileDraft(session, draft('notice_of_appeal', noticePdf))
     session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
@@ -151,5 +152,18 @@ describe('production appellate flow', () => {
 
     expect(evaluateRelief(session).availableRelief).toContain('vacate in part')
   })
-})
 
+  it('generates strategy, amicus, and rich receipt state from accepted filings', () => {
+    let session = createInitialSession()
+    const result = submitEcfFiling(session, submission('notice_of_appeal', noticePdf))
+    expect(result.receipt?.documentList?.[0]?.fileName).toBe('notice-of-appeal.pdf')
+    expect(result.receipt?.docketText).toContain('Service')
+
+    session = result.session
+    session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
+    session = fileDraft(session, draft('opening_brief', briefPdf))
+
+    expect(session.counterpartyStrategy?.meritsArguments.length).toBeGreaterThan(0)
+    expect(session.amicusParticipation?.candidates[0]?.requiresLeave).toBe(true)
+  })
+})

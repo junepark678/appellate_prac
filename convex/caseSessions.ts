@@ -27,9 +27,11 @@ import {
 import { requestProceduralToolCall } from '../src/integrations/openrouter'
 import type {
   CaseSession,
-  EcfReceipt,
   FilingRecord,
   FilingSubmission,
+  PanelAssignment,
+  ScenarioIssue,
+  ScenarioRecordExcerpt,
   Scenario,
   UploadedDocument,
 } from '../src/domain/types'
@@ -74,7 +76,11 @@ function makeRecordId(prefix: string, count: number) {
   return `${prefix}_${String(count + 1).padStart(4, '0')}`
 }
 
-function scenarioFromDoc(doc: Doc<'scenarios'>): Scenario {
+function scenarioFromDoc(
+  doc: Doc<'scenarios'>,
+  issues: ScenarioIssue[] = [],
+  recordExcerpts: ScenarioRecordExcerpt[] = [],
+): Scenario {
   const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
   return {
     id: doc.scenarioKey,
@@ -87,6 +93,8 @@ function scenarioFromDoc(doc: Doc<'scenarios'>): Scenario {
     proceduralPosture: doc.proceduralPosture,
     issuesPresented: doc.issuesPresented,
     meritsRecord: doc.meritsRecord,
+    ...(issues.length ? { issues } : {}),
+    ...(recordExcerpts.length ? { recordExcerpts } : {}),
     ...sourceCaseUrl,
   }
 }
@@ -96,11 +104,51 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
     .query('scenarios')
     .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
     .unique()
-  if (existing) return existing
 
   const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
   if (!bundled) {
     throw new Error(`Unknown scenario: ${scenarioKey}`)
+  }
+
+  if (existing) {
+    const [existingIssues, existingExcerpts] = await Promise.all([
+      ctx.db
+        .query('scenarioIssues')
+        .withIndex('by_scenario', (index) => index.eq('scenarioId', existing._id))
+        .collect(),
+      ctx.db
+        .query('scenarioRecordExcerpts')
+        .withIndex('by_scenario', (index) => index.eq('scenarioId', existing._id))
+        .collect(),
+    ])
+    if (!existingIssues.length) {
+      for (const issue of bundled.issues ?? []) {
+        await ctx.db.insert('scenarioIssues', {
+          scenarioId: existing._id,
+          issueId: issue.id,
+          label: issue.label,
+          standardOfReview: issue.standardOfReview,
+          preservationFacts: issue.preservationFacts,
+          recordSupportFacts: issue.recordSupportFacts,
+          likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+          likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+          possibleRelief: issue.possibleRelief,
+        })
+      }
+    }
+    if (!existingExcerpts.length) {
+      for (const excerpt of bundled.recordExcerpts ?? []) {
+        await ctx.db.insert('scenarioRecordExcerpts', {
+          scenarioId: existing._id,
+          excerptId: excerpt.id,
+          label: excerpt.label,
+          source: excerpt.source,
+          text: excerpt.text,
+          citedByIssueIds: excerpt.citedByIssueIds,
+        })
+      }
+    }
+    return existing
   }
 
   const scenarioId = await ctx.db.insert('scenarios', {
@@ -117,6 +165,29 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
     ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
     published: true,
   })
+  for (const issue of bundled.issues ?? []) {
+    await ctx.db.insert('scenarioIssues', {
+      scenarioId,
+      issueId: issue.id,
+      label: issue.label,
+      standardOfReview: issue.standardOfReview,
+      preservationFacts: issue.preservationFacts,
+      recordSupportFacts: issue.recordSupportFacts,
+      likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+      likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+      possibleRelief: issue.possibleRelief,
+    })
+  }
+  for (const excerpt of bundled.recordExcerpts ?? []) {
+    await ctx.db.insert('scenarioRecordExcerpts', {
+      scenarioId,
+      excerptId: excerpt.id,
+      label: excerpt.label,
+      source: excerpt.source,
+      text: excerpt.text,
+      citedByIssueIds: excerpt.citedByIssueIds,
+    })
+  }
   const scenario = await ctx.db.get(scenarioId)
   if (!scenario) {
     throw new Error('Unable to seed scenario')
@@ -157,7 +228,28 @@ async function assembleCaseSession(
     throw new Error('Scenario not found for case session')
   }
 
-  const [participants, filings, docketEntries, deadlines, assessments] = await Promise.all([
+  const [
+    scenarioIssues,
+    scenarioRecordExcerpts,
+    participants,
+    filings,
+    docketEntries,
+    deadlines,
+    receipts,
+    counterpartyStrategies,
+    amicusParticipations,
+    panelDeliberations,
+    panelDispositions,
+    assessments,
+  ] = await Promise.all([
+    ctx.db
+      .query('scenarioIssues')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
+      .collect(),
+    ctx.db
+      .query('scenarioRecordExcerpts')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
+      .collect(),
     ctx.db
       .query('participants')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
@@ -172,6 +264,26 @@ async function assembleCaseSession(
       .collect(),
     ctx.db
       .query('deadlines')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('ecfReceipts')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('counterpartyStrategies')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('amicusParticipations')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('panelDeliberations')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('panelDispositions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
       .collect(),
     ctx.db
@@ -207,10 +319,40 @@ async function assembleCaseSession(
   )
 
   const assessment = assessments[0]
+  const latestStrategy = counterpartyStrategies.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const latestAmicus = amicusParticipations.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const latestPanel = panelDeliberations.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const latestDisposition = panelDispositions.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const panelAssignment =
+    latestPanel?.assignment && latestPanel.assignment.judgeActorIds.length >= 3
+      ? {
+          ...latestPanel.assignment,
+          judgeActorIds: latestPanel.assignment.judgeActorIds.slice(0, 3) as PanelAssignment['judgeActorIds'],
+        }
+      : undefined
 
   return {
     id: caseSession._id,
-    scenario: scenarioFromDoc(scenarioDoc),
+    scenario: scenarioFromDoc(
+      scenarioDoc,
+      scenarioIssues.map((issue) => ({
+        id: issue.issueId,
+        label: issue.label,
+        standardOfReview: issue.standardOfReview,
+        preservationFacts: issue.preservationFacts,
+        recordSupportFacts: issue.recordSupportFacts,
+        likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+        likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+        possibleRelief: issue.possibleRelief,
+      })),
+      scenarioRecordExcerpts.map((excerpt) => ({
+        id: excerpt.excerptId,
+        label: excerpt.label,
+        source: excerpt.source,
+        text: excerpt.text,
+        citedByIssueIds: excerpt.citedByIssueIds,
+      })),
+    ),
     courtPackId: caseSession.courtPackId,
     status: caseSession.status,
     ...(caseSession.procedureState ? { procedureState: caseSession.procedureState } : {}),
@@ -246,6 +388,44 @@ async function assembleCaseSession(
         sourceRuleRefs: deadline.sourceRuleRefs,
       })),
     filings: filingRecords,
+    ecfReceipts: receipts
+      .slice()
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((receipt) => ({
+        id: receipt._id,
+        caseSessionId: receipt.caseSessionId,
+        filingId: receipt.filingId,
+        receiptNumber: receipt.receiptNumber,
+        ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
+        ...(receipt.filer ? { filer: receipt.filer } : {}),
+        ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
+        ...(receipt.documentListJson
+          ? {
+              documentList: JSON.parse(receipt.documentListJson) as NonNullable<
+                CaseSession['ecfReceipts']
+              >[number]['documentList'],
+            }
+          : {}),
+        noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
+        serviceList: JSON.parse(receipt.serviceListJson) as string[],
+        ...(receipt.docketText ? { docketText: receipt.docketText } : {}),
+        ...(receipt.warnings ? { warnings: receipt.warnings } : {}),
+        ...(receipt.deficiencies ? { deficiencies: receipt.deficiencies } : {}),
+        ...(receipt.nextExpectedDeadlineJson
+          ? {
+              nextExpectedDeadline: JSON.parse(receipt.nextExpectedDeadlineJson) as NonNullable<
+                NonNullable<CaseSession['ecfReceipts']>[number]['nextExpectedDeadline']
+              >,
+            }
+          : {}),
+        createdAt: receipt.createdAt,
+      })),
+    ...(latestStrategy ? { counterpartyStrategy: latestStrategy.strategy } : {}),
+    ...(latestAmicus ? { amicusParticipation: latestAmicus.participation } : {}),
+    ...(panelAssignment ? { panelAssignment } : {}),
+    ...(latestPanel?.benchMemo ? { benchMemo: latestPanel.benchMemo } : {}),
+    ...(latestPanel?.deliberation ? { panelDeliberation: latestPanel.deliberation } : {}),
+    ...(latestDisposition ? { panelDisposition: latestDisposition.disposition } : {}),
     ...(assessment
       ? {
           assessment: {
@@ -272,6 +452,12 @@ async function deleteExistingSessionState(
     docketEntries,
     deadlines,
     receipts,
+    counterpartyStrategies,
+    amicusCandidates,
+    amicusParticipations,
+    panelDeliberations,
+    panelDispositions,
+    panelVotes,
     assessments,
   ] =
     await Promise.all([
@@ -304,6 +490,30 @@ async function deleteExistingSessionState(
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
       ctx.db
+        .query('counterpartyStrategies')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('amicusCandidates')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('amicusParticipations')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('panelDeliberations')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('panelDispositions')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('panelVotes')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
         .query('assessments')
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
@@ -318,6 +528,12 @@ async function deleteExistingSessionState(
       ...docketEntries,
       ...deadlines,
       ...receipts,
+      ...counterpartyStrategies,
+      ...amicusCandidates,
+      ...amicusParticipations,
+      ...panelDeliberations,
+      ...panelDispositions,
+      ...panelVotes,
       ...assessments,
     ].map((doc) => ctx.db.delete(doc._id)),
   )
@@ -408,6 +624,86 @@ async function replaceSessionState(
     })
   }
 
+  for (const receipt of session.ecfReceipts ?? []) {
+    const filingId = filingIdMap.get(receipt.filingId)
+    if (!filingId) continue
+    await ctx.db.insert('ecfReceipts', {
+      caseSessionId,
+      filingId,
+      receiptNumber: receipt.receiptNumber,
+      ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
+      ...(receipt.filer ? { filer: receipt.filer } : {}),
+      ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
+      ...(receipt.documentList
+        ? { documentListJson: JSON.stringify(receipt.documentList) }
+        : {}),
+      noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
+      serviceListJson: JSON.stringify(receipt.serviceList),
+      ...(receipt.docketText ? { docketText: receipt.docketText } : {}),
+      ...(receipt.warnings ? { warnings: receipt.warnings } : {}),
+      ...(receipt.deficiencies ? { deficiencies: receipt.deficiencies } : {}),
+      ...(receipt.nextExpectedDeadline
+        ? { nextExpectedDeadlineJson: JSON.stringify(receipt.nextExpectedDeadline) }
+        : {}),
+      createdAt: receipt.createdAt,
+    })
+  }
+
+  if (session.counterpartyStrategy) {
+    await ctx.db.insert('counterpartyStrategies', {
+      caseSessionId,
+      strategy: session.counterpartyStrategy,
+      createdAt: session.counterpartyStrategy.updatedAt ?? session.simulatedDate,
+    })
+  }
+
+  if (session.amicusParticipation) {
+    await ctx.db.insert('amicusParticipations', {
+      caseSessionId,
+      participation: session.amicusParticipation,
+      createdAt: session.simulatedDate,
+    })
+    await Promise.all(
+      session.amicusParticipation.candidates.map((candidate) =>
+        ctx.db.insert('amicusCandidates', {
+          caseSessionId,
+          candidate,
+          createdAt: session.simulatedDate,
+        }),
+      ),
+    )
+  }
+
+  if (session.panelAssignment || session.benchMemo || session.panelDeliberation) {
+    await ctx.db.insert('panelDeliberations', {
+      caseSessionId,
+      ...(session.panelAssignment ? { assignment: session.panelAssignment } : {}),
+      ...(session.benchMemo ? { benchMemo: session.benchMemo } : {}),
+      ...(session.panelDeliberation ? { deliberation: session.panelDeliberation } : {}),
+      createdAt: session.simulatedDate,
+    })
+  }
+
+  for (const vote of session.panelDeliberation?.votes ?? []) {
+    await ctx.db.insert('panelVotes', {
+      caseSessionId,
+      actorModuleId: vote.judgeActorId,
+      vote: vote.vote,
+      reliefOption: vote.reliefOption,
+      rationale: vote.rationale,
+      voteRecord: vote,
+      createdAt: vote.createdAt,
+    })
+  }
+
+  if (session.panelDisposition) {
+    await ctx.db.insert('panelDispositions', {
+      caseSessionId,
+      disposition: session.panelDisposition,
+      createdAt: session.panelDisposition.createdAt,
+    })
+  }
+
   if (session.assessment) {
     await ctx.db.insert('assessments', {
       caseSessionId,
@@ -444,28 +740,6 @@ async function appendCaseSessionEvent(
     payloadJson: JSON.stringify(payload),
     createdAt: new Date().toISOString(),
     ...(actorUserId ? { actorUserId } : {}),
-  })
-}
-
-async function insertEcfReceipt(
-  ctx: WriteCtx,
-  caseSessionId: Id<'caseSessions'>,
-  receipt: EcfReceipt,
-) {
-  const filings = await ctx.db
-    .query('filings')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
-  const newestFiling = filings.sort((a, b) => b.filedAt.localeCompare(a.filedAt))[0]
-  if (!newestFiling) return
-
-  await ctx.db.insert('ecfReceipts', {
-    caseSessionId,
-    filingId: newestFiling._id,
-    receiptNumber: receipt.receiptNumber,
-    noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
-    serviceListJson: JSON.stringify(receipt.serviceList),
-    createdAt: receipt.createdAt,
   })
 }
 
@@ -707,10 +981,6 @@ export const submitEcfFiling = mutation({
     const result = submitEcfFilingDomain(session, args.submission as FilingSubmission)
     const nextSession = transitionAfterFiling(result.session)
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
-
-    if (result.receipt) {
-      await insertEcfReceipt(ctx, caseSessionDoc._id, result.receipt)
-    }
 
     await appendCaseSessionEvent(
       ctx,

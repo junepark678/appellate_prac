@@ -18,6 +18,89 @@
       "Employer cited a reduction in force and documented performance concerns.",
       "Two comparator employees were retained despite similar audit findings.",
       "The district court excluded a late-filed declaration in a footnote."
+    ],
+    "issues": [
+      {
+        "id": "comparator-evidence",
+        "label": "Comparator evidence at summary judgment",
+        "standardOfReview": "de novo",
+        "preservationFacts": [
+          "The comparator argument was raised in opposition to summary judgment.",
+          "The district court resolved the comparator evidence in its summary judgment order."
+        ],
+        "recordSupportFacts": [
+          "Two retained employees had similar audit findings.",
+          "The relevant personnel memoranda are available for appendix inclusion."
+        ],
+        "likelyArgumentsForAppellant": [
+          "Temporal proximity and comparator treatment created a genuine dispute of pretext.",
+          "The district court weighed inferences instead of crediting the nonmovant."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The comparators were not similarly situated in all relevant respects.",
+          "The reduction-in-force record independently supports summary judgment."
+        ],
+        "possibleRelief": ["vacate", "vacate in part", "remand"]
+      },
+      {
+        "id": "summary-judgment-standard",
+        "label": "Application of the summary judgment standard",
+        "standardOfReview": "de novo",
+        "preservationFacts": [
+          "The summary judgment standard was central to the district court ruling."
+        ],
+        "recordSupportFacts": [
+          "The order describes the standard and evaluates causation and pretext."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The court drew factual inferences in favor of the movant."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The court recited and applied the correct standard."
+        ],
+        "possibleRelief": ["affirm", "vacate", "remand"]
+      },
+      {
+        "id": "late-evidentiary-objection",
+        "label": "Late evidentiary objection and excluded declaration",
+        "standardOfReview": "abuse of discretion or forfeiture-sensitive review",
+        "preservationFacts": [
+          "The objection was raised late and addressed only in a footnote."
+        ],
+        "recordSupportFacts": [
+          "The excluded declaration is absent unless the appendix includes the relevant record excerpt."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The declaration explained disputed timing and motive evidence."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The argument was forfeited or harmless because other evidence supported judgment."
+        ],
+        "possibleRelief": ["affirm", "remand"]
+      }
+    ],
+    "recordExcerpts": [
+      {
+        "id": "termination-timeline",
+        "label": "Termination timeline",
+        "source": "synthetic",
+        "text": "Jordan reported compliance irregularities on January 4 and was terminated six weeks later during a claimed reduction in force.",
+        "citedByIssueIds": ["comparator-evidence", "summary-judgment-standard"]
+      },
+      {
+        "id": "comparator-memos",
+        "label": "Comparator personnel memoranda",
+        "source": "synthetic",
+        "text": "Two employees with similar audit findings were retained after the reduction-in-force review.",
+        "citedByIssueIds": ["comparator-evidence"]
+      },
+      {
+        "id": "excluded-declaration",
+        "label": "Excluded declaration",
+        "source": "synthetic",
+        "text": "The district court excluded a late-filed declaration in a footnote and stated the ruling was independently harmless.",
+        "citedByIssueIds": ["late-evidentiary-objection"]
+      }
     ]
   },
   {
@@ -31,6 +114,8 @@
     "proceduralPosture": "Search CourtListener, pick a case, and import available docket entries and documents.",
     "issuesPresented": ["Generated from imported docket and opinion material."],
     "meritsRecord": ["Imported source materials remain linked with provenance."],
+    "issues": [],
+    "recordExcerpts": [],
     "sourceCaseUrl": "https://www.courtlistener.com/recap/"
   }
 ]

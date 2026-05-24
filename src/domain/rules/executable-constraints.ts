@@ -1,4 +1,5 @@
 import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
+import { validateAmicusSubmission } from '../amicus/workflow'
 import type {
   CaseSession,
   FilingMetadata,
@@ -104,6 +105,75 @@ function briefCertificateIssues(submission: FilingSubmission) {
   ]
 }
 
+function sealedFilingIssues(submission: FilingSubmission) {
+  if (!submission.metadata.sealed && !submission.eventId.includes('seal')) return []
+
+  const issues: ValidationIssue[] = []
+  if (!submission.metadata.redactionAcknowledged) {
+    issues.push(
+      issue(
+        'error',
+        'sealed_redaction_acknowledgment_missing',
+        'Sealed filings require a redaction and sealing acknowledgement.',
+        [ruleRefs.frap25],
+        'Acknowledge redaction responsibility and confirm the sealed filing metadata.',
+      ),
+    )
+  }
+
+  if (submission.metadata.sealed && !submission.metadata.sealedDocumentType) {
+    issues.push(
+      issue(
+        'warning',
+        'sealed_document_type_missing',
+        'Sealed filing metadata does not identify the sealed document type.',
+        [ruleRefs.frap25],
+        'Identify whether the upload is sealed material, a public redacted copy, or a sealing motion.',
+      ),
+    )
+  }
+
+  return issues
+}
+
+function metadataIssues(submission: FilingSubmission) {
+  const issues: ValidationIssue[] = []
+
+  if (
+    ['motion', 'motion_extend_time', 'motion_overlength_brief', 'motion_to_seal', 'mandate_stay_motion'].includes(
+      submission.eventId,
+    ) &&
+    !submission.metadata.reliefRequested?.trim()
+  ) {
+    issues.push(
+      issue(
+        'warning',
+        'motion_relief_metadata_missing',
+        'Motion metadata does not identify the relief requested.',
+        [ruleRefs.frap27],
+        'Enter the requested relief in the event metadata before final filing.',
+      ),
+    )
+  }
+
+  if (
+    ['motion_response', 'response_to_amicus_motion', 'corrected_brief'].includes(submission.eventId) &&
+    !submission.metadata.relatedDocketEntryId
+  ) {
+    issues.push(
+      issue(
+        'warning',
+        'related_docket_entry_missing',
+        'The event metadata does not identify the related docket entry.',
+        [ruleRefs.frap25, ruleRefs.frap27],
+        'Select the motion, deficiency notice, or docket entry this filing responds to.',
+      ),
+    )
+  }
+
+  return issues
+}
+
 function sequenceIssues(session: CaseSession, submission: FilingSubmission) {
   const filedEvents = new Set(
     session.filings
@@ -136,6 +206,30 @@ function sequenceIssues(session: CaseSession, submission: FilingSubmission) {
     )
   }
 
+  if (submission.eventId === 'appellee_brief' && !filedEvents.has('opening_brief')) {
+    issues.push(
+      issue(
+        'error',
+        'appellee_brief_before_opening_brief',
+        'An appellee brief cannot be filed before the appellant opening brief.',
+        [ruleRefs.frap31],
+        'Wait for the opening brief and appendix posture before filing the appellee brief.',
+      ),
+    )
+  }
+
+  if (submission.eventId === 'appellee_brief' && !filedEvents.has('joint_appendix')) {
+    issues.push(
+      issue(
+        'warning',
+        'appellee_brief_before_appendix',
+        'The appellee brief is being filed before the joint appendix appears on the docket.',
+        [ruleRefs.frap30, ruleRefs.frap31],
+        'Confirm the appendix posture before appellee briefing.',
+      ),
+    )
+  }
+
   if (session.status === 'closed' && submission.eventId !== 'petition_rehearing') {
     issues.push(
       issue(
@@ -149,6 +243,28 @@ function sequenceIssues(session: CaseSession, submission: FilingSubmission) {
   }
 
   return issues
+}
+
+function deadlineIssues(
+  session: CaseSession,
+  submission: FilingSubmission,
+  nowIso: string,
+) {
+  const deadline = session.deadlines.find(
+    (candidate) =>
+      candidate.targetEventId === submission.eventId && candidate.status === 'open',
+  )
+  if (!deadline || new Date(nowIso) <= new Date(deadline.dueDate)) return []
+
+  return [
+    issue(
+      'warning',
+      'filing_after_open_deadline',
+      `${submission.title} appears after the open simulator deadline.`,
+      deadline.sourceRuleRefs,
+      'File a motion to extend time or explain timeliness if the deadline has expired.',
+    ),
+  ]
 }
 
 function documentRequirementIssues(session: CaseSession, submission: FilingSubmission) {
@@ -268,6 +384,58 @@ function roleAndCourtIssues(session: CaseSession, submission: FilingSubmission) 
   return issues
 }
 
+function legalRealismIssues(submission: FilingSubmission) {
+  const text = allSubmissionDocuments(submission)
+    .map(documentText)
+    .join(' ')
+  const issues: ValidationIssue[] = []
+
+  if (submission.eventId === 'opening_brief' && !text.includes('standard of review')) {
+    issues.push(
+      issue(
+        'warning',
+        'standard_of_review_missing',
+        'Opening brief does not show a standard-of-review signal.',
+        [ruleRefs.frap28, ruleRefs.ca4Local28],
+        'Add a standard-of-review section for each issue.',
+      ),
+    )
+  }
+
+  if (
+    ['opening_brief', 'reply_brief', 'appellee_brief'].includes(submission.eventId) &&
+    !text.includes('record citation')
+  ) {
+    issues.push(
+      issue(
+        'warning',
+        'record_citations_missing',
+        'Brief does not show a record-citation signal.',
+        [ruleRefs.frap28, ruleRefs.ca4Local28],
+        'Add record citations tied to the joint appendix or record excerpts.',
+      ),
+    )
+  }
+
+  if (
+    submission.eventId === 'opening_brief' &&
+    typeof submission.mainDocument.pageCount === 'number' &&
+    submission.mainDocument.pageCount > 65
+  ) {
+    issues.push(
+      issue(
+        'warning',
+        'potential_overlength_brief',
+        'Opening brief page count suggests overlength briefing may require leave.',
+        [ruleRefs.frap32, ruleRefs.ca4Local28],
+        'File a motion to file an overlength brief if the brief exceeds applicable limits.',
+      ),
+    )
+  }
+
+  return issues
+}
+
 export function preflightFilingSubmission(
   session: CaseSession,
   submission: FilingSubmission,
@@ -279,7 +447,12 @@ export function preflightFilingSubmission(
     ...serviceIssues(submission.metadata),
     ...briefCertificateIssues(submission),
     ...privacyIssues(submission),
+    ...sealedFilingIssues(submission),
+    ...metadataIssues(submission),
     ...sequenceIssues(session, submission),
+    ...deadlineIssues(session, submission, nowIso),
+    ...validateAmicusSubmission(session, submission),
+    ...legalRealismIssues(submission),
   ]
   const outcome = outcomeForIssues(issues)
 
@@ -290,4 +463,3 @@ export function preflightFilingSubmission(
     analyzedAt: nowIso,
   }
 }
-

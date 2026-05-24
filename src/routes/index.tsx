@@ -33,6 +33,7 @@ import {
   ShieldCheck,
   Upload,
   UserPlus,
+  Users,
   XCircle,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -47,7 +48,10 @@ import {
   inferDocumentSignals,
   validateFiling,
 } from '../domain/simulation'
-import { filingDraftToSubmission } from '../domain/filing/ecf'
+import {
+  ecfEventDefinitionFromFilingEvent,
+  filingDraftToSubmission,
+} from '../domain/filing/ecf'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import type {
   CaseSession,
@@ -65,7 +69,18 @@ import type { Id } from '../../convex/_generated/dataModel'
 
 export const Route = createFileRoute('/')({ component: Home })
 
-type ViewKey = 'docket' | 'file' | 'trialDocket' | 'rules' | 'scenarios' | 'assessment'
+type ViewKey =
+  | 'docket'
+  | 'file'
+  | 'receipts'
+  | 'panel'
+  | 'parties'
+  | 'trialDocket'
+  | 'rules'
+  | 'scenarios'
+  | 'assessment'
+
+type ViewTab = { key: ViewKey; label: string; icon: typeof PanelTop }
 
 const learnerRole: ParticipantRole = 'appellant'
 
@@ -171,6 +186,13 @@ function Home() {
   const scenarioOptions = publishedScenarios ?? scenarios
   const courtPack = activeSession ? getCourtPack(activeSession.courtPackId) : null
   const ruleItems = activeSession ? getRuleItemsForCourt(activeSession.courtPackId) : []
+  const visibleTabs = useMemo(
+    () => (activeSession ? navigationTabsForSession(activeSession) : []),
+    [activeSession],
+  )
+  const visibleViewKeys = visibleTabs.map((tab) => tab.key)
+  const selectedView =
+    activeSession && visibleViewKeys.includes(activeView) ? activeView : 'docket'
   const availableEvents = (courtPack?.filingEvents ?? []).filter((event) =>
     event.allowedParticipantRoles.includes(learnerRole),
   )
@@ -208,6 +230,11 @@ function Home() {
     setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
     setTrialDocket(importedTrialDocket ?? createTrialDocket(activeSession))
   }, [activeSession?.id, importedTrialDocket])
+
+  useEffect(() => {
+    if (!activeSession || selectedView === activeView) return
+    setActiveView(selectedView)
+  }, [activeSession, activeView, selectedView])
 
   function resetDraft(eventId = draft.eventId) {
     if (!activeSession) return
@@ -392,7 +419,7 @@ function Home() {
             {activeSession ? (
               <Show when="signed-in">
                 <span className={statusClass(activeSession.status)}>
-                  {activeSession.status}
+                  {formatLabel(activeSession.status)}
                 </span>
               </Show>
             ) : null}
@@ -429,9 +456,13 @@ function Home() {
                 </aside>
 
                 <section className="min-w-0">
-                  <ViewTabs activeView={activeView} onSelect={setActiveView} />
+                  <ViewTabs
+                    activeView={selectedView}
+                    tabs={visibleTabs}
+                    onSelect={setActiveView}
+                  />
 
-                  {activeView === 'docket' && activeToolCall ? (
+                  {selectedView === 'docket' && activeToolCall ? (
                     <DocketView
                       session={activeSession}
                       activeToolCall={activeToolCall}
@@ -444,7 +475,7 @@ function Home() {
                     />
                   ) : null}
 
-                  {activeView === 'file' ? (
+                  {selectedView === 'file' ? (
                     <FilingView
                       draft={draft}
                       events={availableEvents}
@@ -455,14 +486,26 @@ function Home() {
                     />
                   ) : null}
 
-                  {activeView === 'rules' ? (
+                  {selectedView === 'receipts' ? (
+                    <ReceiptView session={activeSession} />
+                  ) : null}
+
+                  {selectedView === 'panel' ? (
+                    <PanelView session={activeSession} />
+                  ) : null}
+
+                  {selectedView === 'parties' ? (
+                    <PartiesView session={activeSession} />
+                  ) : null}
+
+                  {selectedView === 'rules' ? (
                     <RulesView
                       ruleItems={ruleItems}
                       courtPackId={activeSession.courtPackId}
                     />
                   ) : null}
 
-                  {activeView === 'trialDocket' ? (
+                  {selectedView === 'trialDocket' ? (
                     <TrialDocketView
                       courtListenerEnabled={courtListenerReady}
                       courtListenerUnavailableReason={courtListenerUnavailableReason}
@@ -477,7 +520,7 @@ function Home() {
                     />
                   ) : null}
 
-                  {activeView === 'scenarios' ? (
+                  {selectedView === 'scenarios' ? (
                     <ScenariosView
                       scenarios={scenarioOptions}
                       selectedScenarioId={activeSession.scenario.id}
@@ -485,7 +528,7 @@ function Home() {
                     />
                   ) : null}
 
-                  {activeView === 'assessment' ? (
+                  {selectedView === 'assessment' ? (
                     <AssessmentView session={activeSession} />
                   ) : null}
                 </section>
@@ -681,8 +724,8 @@ function SessionChooser({
                 type="button"
               >
                 <span className="font-semibold">{session.shortCaption}</span>
-                <span className="text-xs capitalize text-[#68716c]">
-                  {session.status} - {new Date(session.simulatedDate).toLocaleDateString()}
+                <span className="text-xs text-[#68716c]">
+                  {formatLabel(session.status)} - {new Date(session.simulatedDate).toLocaleDateString()}
                 </span>
               </button>
             ))}
@@ -779,11 +822,78 @@ function createTrialDocket(session: CaseSession): TrialDocket {
 }
 
 function statusClass(status: CaseSession['status']) {
-  const base = 'rounded-md px-3 py-2 text-sm font-semibold capitalize'
+  const base = 'rounded-md px-3 py-2 text-sm font-semibold'
   if (status === 'closed') return `${base} bg-[#dceadf] text-[#285b38]`
   if (status === 'submitted') return `${base} bg-[#e5e2f4] text-[#443a7a]`
   if (status === 'dismissed') return `${base} bg-[#f1dad2] text-[#8a321f]`
   return `${base} bg-[#e6eee9] text-[#1d4d4f]`
+}
+
+function acceptedFilings(session: CaseSession) {
+  return session.filings.filter((filing) => filing.outcome !== 'rejected')
+}
+
+function hasAcceptedFiling(session: CaseSession, eventId?: string) {
+  return acceptedFilings(session).some((filing) =>
+    eventId ? filing.eventId === eventId : true,
+  )
+}
+
+function hasPanelActivity(session: CaseSession) {
+  return Boolean(
+    session.status === 'submitted' ||
+      session.status === 'closed' ||
+      session.panelAssignment ||
+      session.benchMemo ||
+      session.panelDeliberation ||
+      session.panelDisposition,
+  )
+}
+
+function hasPartyActivity(session: CaseSession) {
+  return Boolean(
+    session.counterpartyStrategy ||
+      (session.amicusParticipation?.candidates.length ?? 0) > 0 ||
+      acceptedFilings(session).some((filing) =>
+        ['appellee', 'amicus'].includes(filing.participantRole),
+      ),
+  )
+}
+
+function navigationTabsForSession(session: CaseSession): ViewTab[] {
+  return [
+    { key: 'docket', label: 'Docket', icon: PanelTop },
+    { key: 'file', label: 'File', icon: Upload },
+    ...((session.ecfReceipts?.length ?? 0) > 0
+      ? [{ key: 'receipts' as const, label: 'Receipts', icon: FileCheck2 }]
+      : []),
+    ...(hasPartyActivity(session)
+      ? [{ key: 'parties' as const, label: 'Parties', icon: Users }]
+      : []),
+    ...(hasPanelActivity(session)
+      ? [{ key: 'panel' as const, label: 'Panel', icon: Gavel }]
+      : []),
+    { key: 'trialDocket', label: 'Trial Record', icon: ListTree },
+    { key: 'rules', label: 'Rules', icon: Library },
+    { key: 'scenarios', label: 'Scenarios', icon: Search },
+    ...(session.assessment
+      ? [{ key: 'assessment' as const, label: 'Assessment', icon: BadgeCheck }]
+      : []),
+  ]
+}
+
+function formatLabel(value: string) {
+  return value
+    .replaceAll('_', ' ')
+    .replaceAll('-', ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .replace(/\bCa4\b/g, 'CA4')
+    .replace(/\bCm\b/g, 'CM')
+    .replace(/\bEcf\b/g, 'ECF')
+    .replace(/\bPdf\b/g, 'PDF')
+    .replace(/\bFrap\b/g, 'FRAP')
 }
 
 function CasePanel({ session }: { session: CaseSession }) {
@@ -822,8 +932,8 @@ function DeadlinePanel({ session }: { session: CaseSession }) {
                 {new Date(deadline.dueDate).toLocaleDateString()}
               </div>
             </div>
-            <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold capitalize text-[#4f5f57]">
-              {deadline.status}
+            <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+              {formatLabel(deadline.status)}
             </span>
           </div>
         ))}
@@ -838,13 +948,11 @@ function JurisdictionPanel({ courtPackId }: { courtPackId: string }) {
     <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
       <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
         <Archive className="h-4 w-4" aria-hidden="true" />
-        Pack
+        Court Rules
       </div>
-      <div className="space-y-2 text-sm">
-        <InfoRow label="System" value={courtPack.courtSystem} />
-        <InfoRow label="Level" value={courtPack.courtLevel.replaceAll('_', ' ')} />
-        <InfoRow label="Domain" value={courtPack.procedureDomain.replaceAll('_', ' ')} />
-        <InfoRow label="Format" value={courtPack.docketNumberFormat} />
+      <div className="space-y-3 text-sm">
+        <InfoRow label="Ruleset" value={courtPack.label} />
+        <InfoRow label="Docket format" value={courtPack.docketNumberFormat} />
       </div>
     </section>
   )
@@ -863,22 +971,15 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function ViewTabs({
   activeView,
+  tabs,
   onSelect,
 }: {
   activeView: ViewKey
+  tabs: ViewTab[]
   onSelect: (view: ViewKey) => void
 }) {
-  const tabs: Array<{ key: ViewKey; label: string; icon: typeof PanelTop }> = [
-    { key: 'docket', label: 'Docket', icon: PanelTop },
-    { key: 'file', label: 'File', icon: Upload },
-    { key: 'trialDocket', label: 'Trial Docket', icon: ListTree },
-    { key: 'rules', label: 'Rules', icon: Library },
-    { key: 'scenarios', label: 'Scenarios', icon: Search },
-    { key: 'assessment', label: 'Assessment', icon: BadgeCheck },
-  ]
-
   return (
-    <nav className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+    <nav className="mb-4 flex flex-wrap gap-2">
       {tabs.map((tab) => {
         const Icon = tab.icon
         return (
@@ -922,6 +1023,8 @@ function DocketView({
 }) {
   return (
     <div className="space-y-4">
+      <WorkflowStatusGrid session={session} />
+
       <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -984,8 +1087,8 @@ function DocketView({
               <div>
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-semibold">{entry.title}</span>
-                  <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold capitalize text-[#4f5f57]">
-                    {entry.actorRole.replaceAll('_', ' ')}
+                  <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                    {formatLabel(entry.actorRole)}
                   </span>
                 </div>
                 <p className="mt-2 leading-6 text-[#3e4843]">{entry.text}</p>
@@ -1013,6 +1116,99 @@ function DocketView({
   )
 }
 
+function WorkflowStatusGrid({ session }: { session: CaseSession }) {
+  const counterparty = session.counterpartyStrategy
+  const amicus = session.amicusParticipation
+  const panelVotes = session.panelDeliberation?.votes.length ?? 0
+  const latestReceipt = session.ecfReceipts?.at(-1)
+  const amicusCount = amicus?.candidates.length ?? 0
+  const noticeFiled = hasAcceptedFiling(session, 'notice_of_appeal')
+  const tiles: Array<{
+    icon: typeof PanelTop
+    title: string
+    value: string
+    detail: string
+  }> = []
+
+  if (noticeFiled && latestReceipt) {
+    tiles.push({
+      icon: FileCheck2,
+      title: 'Latest Receipt',
+      value: latestReceipt.receiptNumber,
+      detail: latestReceipt.nextExpectedDeadline?.label ?? 'Accepted ECF filing received.',
+    })
+  }
+
+  if (counterparty || amicusCount > 0) {
+    tiles.push({
+      icon: Users,
+      title: 'Parties',
+      value:
+        counterparty?.recommendedNextFilingEventId
+          ? `Next: ${formatLabel(counterparty.recommendedNextFilingEventId)}`
+          : amicusCount > 0
+            ? `${amicusCount} Amicus Candidate${amicusCount === 1 ? '' : 's'}`
+            : 'Appellee Strategy Ready',
+      detail:
+        counterparty?.forfeitureArguments.at(0) ??
+        amicus?.candidates.at(0)?.rationale ??
+        'Party activity is available for this posture.',
+    })
+  }
+
+  if (hasPanelActivity(session)) {
+    tiles.push({
+      icon: Gavel,
+      title: 'Panel',
+      value: session.panelDisposition?.disposition
+        ? formatLabel(session.panelDisposition.disposition)
+        : session.panelAssignment
+          ? `${panelVotes}/3 Votes`
+          : 'Ready for Submission',
+      detail: session.benchMemo?.recommendedDisposition ?? 'Panel activity has begun.',
+    })
+  }
+
+  if (!tiles.length) return null
+
+  return (
+    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {tiles.map((tile) => (
+        <StatusTile
+          detail={tile.detail}
+          icon={tile.icon}
+          key={tile.title}
+          title={tile.title}
+          value={tile.value}
+        />
+      ))}
+    </section>
+  )
+}
+
+function StatusTile({
+  icon: Icon,
+  title,
+  value,
+  detail,
+}: {
+  icon: typeof PanelTop
+  title: string
+  value: string
+  detail: string
+}) {
+  return (
+    <article className="min-h-32 rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+        <Icon className="h-4 w-4" aria-hidden="true" />
+        {title}
+      </div>
+      <div className="truncate font-semibold">{value}</div>
+      <p className="mt-2 line-clamp-2 text-sm leading-6 text-[#59625d]">{detail}</p>
+    </article>
+  )
+}
+
 function FilingView({
   draft,
   events,
@@ -1029,6 +1225,10 @@ function FilingView({
   onSubmit: () => void
 }) {
   const errors = validationIssues.filter((issue) => issue.severity === 'error')
+  const selectedEvent = events.find((event) => event.id === draft.eventId)
+  const ecfDefinition = selectedEvent
+    ? ecfEventDefinitionFromFilingEvent(selectedEvent)
+    : null
 
   function setDocuments(files: FileList | null) {
     const documents: UploadedDocument[] = Array.from(files ?? []).map(inferDocumentSignals)
@@ -1041,7 +1241,7 @@ function FilingView({
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
             <FileText className="h-4 w-4" aria-hidden="true" />
-            CM/ECF Filing
+            CM/ECF Filing Workflow
           </div>
           <button
             className="flex h-9 items-center gap-2 rounded-md border border-[#d8d1c4] bg-white px-3 text-sm font-semibold"
@@ -1051,6 +1251,20 @@ function FilingView({
             <RefreshCw className="h-4 w-4" aria-hidden="true" />
             Reset
           </button>
+        </div>
+
+        <div className="mb-4 grid gap-2 md:grid-cols-4">
+          {['Event', 'Metadata', 'Documents', 'Review'].map((step, index) => (
+            <div
+              className="rounded-md border border-[#d8d1c4] bg-white px-3 py-2 text-sm"
+              key={step}
+            >
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+                Step {index + 1}
+              </div>
+              <div className="mt-1 font-semibold">{step}</div>
+            </div>
+          ))}
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -1078,6 +1292,30 @@ function FilingView({
             />
           </label>
         </div>
+
+        {ecfDefinition ? (
+          <section className="mt-4 rounded-lg border border-[#e2dbcf] bg-white p-3">
+            <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+              Event Metadata
+            </div>
+            <div className="grid gap-3 text-sm md:grid-cols-3">
+              <InfoRow label="Category" value={formatLabel(ecfDefinition.category)} />
+              <InfoRow label="Fee" value={formatLabel(ecfDefinition.feeBehavior)} />
+              <InfoRow label="Service" value={formatLabel(ecfDefinition.serviceBehavior)} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {ecfDefinition.metadataFields.map((field) => (
+                <span
+                  className="rounded border border-[#d8d1c4] bg-[#fbfaf7] px-2 py-1 text-xs font-medium text-[#3e4843]"
+                  key={field.key}
+                >
+                  {field.label}
+                  {field.required ? ' Required' : ''}
+                </span>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <label className="mt-4 block space-y-2 text-sm font-medium">
           PDF documents
@@ -1144,6 +1382,20 @@ function FilingView({
             value={draft.notes}
           />
         </label>
+
+        <section className="mt-4 rounded-lg border border-[#e2dbcf] bg-white p-3">
+          <div className="mb-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            Review
+          </div>
+          <div className="grid gap-3 text-sm md:grid-cols-3">
+            <InfoRow label="Main document" value={draft.documents[0]?.fileName ?? 'Not attached'} />
+            <InfoRow label="Attachments" value={String(Math.max(0, draft.documents.length - 1))} />
+            <InfoRow
+              label="Receipt status"
+              value={errors.length ? 'Cannot file until errors are cured' : 'Receipt preview ready'}
+            />
+          </div>
+        </section>
 
         <div className="mt-4 flex justify-end">
           <button
@@ -1223,7 +1475,7 @@ function ValidationItem({ issue }: { issue: ValidationIssue }) {
       <div className="flex gap-2">
         <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
         <div>
-          <div className="font-semibold capitalize">{issue.severity}</div>
+          <div className="font-semibold">{formatLabel(issue.severity)}</div>
           <p className="mt-1 leading-5">{issue.message}</p>
           {issue.ruleRefs.length ? (
             <div className="mt-2 flex flex-wrap gap-1">
@@ -1239,6 +1491,278 @@ function ValidationItem({ issue }: { issue: ValidationIssue }) {
           ) : null}
         </div>
       </div>
+    </div>
+  )
+}
+
+function ReceiptView({ session }: { session: CaseSession }) {
+  const receipts = session.ecfReceipts ?? []
+  return (
+    <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+      <div className="border-b border-[#d8d1c4] p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+          <FileCheck2 className="h-4 w-4" aria-hidden="true" />
+          ECF Receipts
+        </div>
+      </div>
+      <div className="divide-y divide-[#e2dbcf]">
+        {receipts.length ? (
+          receipts.map((receipt) => (
+            <article className="grid gap-3 p-4 text-sm lg:grid-cols-[240px_1fr]" key={receipt.id}>
+              <div>
+                <div className="font-mono font-semibold">{receipt.receiptNumber}</div>
+                <div className="mt-1 text-xs text-[#68716c]">
+                  {new Date(receipt.createdAt).toLocaleString()}
+                </div>
+                <div className="mt-2 rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                  {formatLabel(receipt.eventId ?? 'filing')}
+                </div>
+              </div>
+              <div>
+                <p className="leading-6 text-[#3e4843]">{receipt.docketText ?? receipt.noticeOfDocketActivityText}</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <InfoRow label="Filer" value={formatLabel(receipt.filer ?? 'appellant')} />
+                  <InfoRow label="Service" value={receipt.serviceList.join(', ') || 'None'} />
+                  <InfoRow label="Next deadline" value={receipt.nextExpectedDeadline?.label ?? 'None'} />
+                </div>
+                {receipt.documentList?.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {receipt.documentList.map((document) => (
+                      <span
+                        className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs"
+                        key={`${receipt.id}-${document.fileName}`}
+                      >
+                        {formatLabel(document.attachmentType)}: {document.fileName}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {[...(receipt.warnings ?? []), ...(receipt.deficiencies ?? [])].length ? (
+                  <div className="mt-3 space-y-1 text-xs font-medium text-[#8a321f]">
+                    {[...(receipt.warnings ?? []), ...(receipt.deficiencies ?? [])].map((item) => (
+                      <div key={item}>{item}</div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </article>
+          ))
+        ) : (
+          <EmptyState text="No accepted ECF filings have generated receipts yet." />
+        )}
+      </div>
+    </section>
+  )
+}
+
+function PanelView({ session }: { session: CaseSession }) {
+  const votes = session.panelDeliberation?.votes ?? []
+  return (
+    <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+          <Gavel className="h-4 w-4" aria-hidden="true" />
+          Panel Status
+        </div>
+        <div className="space-y-3 text-sm">
+          <InfoRow
+            label="Assignment"
+            value={
+              session.panelAssignment?.judgeActorIds.map(formatLabel).join(', ') ??
+              'Not Assigned'
+            }
+          />
+          <InfoRow
+            label="Presiding judge"
+            value={
+              session.panelAssignment?.presidingJudgeActorId
+                ? formatLabel(session.panelAssignment.presidingJudgeActorId)
+                : 'Pending'
+            }
+          />
+          <InfoRow
+            label="Oral argument"
+            value={
+              session.panelAssignment?.oralArgumentDisposition
+                ? formatLabel(session.panelAssignment.oralArgumentDisposition)
+                : 'Pending'
+            }
+          />
+          <InfoRow
+            label="Disposition"
+            value={
+              session.panelDisposition?.disposition
+                ? formatLabel(session.panelDisposition.disposition)
+                : 'Pending'
+            }
+          />
+          <InfoRow
+            label="Mandate"
+            value={
+              session.panelDeliberation?.mandateStatus
+                ? formatLabel(session.panelDeliberation.mandateStatus)
+                : 'Not Started'
+            }
+          />
+        </div>
+      </section>
+      <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+        <div className="border-b border-[#d8d1c4] p-4">
+          <div className="text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            Deliberation
+          </div>
+        </div>
+        <div className="divide-y divide-[#e2dbcf]">
+          {session.benchMemo ? (
+            <article className="p-4 text-sm">
+              <div className="font-semibold">Staff attorney memo</div>
+              <p className="mt-2 leading-6 text-[#59625d]">
+                Recommended disposition: {formatLabel(session.benchMemo.recommendedDisposition)}.
+              </p>
+              <div className="mt-3 space-y-2">
+                {session.benchMemo.issueSummaries.map((summary) => (
+                  <div className="rounded-md border border-[#e2dbcf] bg-white p-3" key={summary}>
+                    {summary}
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : (
+            <EmptyState text="No staff memo has been prepared yet." />
+          )}
+          {votes.map((vote) => (
+            <article className="p-4 text-sm" key={vote.id}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">{vote.judgeActorId}</span>
+                <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                  {formatLabel(vote.vote)}
+                </span>
+                {vote.joinsMajority ? (
+                  <span className="rounded bg-[#dceadf] px-2 py-1 text-xs font-semibold text-[#285b38]">
+                    Majority
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-2 leading-6 text-[#59625d]">{vote.rationale}</p>
+            </article>
+          ))}
+          {session.panelDisposition ? (
+            <article className="p-4 text-sm">
+              <div className="font-semibold">Judgment</div>
+              <p className="mt-2 leading-6 text-[#59625d]">{session.panelDisposition.judgmentText}</p>
+            </article>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function PartiesView({ session }: { session: CaseSession }) {
+  const strategy = session.counterpartyStrategy
+  const candidates = session.amicusParticipation?.candidates ?? []
+
+  if (!strategy && !candidates.length) {
+    return <EmptyState text="Party activity will appear after a relevant accepted filing." />
+  }
+
+  return (
+    <div className="space-y-4">
+      {strategy ? (
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            <Bot className="h-4 w-4" aria-hidden="true" />
+            Appellee Strategy
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <StrategyList title="Preserved Issues" items={strategy.preservedIssues} />
+            <StrategyList title="Forfeiture / Waiver" items={strategy.forfeitureArguments} />
+            <StrategyList title="Jurisdiction" items={strategy.jurisdictionArguments} />
+            <StrategyList title="Merits" items={strategy.meritsArguments} />
+            <StrategyList title="Procedural Motions" items={strategy.proceduralMotions} />
+            <div className="rounded-md border border-[#e2dbcf] bg-white p-3 text-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+                Recommended Next Event
+              </div>
+              <div className="mt-1 font-semibold">
+                {formatLabel(strategy.recommendedNextFilingEventId ?? 'monitor docket')}
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {candidates.length ? (
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+          <div className="border-b border-[#d8d1c4] p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+              <UserPlus className="h-4 w-4" aria-hidden="true" />
+              Amici
+            </div>
+          </div>
+          <div className="divide-y divide-[#e2dbcf]">
+            {candidates.map((candidate) => (
+              <article
+                className="grid gap-3 p-4 text-sm lg:grid-cols-[260px_1fr]"
+                key={candidate.id}
+              >
+                <div>
+                  <div className="font-semibold">{candidate.organizationName}</div>
+                  <div className="mt-1 text-xs text-[#68716c]">
+                    {formatLabel(candidate.organizationType)}
+                  </div>
+                  <div className="mt-2 rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                    Supports {formatLabel(candidate.supportsRole)}
+                  </div>
+                </div>
+                <div>
+                  <p className="leading-6 text-[#59625d]">{candidate.interestStatement}</p>
+                  <div className="mt-3 grid gap-3 md:grid-cols-3">
+                    <InfoRow label="Consent" value={formatLabel(candidate.consentStatus)} />
+                    <InfoRow
+                      label="Leave"
+                      value={candidate.requiresLeave ? 'Required' : 'Not required'}
+                    />
+                    <InfoRow
+                      label="Status"
+                      value={candidate.recommended ? 'Recommended' : 'Not recommended'}
+                    />
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  )
+}
+
+function StrategyList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-md border border-[#e2dbcf] bg-white p-3 text-sm">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+        {title}
+      </div>
+      {items.length ? (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div className="leading-5 text-[#3e4843]" key={item}>
+              {item}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-[#68716c]">None</div>
+      )}
+    </div>
+  )
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="p-4 text-sm leading-6 text-[#59625d]">
+      {text}
     </div>
   )
 }
@@ -1288,7 +1812,7 @@ function RulesView({
                     className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs font-semibold"
                     key={`${rule.ruleId}-${constraint.kind}-${constraint.value}`}
                   >
-                    {constraint.kind.replaceAll('_', ' ')}: {constraint.value}
+                    {formatLabel(constraint.kind)}: {constraint.value}
                   </span>
                 ))}
               </div>
@@ -1327,7 +1851,7 @@ function ScenariosView({
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="font-semibold">{scenario.title}</h2>
                 <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
-                  {scenario.source.replaceAll('_', ' ')}
+                  {formatLabel(scenario.source)}
                 </span>
               </div>
               <p className="mt-2 text-sm leading-6 text-[#59625d]">
@@ -1635,6 +2159,11 @@ function toolCallTitle(toolCall: ToolCall) {
   if (toolCall.tool === 'setDeadline') return toolCall.label
   if (toolCall.tool === 'submitToPanel') return 'Submit to Panel'
   if (toolCall.tool === 'disposeCase') return toolCall.disposition
+  if (toolCall.tool === 'draftStaffMemo') return 'Staff Attorney Memo'
+  if (toolCall.tool === 'castRuntimePanelVote') return 'Panel Vote'
+  if (toolCall.tool === 'draftRuntimePanelDisposition') return toolCall.disposition
+  if (toolCall.tool === 'enterJudgment') return toolCall.disposition
+  if (toolCall.tool === 'setMandateDeadline') return toolCall.label
   if (toolCall.tool === 'recommendClerkAction') return 'Clerk Recommendation'
   if (toolCall.tool === 'recommendAmicusParticipation') return 'Amicus Recommendation'
   if (toolCall.tool === 'draftBenchMemo') return 'Bench Memorandum'
@@ -1652,6 +2181,13 @@ function toolCallText(toolCall: ToolCall) {
   if (toolCall.tool === 'recommendAmicusParticipation') return toolCall.rationale
   if (toolCall.tool === 'draftBenchMemo') return toolCall.recommendation
   if (toolCall.tool === 'castPanelVote') return toolCall.rationale
+  if (toolCall.tool === 'draftStaffMemo') return toolCall.text
+  if (toolCall.tool === 'castRuntimePanelVote') return toolCall.rationale
+  if (toolCall.tool === 'draftRuntimePanelDisposition') return toolCall.judgmentText
+  if (toolCall.tool === 'enterJudgment') return toolCall.judgmentText
+  if (toolCall.tool === 'setMandateDeadline') {
+    return `${toolCall.label}; example offset ${toolCall.offsetDays} days.`
+  }
   if (toolCall.tool === 'draftAssessmentFeedback') {
     return [
       ...toolCall.proceduralFindings,

@@ -1,5 +1,11 @@
 import { openingBriefDeadline, ruleRefs } from '../../modules/registry'
 import { applyToolCall } from '../simulation'
+import {
+  createBenchMemo,
+  createPanelDisposition,
+  deterministicPanelVote,
+  nextPanelJudgeActorId,
+} from '../panel/deliberation'
 import type {
   CaseSession,
   ProcedureState,
@@ -27,7 +33,7 @@ export function inferProcedureState(session: CaseSession): ProcedureState {
     const filedEvents = activeFiledEventSet(session)
     return filedEvents.has('petition_rehearing') ? 'rehearing_pending' : 'judgment_entered'
   }
-  if (session.status === 'submitted') return 'submitted'
+  if (session.status === 'submitted') return 'panel_deliberation'
 
   const filedEvents = activeFiledEventSet(session)
   if (!filedEvents.has('notice_of_appeal')) return 'notice_pending'
@@ -107,6 +113,58 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
   }
 
   if (state === 'panel_deliberation') {
+    if (session.status === 'submitted' && !session.benchMemo) {
+      const memo = createBenchMemo(session)
+      return {
+        tool: 'draftStaffMemo',
+        actorId: 'ca4_staff_attorney',
+        text: memo.issueSummaries.join(' '),
+        issueSummaries: memo.issueSummaries,
+        recommendedDisposition: memo.recommendedDisposition,
+        risks: memo.risks,
+      }
+    }
+
+    if (
+      session.status === 'submitted' &&
+      (session.panelDeliberation?.votes.length ?? 0) < 3
+    ) {
+      const judgeActorId = nextPanelJudgeActorId(session) ?? 'ca4_judge_1'
+      const vote = deterministicPanelVote(session, judgeActorId)
+      return {
+        tool: 'castRuntimePanelVote',
+        actorId: vote.judgeActorId,
+        vote: vote.vote,
+        reliefOption: vote.reliefOption,
+        rationale: vote.rationale,
+        joinsMajority: vote.joinsMajority,
+        ...(vote.separateWritingType ? { separateWritingType: vote.separateWritingType } : {}),
+        confidence: vote.confidence,
+      }
+    }
+
+    if (session.status === 'submitted' && !session.panelDisposition) {
+      const disposition = createPanelDisposition(session)
+      return {
+        tool: 'draftRuntimePanelDisposition',
+        actorId: 'ca4_panel',
+        disposition: disposition.disposition,
+        text: disposition.judgmentText,
+        judgmentText: disposition.judgmentText,
+        ruleRefs: disposition.ruleRefs,
+      }
+    }
+
+    if (session.status === 'submitted' && session.panelDisposition) {
+      return {
+        tool: 'enterJudgment',
+        actorId: 'ca4_panel',
+        disposition: session.panelDisposition.disposition,
+        judgmentText: session.panelDisposition.judgmentText,
+        ruleRefs: [ruleRefs.frap36, ruleRefs.frap41],
+      }
+    }
+
     return {
       tool: 'submitToPanel',
       actorId: 'ca4_clerk',
@@ -115,13 +173,7 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
   }
 
   if (state === 'submitted') {
-    return {
-      tool: 'disposeCase',
-      actorId: 'ca4_panel',
-      disposition: 'Opinion and Judgment',
-      text: 'The judgment is vacated in part and remanded. The panel concludes that the district court applied the correct summary judgment standard but failed to view comparator evidence in the light most favorable to appellant. Appellant forfeited a separate evidentiary objection by failing to develop it in the opening brief.',
-      ruleRefs: [ruleRefs.frap28, ruleRefs.frap34, ruleRefs.frap36, ruleRefs.frap41],
-    }
+    return nextProcedureToolCall({ ...session, procedureState: 'panel_deliberation' })
   }
 
   return {
@@ -163,4 +215,3 @@ export function advanceProcedure(session: CaseSession): {
     },
   }
 }
-

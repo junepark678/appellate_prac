@@ -6,6 +6,21 @@ import {
   ruleRefs,
 } from '../modules/registry'
 import { isImplementedAiTool } from '../modules/tools'
+import { updateAmicusAfterAcceptedFiling, withAmicusRecommendations } from './amicus/workflow'
+import { counterpartyBriefText, withCounterpartyStrategy } from './counterparty/strategy'
+import {
+  addBenchMemo,
+  addPanelVote,
+  assignPanel,
+  canSubmitToPanel,
+  createBenchMemo,
+  createPanelDisposition,
+  deterministicPanelVote,
+  enterPanelDisposition,
+  nextPanelJudgeActorId,
+  validatePanelDisposition,
+  validatePanelVote,
+} from './panel/deliberation'
 import type {
   Assessment,
   CaseSession,
@@ -17,6 +32,7 @@ import type {
   ParticipantRole,
   Participant,
   RuleRef,
+  PanelVote,
   ToolCall,
   ToolValidationResult,
   UploadedDocument,
@@ -93,6 +109,11 @@ function isSupportedRuntimeTool(tool: string): tool is ToolCall['tool'] {
     'submitToPanel',
     'issuePanelOrder',
     'disposeCase',
+    'draftStaffMemo',
+    'castRuntimePanelVote',
+    'draftRuntimePanelDisposition',
+    'enterJudgment',
+    'setMandateDeadline',
   ].includes(tool)
 }
 
@@ -205,6 +226,99 @@ function normalizeToolCall(toolCall: ToolCall | RuntimeToolCall): ToolCall | nul
       : null
   }
 
+  if (toolCall.tool === 'draftStaffMemo') {
+    return isString(toolCall.text) &&
+      Array.isArray(toolCall.issueSummaries) &&
+      toolCall.issueSummaries.every(isString) &&
+      isString(toolCall.recommendedDisposition) &&
+      Array.isArray(toolCall.risks) &&
+      toolCall.risks.every(isString)
+      ? {
+          tool: toolCall.tool,
+          actorId: toolCall.actorId,
+          text: toolCall.text,
+          issueSummaries: toolCall.issueSummaries,
+          recommendedDisposition: toolCall.recommendedDisposition,
+          risks: toolCall.risks,
+        }
+      : null
+  }
+
+  if (toolCall.tool === 'castRuntimePanelVote') {
+    return isString(toolCall.vote) &&
+      ['affirm', 'reverse', 'vacate', 'vacate_in_part', 'dismiss', 'remand'].includes(
+        toolCall.vote,
+      ) &&
+      isString(toolCall.reliefOption) &&
+      isString(toolCall.rationale) &&
+      typeof toolCall.joinsMajority === 'boolean' &&
+      isNumber(toolCall.confidence)
+      ? {
+          tool: toolCall.tool,
+          actorId: toolCall.actorId,
+          vote: toolCall.vote as PanelVote['vote'],
+          reliefOption: toolCall.reliefOption,
+          rationale: toolCall.rationale,
+          joinsMajority: toolCall.joinsMajority,
+          ...(['concurrence', 'dissent', 'concur_in_judgment'].includes(
+            String(toolCall.separateWritingType),
+          )
+            ? {
+                separateWritingType: toolCall.separateWritingType as
+                  | 'concurrence'
+                  | 'dissent'
+                  | 'concur_in_judgment',
+              }
+            : {}),
+          confidence: toolCall.confidence,
+        }
+      : null
+  }
+
+  if (toolCall.tool === 'draftRuntimePanelDisposition') {
+    return isString(toolCall.disposition) &&
+      isString(toolCall.text) &&
+      isString(toolCall.judgmentText) &&
+      isRuleRefArray(toolCall.ruleRefs)
+      ? {
+          tool: toolCall.tool,
+          actorId: toolCall.actorId,
+          disposition: toolCall.disposition,
+          text: toolCall.text,
+          judgmentText: toolCall.judgmentText,
+          ruleRefs: toolCall.ruleRefs,
+        }
+      : null
+  }
+
+  if (toolCall.tool === 'enterJudgment') {
+    return isString(toolCall.disposition) &&
+      isString(toolCall.judgmentText) &&
+      isRuleRefArray(toolCall.ruleRefs)
+      ? {
+          tool: toolCall.tool,
+          actorId: toolCall.actorId,
+          disposition: toolCall.disposition,
+          judgmentText: toolCall.judgmentText,
+          ruleRefs: toolCall.ruleRefs,
+        }
+      : null
+  }
+
+  if (toolCall.tool === 'setMandateDeadline') {
+    return isString(toolCall.label) &&
+      isNumber(toolCall.offsetDays) &&
+      isRuleRefArray(toolCall.sourceRuleRefs)
+      ? {
+          tool: toolCall.tool,
+          actorId: toolCall.actorId,
+          label: toolCall.label,
+          offsetDays: toolCall.offsetDays,
+          sourceRuleRefs: toolCall.sourceRuleRefs,
+        }
+      : null
+  }
+
   return null
 }
 
@@ -246,6 +360,20 @@ function syntheticDocumentsForEvent(event: FilingEvent): UploadedDocument[] {
       event.label.toLowerCase(),
     ],
   }))
+}
+
+function postProcessAcceptedFiling(session: CaseSession, draft: FilingDraft): CaseSession {
+  let nextSession = session
+  if (draft.participantRole === 'appellant') {
+    nextSession = withCounterpartyStrategy(nextSession)
+  }
+  if (draft.eventId === 'opening_brief') {
+    nextSession = withAmicusRecommendations(nextSession)
+  }
+  if (draft.participantRole === 'amicus' || draft.eventId.includes('amicus')) {
+    nextSession = updateAmicusAfterAcceptedFiling(nextSession)
+  }
+  return nextSession
 }
 
 export function createInitialSession(scenarioId = 'synthetic-employment-retaliation'): CaseSession {
@@ -461,6 +589,32 @@ export function validateFiling(
     })
   }
 
+  const draftSignals = draft.documents
+    .flatMap((document) => [
+      document.fileName,
+      document.extractedText ?? '',
+      ...document.extractedSignals,
+    ])
+    .join(' ')
+    .toLowerCase()
+  if (draft.eventId === 'opening_brief' && !draftSignals.includes('standard of review')) {
+    issues.push({
+      severity: 'warning',
+      message: 'Legal realism check: missing standard of review.',
+      ruleRefs: [ruleRefs.frap28, ruleRefs.ca4Local28],
+    })
+  }
+  if (
+    ['opening_brief', 'appellee_brief', 'reply_brief'].includes(draft.eventId) &&
+    !draftSignals.includes('record citation')
+  ) {
+    issues.push({
+      severity: 'warning',
+      message: 'Legal realism check: missing record citations.',
+      ruleRefs: [ruleRefs.frap28, ruleRefs.ca4Local28],
+    })
+  }
+
   if (session.status === 'closed' && draft.eventId !== 'petition_rehearing') {
     issues.push({
       severity: 'error',
@@ -552,10 +706,10 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
       filingId: filing.id,
       ruleRefs: validationIssues.flatMap((issue) => issue.ruleRefs),
     })
-    return {
+    return postProcessAcceptedFiling({
       ...updatedSession,
       docketEntries: [...updatedSession.docketEntries, deficiencyEntry],
-    }
+    }, draft)
   }
 
   const newDeadlines =
@@ -570,10 +724,10 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
       ),
     ) ?? []
 
-  return {
+  return postProcessAcceptedFiling({
     ...updatedSession,
     deadlines: [...updatedSession.deadlines, ...newDeadlines],
-  }
+  }, draft)
 }
 
 export function validateToolCall(
@@ -607,15 +761,15 @@ export function validateToolCall(
     return { accepted: false, issues }
   }
 
-  if (normalized.tool === 'disposeCase' && session.status === 'closed') {
+  if (
+    ['disposeCase', 'enterJudgment'].includes(normalized.tool) &&
+    session.status === 'closed'
+  ) {
     issues.push('The case is already closed.')
   }
 
-  if (
-    normalized.tool === 'submitToPanel' &&
-    !activeFiledEventSet(session).has('reply_brief')
-  ) {
-    issues.push('The panel submission tool requires the normal briefing sequence first.')
+  if (normalized.tool === 'submitToPanel') {
+    issues.push(...canSubmitToPanel(session).issues)
   }
 
   if (normalized.tool === 'fileCounterpartyDocument') {
@@ -630,6 +784,61 @@ export function validateToolCall(
 
     if (normalized.eventId === 'reply_brief') {
       issues.push('The counterparty cannot file appellant reply briefing.')
+    }
+
+    if (
+      normalized.eventId === 'appellee_brief' &&
+      !activeFiledEventSet(session).has('opening_brief')
+    ) {
+      issues.push('The appellee brief cannot precede the appellant opening brief.')
+    }
+  }
+
+  if (normalized.tool === 'draftStaffMemo') {
+    if (!session.panelAssignment) {
+      issues.push('A staff memo requires panel assignment first.')
+    }
+    if (session.benchMemo) {
+      issues.push('A staff memo already exists for this panel deliberation.')
+    }
+  }
+
+  if (normalized.tool === 'castRuntimePanelVote') {
+    const vote: PanelVote = {
+      id: `panel_vote_${(session.panelDeliberation?.votes.length ?? 0) + 1}`,
+      judgeActorId: normalized.actorId,
+      vote: normalized.vote,
+      reliefOption: normalized.reliefOption,
+      rationale: normalized.rationale,
+      joinsMajority: normalized.joinsMajority,
+      ...(normalized.separateWritingType
+        ? { separateWritingType: normalized.separateWritingType }
+        : {}),
+      confidence: normalized.confidence,
+      createdAt: session.simulatedDate,
+    }
+    issues.push(...validatePanelVote(session, vote).issues)
+  }
+
+  if (normalized.tool === 'draftRuntimePanelDisposition') {
+    issues.push(
+      ...validatePanelDisposition(session, {
+        disposition: normalized.disposition,
+        judgmentText: normalized.judgmentText,
+        ruleRefs: normalized.ruleRefs,
+      }).issues,
+    )
+  }
+
+  if (normalized.tool === 'enterJudgment') {
+    if (!session.panelDisposition) {
+      issues.push('Judgment cannot be entered before a validated panel disposition.')
+    }
+    const ruleIds = new Set(normalized.ruleRefs.map((rule) => rule.ruleId))
+    for (const requiredRule of [ruleRefs.frap36, ruleRefs.frap41]) {
+      if (!ruleIds.has(requiredRule.ruleId)) {
+        issues.push(`Judgment entry must cite ${requiredRule.label}.`)
+      }
     }
   }
 
@@ -681,6 +890,10 @@ export function applyToolCall(
     const event = getFilingEvent(session.courtPackId, normalized.eventId)
     const participantRole = actorFilingRole(session, normalized.actorId) ?? 'appellee'
     const documents = event ? syntheticDocumentsForEvent(event) : []
+    const strategicText =
+      normalized.eventId === 'appellee_brief'
+        ? counterpartyBriefText(session)
+        : normalized.text
     const filingDraft: FilingDraft = {
       eventId: normalized.eventId,
       participantRole,
@@ -689,7 +902,7 @@ export function applyToolCall(
       certificateOfService: true,
       certificateOfCompliance: normalized.eventId.includes('brief'),
       sealed: false,
-      notes: normalized.text,
+      notes: strategicText,
     }
     return fileDraft(session, filingDraft)
   }
@@ -733,11 +946,157 @@ export function applyToolCall(
       text: normalized.text,
       ruleRefs: [ruleRefs.frap34],
     })
-    return {
+    return assignPanel({
       ...session,
       status: 'submitted',
+      procedureState: 'panel_deliberation',
       simulatedDate: entry.filedAt,
       docketEntries: [...session.docketEntries, entry],
+    })
+  }
+
+  if (normalized.tool === 'draftStaffMemo') {
+    const memo = {
+      ...createBenchMemo(session),
+      authorActorId: normalized.actorId,
+      issueSummaries: normalized.issueSummaries,
+      recommendedDisposition: normalized.recommendedDisposition,
+      risks: normalized.risks,
+    }
+    const entry = createDocketEntry(session, {
+      filedAt: addDays(session.simulatedDate, 1),
+      actorRole: 'judge',
+      title: 'Staff Attorney Screening Memo',
+      text: normalized.text,
+      ruleRefs: [ruleRefs.frap34],
+    })
+    return addBenchMemo(
+      {
+        ...session,
+        simulatedDate: entry.filedAt,
+        docketEntries: [...session.docketEntries, entry],
+      },
+      { ...memo, createdAt: entry.filedAt },
+    )
+  }
+
+  if (normalized.tool === 'castRuntimePanelVote') {
+    const vote: PanelVote = {
+      id: `panel_vote_${String((session.panelDeliberation?.votes.length ?? 0) + 1).padStart(4, '0')}`,
+      judgeActorId: normalized.actorId,
+      vote: normalized.vote,
+      reliefOption: normalized.reliefOption,
+      rationale: normalized.rationale,
+      joinsMajority: normalized.joinsMajority,
+      ...(normalized.separateWritingType
+        ? { separateWritingType: normalized.separateWritingType }
+        : {}),
+      confidence: normalized.confidence,
+      createdAt: addDays(session.simulatedDate, 1),
+    }
+    const entry = createDocketEntry(session, {
+      filedAt: vote.createdAt,
+      actorRole: 'judge',
+      title: `Panel Vote Recorded: ${normalized.actorId.replace('ca4_', '').replaceAll('_', ' ')}`,
+      text: vote.rationale,
+      ruleRefs: [ruleRefs.frap34],
+    })
+    return addPanelVote(
+      {
+        ...session,
+        simulatedDate: entry.filedAt,
+        docketEntries: [...session.docketEntries, entry],
+      },
+      vote,
+    )
+  }
+
+  if (normalized.tool === 'draftRuntimePanelDisposition') {
+    const disposition = createPanelDisposition(
+      session,
+      normalized.disposition,
+      normalized.judgmentText,
+      normalized.ruleRefs,
+    )
+    const entry = createDocketEntry(session, {
+      filedAt: addDays(session.simulatedDate, 1),
+      actorRole: 'panel',
+      title: normalized.disposition,
+      text: normalized.text,
+      ruleRefs: normalized.ruleRefs,
+    })
+    return enterPanelDisposition(
+      {
+        ...session,
+        simulatedDate: entry.filedAt,
+        docketEntries: [...session.docketEntries, entry],
+      },
+      { ...disposition, createdAt: entry.filedAt },
+    )
+  }
+
+  if (normalized.tool === 'enterJudgment') {
+    const dispositionEntry = createDocketEntry(session, {
+      filedAt: addDays(session.simulatedDate, 1),
+      actorRole: 'panel',
+      title: normalized.disposition,
+      text: normalized.judgmentText,
+      ruleRefs: normalized.ruleRefs,
+    })
+    const closingSession: CaseSession = {
+      ...session,
+      status: 'closed',
+      procedureState: 'judgment_entered',
+      simulatedDate: dispositionEntry.filedAt,
+      docketEntries: [...session.docketEntries, dispositionEntry],
+      assessment: createAssessment(session, normalized.disposition),
+    }
+    const rehearingDeadline = createDeadline(
+      closingSession,
+      'Petition for rehearing due',
+      'petition_rehearing',
+      dispositionEntry.id,
+      14,
+      [ruleRefs.frap40],
+    )
+    const mandateDeadline = createDeadline(
+      { ...closingSession, deadlines: [...closingSession.deadlines, rehearingDeadline] },
+      'Mandate expected to issue',
+      'mandate',
+      dispositionEntry.id,
+      21,
+      [ruleRefs.frap41],
+    )
+    return {
+      ...closingSession,
+      deadlines: [...closingSession.deadlines, rehearingDeadline, mandateDeadline],
+      panelDeliberation: closingSession.panelDeliberation
+        ? { ...closingSession.panelDeliberation, mandateStatus: 'pending' }
+        : closingSession.panelDeliberation,
+    }
+  }
+
+  if (normalized.tool === 'setMandateDeadline') {
+    if (hasOpenDeadline(session, 'mandate')) {
+      return session
+    }
+    const sourceEntry = session.docketEntries.at(-1)
+    return {
+      ...session,
+      deadlines: [
+        ...session.deadlines,
+        createDeadline(
+          session,
+          normalized.label,
+          'mandate',
+          sourceEntry?.id ?? 'manual',
+          normalized.offsetDays,
+          normalized.sourceRuleRefs,
+        ),
+      ],
+      panelDeliberation: session.panelDeliberation
+        ? { ...session.panelDeliberation, mandateStatus: 'pending' }
+        : session.panelDeliberation,
     }
   }
 
@@ -859,12 +1218,53 @@ export function nextExpectedToolCall(session: CaseSession): ToolCall {
     }
   }
 
+  if (session.status === 'submitted' && !session.benchMemo) {
+    const memo = createBenchMemo(session)
+    return {
+      tool: 'draftStaffMemo',
+      actorId: 'ca4_staff_attorney',
+      text: memo.issueSummaries.join(' '),
+      issueSummaries: memo.issueSummaries,
+      recommendedDisposition: memo.recommendedDisposition,
+      risks: memo.risks,
+    }
+  }
+
+  if (session.status === 'submitted' && (session.panelDeliberation?.votes.length ?? 0) < 3) {
+    const judgeActorId = nextPanelJudgeActorId(session) ?? 'ca4_judge_1'
+    const vote = deterministicPanelVote(session, judgeActorId)
+    return {
+      tool: 'castRuntimePanelVote',
+      actorId: vote.judgeActorId,
+      vote: vote.vote,
+      reliefOption: vote.reliefOption,
+      rationale: vote.rationale,
+      joinsMajority: vote.joinsMajority,
+      ...(vote.separateWritingType ? { separateWritingType: vote.separateWritingType } : {}),
+      confidence: vote.confidence,
+    }
+  }
+
+  if (session.status === 'submitted' && !session.panelDisposition) {
+    const disposition = createPanelDisposition(session)
+    return {
+      tool: 'draftRuntimePanelDisposition',
+      actorId: 'ca4_panel',
+      disposition: disposition.disposition,
+      text: disposition.judgmentText,
+      judgmentText: disposition.judgmentText,
+      ruleRefs: disposition.ruleRefs,
+    }
+  }
+
   return {
-    tool: 'disposeCase',
+    tool: 'enterJudgment',
     actorId: 'ca4_panel',
-    disposition: 'Opinion and Judgment',
-    text: 'The judgment is vacated in part and remanded. The panel concludes that the district court applied the correct summary judgment standard but failed to view comparator evidence in the light most favorable to appellant. Appellant forfeited a separate evidentiary objection by failing to develop it in the opening brief.',
-    ruleRefs: [ruleRefs.frap28, ruleRefs.frap34, ruleRefs.frap36, ruleRefs.frap41],
+    disposition: session.panelDisposition?.disposition ?? 'Opinion and Judgment',
+    judgmentText:
+      session.panelDisposition?.judgmentText ??
+      'Judgment is entered and the mandate will issue under the simulated schedule unless stayed.',
+    ruleRefs: [ruleRefs.frap36, ruleRefs.frap41],
   }
 }
 

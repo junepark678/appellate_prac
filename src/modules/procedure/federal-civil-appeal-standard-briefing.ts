@@ -172,13 +172,46 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
         filedEvents.has('appellee_brief') ? [] : ['Appellee brief is not on file.'],
       ),
       eventAvailability('motion', 'Motion', session.status === 'active'),
+      eventAvailability('motion_extend_time', 'Motion to Extend Time', session.status === 'active'),
+      eventAvailability(
+        'motion_overlength_brief',
+        'Motion to File Overlength Brief',
+        session.status === 'active',
+      ),
+      eventAvailability('motion_to_seal', 'Motion to Seal', session.status === 'active'),
+      eventAvailability(
+        'sealed_filing_acknowledgment',
+        'Sealed Filing Acknowledgment',
+        session.status === 'active',
+      ),
       eventAvailability('motion_response', 'Response to Motion', session.status === 'active'),
+      eventAvailability(
+        'response_to_amicus_motion',
+        'Response to Amicus Motion',
+        session.status === 'active',
+      ),
+      eventAvailability('amicus_notice_or_consent', 'Amicus Notice / Consent Statement', session.status === 'active'),
+      eventAvailability('motion_for_leave_to_file_amicus', 'Motion for Leave to File Amicus Brief', session.status === 'active'),
       eventAvailability('amicus_brief', 'Amicus Brief', session.status === 'active'),
+      eventAvailability(
+        'corrected_brief',
+        'Corrected Brief',
+        session.filings.some((filing) => filing.outcome === 'accepted_with_deficiency'),
+        session.filings.some((filing) => filing.outcome === 'accepted_with_deficiency')
+          ? []
+          : ['No accepted filing deficiency is pending.'],
+      ),
       eventAvailability(
         'petition_rehearing',
         'Panel or En Banc Rehearing Petition',
         session.status === 'closed',
         session.status === 'closed' ? [] : ['Disposition has not been entered.'],
+      ),
+      eventAvailability(
+        'mandate_stay_motion',
+        'Motion to Stay Mandate',
+        session.status === 'closed',
+        session.status === 'closed' ? [] : ['Judgment has not been entered.'],
       ),
     ]
   },

@@ -225,11 +225,14 @@ describe('simulation engine', () => {
       ...draft('reply_brief'),
       documents: [replyPdf],
     })
-    session = applyToolCall(session, nextExpectedToolCall(session))
-    session = applyToolCall(session, nextExpectedToolCall(session))
+    for (let index = 0; index < 10 && session.status !== 'closed'; index += 1) {
+      session = applyToolCall(session, nextExpectedToolCall(session))
+    }
 
     expect(session.status).toBe('closed')
-    expect(session.assessment?.disposition).toBe('Opinion and Judgment')
+    expect(session.panelDeliberation?.votes).toHaveLength(3)
+    expect(session.panelDisposition?.majorityJudgeActorIds).toHaveLength(2)
+    expect(session.assessment?.disposition).toBe(session.panelDisposition?.disposition)
     expect(session.assessment?.nextPracticeTargets).toContain(
       'Preserve every issue in the opening brief with record citations.',
     )
