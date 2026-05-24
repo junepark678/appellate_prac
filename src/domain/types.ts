@@ -87,6 +87,44 @@ export type RuleRef = {
   sourceUrl: string
 }
 
+export type CourtSourceVersion = {
+  sourceVersionId: string
+  courtPackId: string
+  label: string
+  sourceUrl: string
+  effectiveFrom: string
+  effectiveTo?: string
+  contentHash: string
+  reviewStatus: 'draft' | 'reviewed' | 'published' | 'rejected'
+}
+
+export type SourceBackedConstraint = {
+  constraintId: string
+  ruleRefs: RuleRef[]
+  sourceVersionIds: string[]
+  kind:
+    | 'required_document'
+    | 'deadline'
+    | 'word_limit'
+    | 'page_limit'
+    | 'certificate'
+    | 'service'
+    | 'jurisdiction'
+    | 'event_sequence'
+    | 'fee_or_ifp'
+    | 'privacy_redaction'
+    | 'sealed_filing'
+    | 'attachment_type'
+    | 'brief_content_section'
+    | 'ecf_metadata'
+    | 'relief_selection'
+    | 'related_entry'
+  appliesToEventIds: string[]
+  severity: 'error' | 'warning' | 'info'
+  predicateJson: string
+  cureSuggestion: string
+}
+
 export type StructuredConstraint = {
   kind:
     | 'required_document'
@@ -151,11 +189,68 @@ export type EcfEventCategory =
   | 'post_disposition'
   | 'amicus'
 
+export type EcfCatalogCategory =
+  | 'Forms, Notices & Filing Fees'
+  | 'Motions, Responses & Replies'
+  | 'Briefing Documents'
+  | 'Argument Notices & Acknowledgments'
+  | 'Judgments'
+  | 'Rehearing Petitions & Answers'
+  | 'Bills of Cost & Objections'
+  | 'Other Filings'
+
 export type EcfFeeBehavior = 'none' | 'required' | 'waivable' | 'deferred'
 
 export type EcfServiceBehavior = 'cm_ecf' | 'manual_required' | 'mixed'
 
 export type EcfPartySelectionMode = 'none' | 'single' | 'multiple' | 'all_filers'
+
+export type EcfRequiredFieldKey =
+  | 'filingAttorneyName'
+  | 'representedPartyId'
+  | 'feePaymentStatus'
+  | 'reliefRequested'
+  | 'relatedDocketEntryId'
+  | 'certificateOfService'
+  | 'certificateOfCompliance'
+  | 'sealed'
+  | 'sealedDocumentType'
+  | 'privacyAcknowledged'
+  | 'publicRedactedVersionIncluded'
+  | 'consentStatus'
+
+export type EcfCatalogEvent = {
+  eventId: string
+  courtEventName: string
+  category: EcfCatalogCategory
+  menuPath: string[]
+  reliefs: string[]
+  requiredFields: EcfRequiredFieldKey[]
+  requiredDocuments: string[]
+  serviceBehavior: EcfServiceBehavior
+  feeBehavior: EcfFeeBehavior
+  sealedBehavior: 'public' | 'sealed' | 'public_redacted_required' | 'manual_review'
+  sourceVersionIds: string[]
+}
+
+export type DeadlineRule = {
+  deadlineId: string
+  triggerEventId: string
+  targetEventId: string
+  offset: number
+  unit: 'calendar_day' | 'business_day'
+  businessDayRule: 'none' | 'carry_forward'
+  holidayCalendarId: string
+  ruleRefs: RuleRef[]
+}
+
+export type CourtProcedureProfile = {
+  courtPackId: string
+  activeRulePackIds: string[]
+  activeEcfCatalogId: string
+  activeDeadlineSetId: string
+  sourceVersionIds: string[]
+}
 
 export type FilingEvent = {
   id: string
@@ -324,6 +419,7 @@ export type ValidationIssue = {
   severity: 'error' | 'warning' | 'info'
   message: string
   ruleRefs: RuleRef[]
+  sourceVersionIds?: string[]
   code?: string
   cureSuggestion?: string
 }
@@ -435,6 +531,7 @@ export type CaseSession = {
   panelDisposition?: PanelDispositionRecord
   assessment?: Assessment
   actorWorkProducts?: ActorWorkProduct[]
+  simulationTurns?: SimulationTurn[]
 }
 
 export type ActorWorkProductKind =
@@ -844,6 +941,10 @@ export type EcfEventDefinition = {
   eventId: string
   category: EcfEventCategory
   displayName: string
+  courtEventName?: string
+  sourceUrl?: string
+  sourceVersionIds?: string[]
+  reliefOptions?: string[]
   eligibleRoles: ParticipantRole[]
   requiresMainDocument: boolean
   requiredAttachments: string[]
@@ -862,6 +963,7 @@ export type EcfEventDefinition = {
 export type EcfEventAvailability = EcfEventDefinition & {
   available: boolean
   unavailableReasons: string[]
+  availabilityReason?: string
 }
 
 export type ScenarioRecordExcerpt = {
@@ -931,4 +1033,82 @@ export type DispositionOption = {
   relief: string
   available: boolean
   reasons: string[]
+}
+
+export type SimulationTurn = {
+  id: string
+  caseSessionId: string
+  turnNumber: number
+  actorId: string
+  kind:
+    | 'clerk'
+    | 'appellee'
+    | 'amicus'
+    | 'staff_attorney'
+    | 'judge_vote'
+    | 'panel_conference'
+    | 'judgment'
+    | 'mandate'
+  status: 'pending' | 'accepted' | 'rejected' | 'applied'
+  startedAt: string
+  completedAt?: string
+  effects: string[]
+}
+
+export type ActorPacket = {
+  caseSessionId: string
+  actorId: string
+  role: AiActorRole | 'staff_attorney'
+  task: string
+  allowedTools: AiToolName[]
+  sourceFacts: string[]
+  docketSnapshot: DocketEntry[]
+  filingSummaries: Array<{
+    filingId: string
+    eventId: string
+    participantRole: ParticipantRole
+    title: string
+    filedAt: string
+  }>
+  ruleConstraints: Array<{
+    code: string
+    ruleRefs: RuleRef[]
+    sourceVersionIds: string[]
+    summary: string
+  }>
+  availableRelief: string[]
+  forbiddenActions: string[]
+}
+
+export type ActorDecision = {
+  actorId: string
+  tool: AiToolName
+  workProduct: ToolCall | ActorWorkProduct['workProduct']
+  citations: ActorCitation[]
+  confidence: number
+  validationIssues: ValidationIssue[]
+}
+
+export type PanelJudgeProfile = {
+  actorId: string
+  seat: 'one' | 'two' | 'three'
+  panelRole: 'presiding' | 'panelist'
+  decisionStyle: 'minimalist' | 'record_focused' | 'doctrinal'
+  argumentSensitivity: 'low' | 'medium' | 'high'
+  jurisdictionSensitivity: 'low' | 'medium' | 'high'
+}
+
+export type PanelConference = {
+  id: string
+  judgeActorIds: [string, string, string]
+  issueVotes: Array<{
+    judgeActorId: string
+    vote: PanelVote['vote']
+    reliefOption: string
+  }>
+  majorityResult: string
+  separateWritingAssignments: Array<{
+    judgeActorId: string
+    type: 'concurrence' | 'dissent' | 'concur_in_judgment'
+  }>
 }

@@ -81,7 +81,15 @@ export function EventSelector({
                   {formatLabel(event.category)}
                 </span>
               </div>
+              <div className="text-xs font-medium text-[#3e4843]">
+                Court event: {event.courtEventName ?? event.displayName}
+              </div>
               <div className="text-xs text-[#68716c]">{event.menuPath.join(' > ')}</div>
+              {event.sourceUrl ? (
+                <div className="break-all text-xs font-semibold text-[#1d4d4f]">
+                  Source: {event.sourceUrl}
+                </div>
+              ) : null}
               {!roleAllowed ? (
                 <div className="text-xs font-medium text-[#8a321f]">
                   {formatLabel(learnerRole)} cannot file this event.
@@ -89,6 +97,10 @@ export function EventSelector({
               ) : event.unavailableReasons.length ? (
                 <div className="text-xs font-medium text-[#785b16]">
                   {event.unavailableReasons.join(' ')}
+                </div>
+              ) : event.availabilityReason ? (
+                <div className="text-xs font-medium text-[#285b38]">
+                  {event.availabilityReason}
                 </div>
               ) : null}
             </button>
@@ -98,4 +110,3 @@ export function EventSelector({
     </section>
   )
 }
-

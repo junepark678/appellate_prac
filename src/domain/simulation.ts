@@ -22,6 +22,10 @@ import {
   validatePanelVote,
 } from './panel/deliberation'
 import { preflightFilingSubmission, sessionJurisdictionIssues } from './rules/executable-constraints'
+import {
+  calculateDeadlineDueDate,
+  deadlineRuleForTrigger,
+} from './rules/deadline-calculator'
 import type {
   Assessment,
   CaseSession,
@@ -51,6 +55,12 @@ function addDays(dateIso: string, days: number) {
   const date = new Date(dateIso)
   date.setUTCDate(date.getUTCDate() + days)
   return date.toISOString()
+}
+
+function inferredDeadlineTrigger(targetEventId: string) {
+  if (targetEventId === 'notice_of_appeal') return 'civil_judgment'
+  if (targetEventId === 'opening_brief') return 'briefing_schedule'
+  return undefined
 }
 
 function formatParticipant(role: string) {
@@ -86,15 +96,21 @@ function createDeadline(
   sourceEntryId: string,
   offsetDays: number,
   sourceRuleRefs: RuleRef[],
+  triggerEventId = inferredDeadlineTrigger(targetEventId),
 ): Deadline {
+  const sourceBackedRule = triggerEventId
+    ? deadlineRuleForTrigger(triggerEventId, targetEventId)
+    : undefined
   return {
     id: makeId('deadline', session.deadlines.length),
     label,
-    dueDate: addDays(session.simulatedDate, offsetDays),
+    dueDate: sourceBackedRule
+      ? calculateDeadlineDueDate(session.simulatedDate, sourceBackedRule)
+      : addDays(session.simulatedDate, offsetDays),
     targetEventId,
     sourceEntryId,
     status: 'open',
-    sourceRuleRefs,
+    sourceRuleRefs: sourceBackedRule?.ruleRefs ?? sourceRuleRefs,
   }
 }
 
@@ -582,6 +598,7 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
         filingEntry.id,
         effect.offsetDays,
         effect.sourceRuleRefs,
+        draft.eventId,
       ),
     ) ?? []
   const updatedSessionWithDeadlines = {
@@ -816,6 +833,9 @@ export function applyToolCall(
       sourceEntry?.id ?? 'manual',
       normalized.offsetDays,
       normalized.sourceRuleRefs,
+      normalized.tool === 'setDeadline'
+        ? inferredDeadlineTrigger(normalized.targetEventId)
+        : undefined,
     )
     return {
       ...session,
@@ -943,6 +963,7 @@ export function applyToolCall(
       dispositionEntry.id,
       14,
       [ruleRefs.frap40],
+      'judgment_entered',
     )
     const mandateDeadline = createDeadline(
       { ...closingSession, deadlines: [...closingSession.deadlines, rehearingDeadline] },
@@ -951,10 +972,28 @@ export function applyToolCall(
       dispositionEntry.id,
       21,
       [ruleRefs.frap41],
+      'judgment_entered',
+    )
+    const billOfCostsDeadline = createDeadline(
+      {
+        ...closingSession,
+        deadlines: [...closingSession.deadlines, rehearingDeadline, mandateDeadline],
+      },
+      'Bill of costs due',
+      'bill_of_costs',
+      dispositionEntry.id,
+      14,
+      [ruleRefs.frap39],
+      'judgment_entered',
     )
     return {
       ...closingSession,
-      deadlines: [...closingSession.deadlines, rehearingDeadline, mandateDeadline],
+      deadlines: [
+        ...closingSession.deadlines,
+        rehearingDeadline,
+        mandateDeadline,
+        billOfCostsDeadline,
+      ],
       panelDeliberation: closingSession.panelDeliberation
         ? { ...closingSession.panelDeliberation, mandateStatus: 'pending' }
         : closingSession.panelDeliberation,
@@ -977,6 +1016,7 @@ export function applyToolCall(
           sourceEntry?.id ?? 'manual',
           normalized.offsetDays,
           normalized.sourceRuleRefs,
+          'judgment_entered',
         ),
       ],
       panelDeliberation: session.panelDeliberation

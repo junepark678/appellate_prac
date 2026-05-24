@@ -53,6 +53,7 @@ import {
   preflightEcfFiling,
 } from '../domain/filing/ecf'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
+import { defaultPanelJudgeProfiles, formPanelConference } from '../domain/panel/conference'
 import type {
   ActorWorkProduct,
   CaseSession,
@@ -101,6 +102,13 @@ type AdvanceLiveEventAction = (args: {
 type GenerateActorWorkProductAction = (args: {
   caseSessionId: Id<'caseSessions'>
 }) => Promise<ActorWorkProduct>
+
+type AdvanceSimulationTurnMutation = (args: {
+  caseSessionId: Id<'caseSessions'>
+}) => Promise<{
+  session: CaseSession
+  toolCall: ToolCall
+}>
 
 type DocumentUploadUrlMutation = (args: {
   caseSessionId: Id<'caseSessions'>
@@ -156,6 +164,7 @@ type SessionSummary = {
 
 const enableLiveAi = import.meta.env.VITE_ENABLE_OPENROUTER === 'true'
 const enableCourtListener = import.meta.env.VITE_ENABLE_COURTLISTENER === 'true'
+const enableDebugActorPanel = import.meta.env.VITE_SHOW_DEBUG_ACTOR_PANEL === 'true'
 
 function Home() {
   const { isSignedIn } = useUser()
@@ -190,6 +199,9 @@ function Home() {
   const submitFiling = useMutation(api.caseSessions.submitFiling)
   const submitEcfFiling = useMutation(api.caseSessions.submitEcfFiling)
   const advanceProcedure = useMutation(api.caseSessions.advanceProcedure)
+  const advanceSimulationTurn = useMutation(
+    (api as any).caseSessions.advanceSimulationTurn,
+  ) as AdvanceSimulationTurnMutation
   const generateDocumentUploadUrl = useMutation(
     (api as any).caseSessions.generateDocumentUploadUrl,
   ) as DocumentUploadUrlMutation
@@ -375,6 +387,26 @@ function Home() {
       }
     } catch (error) {
       setSessionError(error instanceof Error ? error.message : 'Unable to advance event')
+    } finally {
+      setSessionPending(false)
+    }
+  }
+
+  async function advanceSimulation() {
+    if (!activeSession) return
+    setSessionPending(true)
+    setSessionError('')
+    try {
+      const result = await advanceSimulationTurn({
+        caseSessionId: activeSession.id as Id<'caseSessions'>,
+      })
+      if (result.session.status === 'closed') {
+        setActiveView('assessment')
+      }
+    } catch (error) {
+      setSessionError(
+        error instanceof Error ? error.message : 'Unable to advance simulation turn',
+      )
     } finally {
       setSessionPending(false)
     }
@@ -676,6 +708,7 @@ function Home() {
                       liveAiEnabled={liveAiReady}
                       liveAiUnavailableReason={liveAiUnavailableReason}
                       onAdvanceExpected={advanceExpectedEvent}
+                      onAdvanceSimulationTurn={advanceSimulation}
                       onAdvanceLive={advanceLiveEvent}
                       onGenerateActorWorkProduct={generateNextActorWorkProduct}
                     />
@@ -1325,6 +1358,7 @@ function DocketView({
   liveAiEnabled,
   liveAiUnavailableReason,
   onAdvanceExpected,
+  onAdvanceSimulationTurn,
   onAdvanceLive,
   onGenerateActorWorkProduct,
 }: {
@@ -1338,12 +1372,14 @@ function DocketView({
   liveAiEnabled: boolean
   liveAiUnavailableReason: string
   onAdvanceExpected: () => void
+  onAdvanceSimulationTurn: () => void
   onAdvanceLive: () => void
   onGenerateActorWorkProduct: () => void
 }) {
   return (
     <div className="space-y-4">
       <WorkflowStatusGrid session={session} />
+      <SimulationTurnsTimeline session={session} />
 
       <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1365,9 +1401,18 @@ function DocketView({
               </p>
             ) : null}
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:w-[430px]">
+          <div className="grid gap-2 sm:grid-cols-2 lg:w-[560px]">
             <button
-              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173f41] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
+              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173f41] disabled:cursor-not-allowed disabled:bg-[#9aa6a2] sm:col-span-2"
+              disabled={session.status === 'closed' || aiPending}
+              onClick={onAdvanceSimulationTurn}
+              type="button"
+            >
+              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              Advance Simulation Turn
+            </button>
+            <button
+              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-[#1d4d4f] px-4 text-sm font-semibold text-[#1d4d4f] hover:bg-white disabled:cursor-not-allowed disabled:border-[#9aa6a2] disabled:text-[#9aa6a2]"
               disabled={session.status === 'closed' || aiPending || !liveAiEnabled}
               onClick={onAdvanceLive}
               type="button"
@@ -1376,7 +1421,7 @@ function DocketView({
               {aiPending ? 'Calling AI' : 'Live AI Event'}
             </button>
             <button
-              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#8b3f2f] px-4 text-sm font-semibold text-white hover:bg-[#773326] disabled:cursor-not-allowed disabled:bg-[#b9988f]"
+              className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-[#8b3f2f] px-4 text-sm font-semibold text-[#8b3f2f] hover:bg-white disabled:cursor-not-allowed disabled:border-[#b9988f] disabled:text-[#b9988f]"
               disabled={session.status === 'closed' || aiPending}
               onClick={onAdvanceExpected}
               type="button"
@@ -1388,7 +1433,7 @@ function DocketView({
         </div>
       </section>
 
-      {activeActorTask ? (
+      {enableDebugActorPanel && activeActorTask ? (
         <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
@@ -1535,6 +1580,53 @@ function WorkflowStatusGrid({ session }: { session: CaseSession }) {
   )
 }
 
+function SimulationTurnsTimeline({ session }: { session: CaseSession }) {
+  const turns = session.simulationTurns ?? []
+  if (!turns.length) return null
+
+  return (
+    <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+      <div className="border-b border-[#d8d1c4] p-4">
+        <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+          <Bot className="h-4 w-4" aria-hidden="true" />
+          Simulation Turns
+        </div>
+      </div>
+      <div className="divide-y divide-[#e2dbcf]">
+        {turns.slice(-8).map((turn) => (
+          <article
+            className="grid gap-3 p-4 text-sm lg:grid-cols-[140px_180px_1fr]"
+            key={turn.id}
+          >
+            <div>
+              <div className="font-mono text-[#68716c]">Turn {turn.turnNumber}</div>
+              <div className="mt-1 text-xs text-[#68716c]">
+                {new Date(turn.startedAt).toLocaleDateString()}
+              </div>
+            </div>
+            <div>
+              <div className="font-semibold">{formatLabel(turn.actorId)}</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                  {formatLabel(turn.kind)}
+                </span>
+                <span className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs font-semibold">
+                  {formatLabel(turn.status)}
+                </span>
+              </div>
+            </div>
+            <div className="space-y-1 leading-6 text-[#59625d]">
+              {turn.effects.map((effect) => (
+                <div key={`${turn.id}-${effect}`}>{effect}</div>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function StatusTile({
   icon: Icon,
   title,
@@ -1632,6 +1724,7 @@ function PanelView({
   onRejectWorkProduct: (workProductId: string) => void
 }) {
   const votes = session.panelDeliberation?.votes ?? []
+  const conference = formPanelConference(session)
   const panelWorkProducts = (session.actorWorkProducts ?? []).filter((product) =>
     ['bench_memo', 'judge_vote_memo', 'panel_disposition_draft'].includes(product.kind),
   )
@@ -1683,6 +1776,10 @@ function PanelView({
                   : 'Not Started'
               }
             />
+            <InfoRow
+              label="Conference"
+              value={conference ? `Majority: ${formatLabel(conference.majorityResult)}` : 'Pending'}
+            />
           </div>
         </section>
         <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
@@ -1709,6 +1806,26 @@ function PanelView({
           ) : (
             <EmptyState text="No staff memo has been prepared yet." />
           )}
+          {session.panelAssignment ? (
+            <article className="p-4 text-sm">
+              <div className="font-semibold">Judge profiles</div>
+              <div className="mt-3 grid gap-2 md:grid-cols-3">
+                {defaultPanelJudgeProfiles
+                  .filter((profile) =>
+                    session.panelAssignment?.judgeActorIds.includes(profile.actorId),
+                  )
+                  .map((profile) => (
+                    <div className="rounded-md border border-[#e2dbcf] bg-white p-3" key={profile.actorId}>
+                      <div className="font-semibold">{formatLabel(profile.actorId)}</div>
+                      <div className="mt-1 text-xs text-[#68716c]">{formatLabel(profile.panelRole)}</div>
+                      <div className="mt-2 text-xs leading-5 text-[#59625d]">
+                        {formatLabel(profile.decisionStyle)} · Jurisdiction {formatLabel(profile.jurisdictionSensitivity)}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </article>
+          ) : null}
           {votes.map((vote) => (
             <article className="p-4 text-sm" key={vote.id}>
               <div className="flex flex-wrap items-center gap-2">
@@ -1729,6 +1846,16 @@ function PanelView({
             <article className="p-4 text-sm">
               <div className="font-semibold">Judgment</div>
               <p className="mt-2 leading-6 text-[#59625d]">{session.panelDisposition.judgmentText}</p>
+              {session.panelDisposition.separateOpinions.length ? (
+                <div className="mt-3 space-y-2">
+                  {session.panelDisposition.separateOpinions.map((opinion) => (
+                    <div className="rounded-md border border-[#e2dbcf] bg-white p-3" key={`${opinion.judgeActorId}-${opinion.type}`}>
+                      <div className="font-semibold">{formatLabel(opinion.type)} by {formatLabel(opinion.judgeActorId)}</div>
+                      <p className="mt-1 leading-5 text-[#59625d]">{opinion.text}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </article>
           ) : null}
         </div>
@@ -1762,6 +1889,9 @@ function PartiesView({
 }) {
   const strategy = session.counterpartyStrategy
   const candidates = session.amicusParticipation?.candidates ?? []
+  const appelleeFilings = acceptedFilings(session).filter(
+    (filing) => filing.participantRole === 'appellee',
+  )
   const partyWorkProducts = (session.actorWorkProducts ?? []).filter((product) =>
     [
       'counterparty_strategy',
@@ -1807,6 +1937,30 @@ function PartiesView({
                 {formatLabel(strategy.recommendedNextFilingEventId ?? 'monitor docket')}
               </div>
             </div>
+          </div>
+        </section>
+      ) : null}
+
+      {appelleeFilings.length ? (
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+          <div className="border-b border-[#d8d1c4] p-4">
+            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+              <Users className="h-4 w-4" aria-hidden="true" />
+              Appellee Decision History
+            </div>
+          </div>
+          <div className="divide-y divide-[#e2dbcf]">
+            {appelleeFilings.map((filing) => (
+              <article className="grid gap-2 p-4 text-sm md:grid-cols-[180px_1fr]" key={filing.id}>
+                <div>
+                  <div className="font-semibold">{formatLabel(filing.eventId)}</div>
+                  <div className="mt-1 text-xs text-[#68716c]">
+                    {new Date(filing.filedAt).toLocaleDateString()}
+                  </div>
+                </div>
+                <p className="leading-6 text-[#59625d]">{filing.notes || filing.title}</p>
+              </article>
+            ))}
           </div>
         </section>
       ) : null}

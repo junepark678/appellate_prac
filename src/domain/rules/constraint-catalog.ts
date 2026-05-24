@@ -1,6 +1,7 @@
 import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
 import { validateAmicusSubmission } from '../amicus/workflow'
 import { briefAnalysisIssues } from '../documents/brief-analysis'
+import { ca4SourceVersionIds } from './ca4-source-profile'
 import type {
   CaseSession,
   FilingMetadata,
@@ -100,11 +101,20 @@ export function validationIssue(
   ruleRefsForIssue: RuleRef[],
   cureSuggestion: string,
 ): ValidationIssue {
+  const sourceVersionIds =
+    ruleRefsForIssue.length > 0
+      ? [
+          ca4SourceVersionIds.frap2025,
+          ca4SourceVersionIds.ca4LocalRules2026,
+          ca4SourceVersionIds.ca4EcfEvents2026,
+        ]
+      : undefined
   return {
     severity,
     code,
     message,
     ruleRefs: ruleRefsForIssue,
+    ...(sourceVersionIds ? { sourceVersionIds } : {}),
     cureSuggestion,
   }
 }

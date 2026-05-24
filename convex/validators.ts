@@ -70,6 +70,7 @@ export const validationIssueValidator = v.object({
   severity: v.union(v.literal('error'), v.literal('warning'), v.literal('info')),
   message: v.string(),
   ruleRefs: v.array(ruleRefValidator),
+  sourceVersionIds: v.optional(v.array(v.string())),
   code: v.optional(v.string()),
   cureSuggestion: v.optional(v.string()),
 })
@@ -705,6 +706,10 @@ export const ecfEventAvailabilityValidator = v.object({
   eventId: v.string(),
   category: ecfEventCategoryValidator,
   displayName: v.string(),
+  courtEventName: v.optional(v.string()),
+  sourceUrl: v.optional(v.string()),
+  sourceVersionIds: v.optional(v.array(v.string())),
+  reliefOptions: v.optional(v.array(v.string())),
   eligibleRoles: v.array(participantRoleValidator),
   requiresMainDocument: v.boolean(),
   requiredAttachments: v.array(v.string()),
@@ -734,6 +739,7 @@ export const ecfEventAvailabilityValidator = v.object({
   receiptTemplateId: v.string(),
   available: v.boolean(),
   unavailableReasons: v.array(v.string()),
+  availabilityReason: v.optional(v.string()),
 })
 
 export const caseSessionValidator = v.object({
@@ -756,6 +762,35 @@ export const caseSessionValidator = v.object({
   panelDisposition: v.optional(panelDispositionRecordValidator),
   assessment: v.optional(assessmentValidator),
   actorWorkProducts: v.optional(v.array(actorWorkProductValidator)),
+  simulationTurns: v.optional(
+    v.array(
+      v.object({
+        id: v.string(),
+        caseSessionId: v.string(),
+        turnNumber: v.number(),
+        actorId: v.string(),
+        kind: v.union(
+          v.literal('clerk'),
+          v.literal('appellee'),
+          v.literal('amicus'),
+          v.literal('staff_attorney'),
+          v.literal('judge_vote'),
+          v.literal('panel_conference'),
+          v.literal('judgment'),
+          v.literal('mandate'),
+        ),
+        status: v.union(
+          v.literal('pending'),
+          v.literal('accepted'),
+          v.literal('rejected'),
+          v.literal('applied'),
+        ),
+        startedAt: v.string(),
+        completedAt: v.optional(v.string()),
+        effects: v.array(v.string()),
+      }),
+    ),
+  ),
 })
 
 export const toolCallValidator = v.union(

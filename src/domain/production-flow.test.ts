@@ -2,21 +2,30 @@ import { describe, expect, it } from 'vitest'
 
 import { ruleRefs } from '../modules/registry'
 import { applyAcceptedActorWorkProduct } from './actors/effects'
+import { actorDecisionAccepted, normalizeActorDecision } from './actors/decisions'
 import { validateAiProposal } from './actors/proposals'
 import {
   defaultFilingMetadata,
   filingDraftToSubmission,
+  getAvailableEcfEventDefinitions,
+  preflightEcfFiling,
   submitEcfFiling,
 } from './filing/ecf'
+import { ca4EcfCatalogEvents } from './filing/ca4-ecf-catalog'
 import { evaluateRelief } from './merits/relief'
+import { formPanelConference } from './panel/conference'
 import {
   advanceProcedure,
   inferProcedureState,
   nextProcedureToolCall,
   transitionAfterFiling,
 } from './procedure/state-machine'
+import { calculateDeadlineDueDate } from './rules/deadline-calculator'
+import { ca4DeadlineRules } from './rules/ca4-source-profile'
 import { preflightFilingSubmission } from './rules/executable-constraints'
 import { applyToolCall, createInitialSession, fileDraft } from './simulation'
+import { advanceSimulationTurn } from './simulation/director'
+import { nextCounterpartyReaction } from './counterparty/reactive-strategy'
 import type { ActorWorkProduct, FilingDraft, FilingSubmission, UploadedDocument } from './types'
 
 const noticePdf: UploadedDocument = {
@@ -155,6 +164,34 @@ function submission(eventId: string, document: UploadedDocument): FilingSubmissi
 }
 
 describe('production appellate flow', () => {
+  it('computes source-backed weekend and federal holiday deadline carry-forward', () => {
+    const weekendRule = ca4DeadlineRules.find((rule) => rule.deadlineId === 'motion_response_10_days')
+    const holidayRule = ca4DeadlineRules.find((rule) => rule.deadlineId === 'notice_of_appeal_30_days')
+    expect(weekendRule).toBeTruthy()
+    expect(holidayRule).toBeTruthy()
+
+    expect(calculateDeadlineDueDate('2026-05-13T12:00:00.000Z', weekendRule!)).toBe(
+      '2026-05-26T12:00:00.000Z',
+    )
+    expect(calculateDeadlineDueDate('2026-06-19T12:00:00.000Z', holidayRule!)).toBe(
+      '2026-07-20T12:00:00.000Z',
+    )
+  })
+
+  it('exposes source-backed ECF event availability and catalog metadata', () => {
+    const session = createInitialSession()
+    const events = getAvailableEcfEventDefinitions(session)
+    const notice = events.find((event) => event.eventId === 'notice_of_appeal')
+    const motion = events.find((event) => event.eventId === 'motion')
+
+    expect(ca4EcfCatalogEvents.length).toBeGreaterThan(10)
+    expect(events.every((event) => event.courtEventName && event.sourceUrl)).toBe(true)
+    expect(notice?.courtEventName).toBe('Notice of Appeal')
+    expect(notice?.sourceUrl).toContain('filingevents')
+    expect(notice?.availabilityReason).toContain('source-mapped')
+    expect(motion?.reliefOptions).toContain('extend time')
+  })
+
   it('preflights filing submissions with source-backed issue codes and cure suggestions', () => {
     const session = createInitialSession()
     const result = preflightFilingSubmission(session, {
@@ -169,6 +206,7 @@ describe('production appellate flow', () => {
     expect(result.outcome).toBe('rejected')
     expect(result.issues[0]?.code).toBe('certificate_of_service_missing')
     expect(result.issues[0]?.cureSuggestion).toContain('certificate of service')
+    expect(result.issues[0]?.sourceVersionIds?.length).toBeGreaterThan(0)
   })
 
   it('converts legacy drafts into ECF submissions and creates receipts for accepted filings', () => {
@@ -419,9 +457,129 @@ describe('production appellate flow', () => {
     result = preflightFilingSubmission(session, submission('petition_rehearing', rehearingPdf))
     expect(result.issues.some((issue) => issue.code === 'rehearing_before_judgment')).toBe(true)
 
+    result = preflightEcfFiling(session, {
+      ...submission('motion', stayMotionPdf),
+      metadata: {
+        ...defaultFilingMetadata('motion'),
+        reliefRequested: '',
+      },
+    })
+    expect(result.issues.some((issue) => issue.code === 'ecf_motion_relief_missing')).toBe(true)
+
     const closedSession = { ...session, status: 'closed' as const, procedureState: 'judgment_entered' as const }
     result = preflightFilingSubmission(closedSession, submission('rule_28j_letter', rule28jPdf))
     expect(result.issues.some((issue) => issue.code === 'rule_28j_after_judgment')).toBe(true)
+  })
+
+  it('creates rehearing, mandate, and costs deadlines from source-backed post-judgment rules', () => {
+    let session = createInitialSession()
+    session = { ...session, simulatedDate: '2026-05-11T12:00:00.000Z' }
+    session = applyToolCall(
+      {
+        ...session,
+        panelDisposition: {
+          id: 'disposition',
+          disposition: 'affirm',
+          judgmentText: 'Judgment affirmed.',
+          majorityJudgeActorIds: ['ca4_judge_1', 'ca4_judge_2'],
+          separateOpinions: [],
+          votes: [],
+          ruleRefs: [ruleRefs.frap34, ruleRefs.frap36, ruleRefs.frap41],
+          createdAt: session.simulatedDate,
+        },
+      },
+      {
+        tool: 'enterJudgment',
+        actorId: 'ca4_panel',
+        disposition: 'affirm',
+        judgmentText: 'Judgment affirmed.',
+        ruleRefs: [ruleRefs.frap36, ruleRefs.frap41],
+      },
+    )
+
+    expect(session.deadlines.find((deadline) => deadline.targetEventId === 'petition_rehearing')?.dueDate).toBe(
+      '2026-05-26T12:00:00.000Z',
+    )
+    expect(session.deadlines.find((deadline) => deadline.targetEventId === 'mandate')?.sourceRuleRefs.map((rule) => rule.ruleId)).toContain('FRAP_41')
+    expect(session.deadlines.some((deadline) => deadline.targetEventId === 'bill_of_costs')).toBe(true)
+  })
+
+  it('advances a complete deterministic multi-agent simulation turn path through judgment', () => {
+    let session = createInitialSession()
+    session = fileDraft(session, draft('notice_of_appeal', noticePdf))
+    session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
+    session = fileDraft(session, draft('docketing_statement', docketingPdf))
+    session = fileDraft(session, draft('transcript_order_acknowledgment', transcriptAckPdf))
+    session = advanceSimulationTurn(session).session
+    session = fileDraft(session, draft('opening_brief', briefPdf))
+    session = fileDraft(session, draft('joint_appendix', appendixPdf))
+
+    for (let index = 0; index < 12 && session.status !== 'closed'; index += 1) {
+      session = advanceSimulationTurn(session).session
+      if (session.procedureState === 'reply_brief_pending') {
+        session = fileDraft(session, draft('reply_brief', replyPdf))
+      }
+    }
+
+    expect(session.status).toBe('closed')
+    expect(session.simulationTurns?.length).toBeGreaterThanOrEqual(6)
+    expect(session.panelDeliberation?.votes.map((vote) => vote.judgeActorId)).toEqual([
+      'ca4_judge_1',
+      'ca4_judge_2',
+      'ca4_judge_3',
+    ])
+    expect(formPanelConference(session)?.majorityResult).toBeTruthy()
+    expect(session.deadlines.some((deadline) => deadline.targetEventId === 'mandate')).toBe(true)
+  })
+
+  it('rejects invalid actor decisions without applying unavailable relief', () => {
+    const session = createInitialSession()
+    const decision = normalizeActorDecision(session, 'appellee_ai', {
+      tool: 'fileCounterpartyDocument',
+      actorId: 'appellee_ai',
+      eventId: 'reply_brief',
+      title: 'Improper Reply Brief',
+      text: 'Appellee attempts to file appellant reply briefing.',
+    })
+
+    expect(actorDecisionAccepted(decision)).toBe(false)
+    expect(decision.validationIssues.map((issue) => issue.message).join(' ')).toContain('reply')
+  })
+
+  it('lets appellee react to a learner motion before merits briefing', () => {
+    let session = createInitialSession()
+    session = fileDraft(session, draft('notice_of_appeal', noticePdf))
+    session = fileDraft(session, {
+      ...draft('motion', stayMotionPdf),
+      title: 'Motion to Extend Time',
+    })
+
+    const reaction = nextCounterpartyReaction(session)
+    expect(reaction && 'eventId' in reaction ? reaction.eventId : null).toBe('motion_response')
+    session = advanceSimulationTurn(session).session
+    expect(session.filings.some((filing) => filing.eventId === 'motion_response')).toBe(true)
+  })
+
+  it('forms a split panel conference only after three independent judge votes', () => {
+    let session = createInitialSession()
+    session = fileDraft(session, draft('notice_of_appeal', noticePdf))
+    session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
+    session = fileDraft(session, draft('docketing_statement', docketingPdf))
+    session = fileDraft(session, draft('transcript_order_acknowledgment', transcriptAckPdf))
+    session = advanceSimulationTurn(session).session
+    session = fileDraft(session, draft('opening_brief', briefPdf))
+    session = fileDraft(session, draft('joint_appendix', appendixPdf))
+    session = advanceSimulationTurn(session).session
+    session = fileDraft(session, draft('reply_brief', replyPdf))
+
+    for (let index = 0; index < 12 && !formPanelConference(session); index += 1) {
+      session = advanceSimulationTurn(session).session
+    }
+
+    const conference = formPanelConference(session)
+    expect(new Set(session.panelDeliberation?.votes.map((vote) => vote.judgeActorId)).size).toBe(3)
+    expect(conference?.judgeActorIds).toHaveLength(3)
+    expect(conference?.majorityResult).toBeTruthy()
   })
 
   it('drives scenario-specific jurisdiction, sealed-record, and qualified-immunity outcomes', () => {

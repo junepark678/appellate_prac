@@ -16,6 +16,12 @@ import type {
   ValidationIssue,
 } from '../types'
 import { preflightFilingSubmission } from '../rules/executable-constraints'
+import {
+  CA4_ECF_EVENTS_URL,
+  ecfCategoryFromCatalog,
+  getCa4EcfCatalogEvent,
+} from './ca4-ecf-catalog'
+import { ca4SourceVersionIds } from '../rules/ca4-source-profile'
 
 export function defaultFilingMetadata(eventId: string, sealed = false): FilingMetadata {
   const isCaseOpening = eventId === 'notice_of_appeal'
@@ -106,20 +112,38 @@ function categoryForEvent(eventId: string): EcfEventCategory {
 }
 
 export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventDefinition {
+  const catalogEvent = getCa4EcfCatalogEvent(event.id)
   const isBrief = event.id.includes('brief') || event.id === 'corrected_brief'
   const isSealed = event.id.includes('seal')
   const isCaseOpening = event.id === 'notice_of_appeal'
-  const category = event.ecfCategory ?? categoryForEvent(event.id)
+  const category =
+    event.ecfCategory ??
+    (catalogEvent ? ecfCategoryFromCatalog(catalogEvent.category) : categoryForEvent(event.id))
   const requiresRelatedEntry =
+    catalogEvent?.requiredFields.includes('relatedDocketEntryId') ??
     event.requiresRelatedEntry ??
     (event.id.includes('response') || event.id === 'corrected_brief')
   const requiresReliefText =
-    event.requiresReliefText ?? (event.id.includes('motion') || event.id === 'motion')
+    catalogEvent?.requiredFields.includes('reliefRequested') ??
+    event.requiresReliefText ??
+    (event.id.includes('motion') || event.id === 'motion')
+  const feeBehavior =
+    catalogEvent?.feeBehavior ??
+    event.feeBehavior ??
+    (isCaseOpening ? 'required' : event.id.includes('ifp') ? 'waivable' : 'none')
+  const serviceBehavior =
+    catalogEvent?.serviceBehavior ??
+    event.serviceBehavior ??
+    (event.allowedParticipantRoles.includes('amicus') ? 'mixed' : 'cm_ecf')
 
   return {
     eventId: event.id,
     category,
     displayName: event.label,
+    courtEventName: catalogEvent?.courtEventName ?? event.label,
+    sourceUrl: catalogEvent ? CA4_ECF_EVENTS_URL : undefined,
+    sourceVersionIds: catalogEvent?.sourceVersionIds,
+    reliefOptions: catalogEvent?.reliefs,
     eligibleRoles: event.allowedParticipantRoles,
     requiresMainDocument: event.requiredDocuments.length > 0,
     requiredAttachments: event.requiredDocuments.slice(1).map((requirement) => requirement.label),
@@ -135,13 +159,16 @@ export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventD
         key: 'representedPartyId',
         label: 'Represented party',
         inputType: 'text',
-        required: event.partySelectionMode !== 'none',
+        required:
+          catalogEvent?.requiredFields.includes('representedPartyId') ??
+          event.partySelectionMode !== 'none',
       },
       {
         key: 'reliefRequested',
         label: 'Relief requested',
-        inputType: 'text',
+        inputType: catalogEvent?.reliefs.length ? 'select' : 'text',
         required: requiresReliefText,
+        ...(catalogEvent?.reliefs.length ? { options: catalogEvent.reliefs } : {}),
       },
       {
         key: 'relatedDocketEntryId',
@@ -153,7 +180,7 @@ export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventD
         key: 'feePaymentStatus',
         label: 'Fee status',
         inputType: 'select',
-        required: event.feeBehavior !== 'none',
+        required: feeBehavior !== 'none',
         options: ['not_required', 'paid', 'deferred', 'waived', 'pending'],
       },
       {
@@ -166,25 +193,33 @@ export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventD
         key: 'certificateOfCompliance',
         label: 'Certificate of compliance',
         inputType: 'checkbox',
-        required: isBrief,
+        required:
+          catalogEvent?.requiredFields.includes('certificateOfCompliance') ??
+          isBrief,
       },
       {
         key: 'sealed',
         label: 'Sealed filing',
         inputType: 'checkbox',
-        required: isSealed || category === 'sealed',
+        required:
+          catalogEvent?.requiredFields.includes('sealed') ??
+          (isSealed || category === 'sealed'),
       },
       {
         key: 'privacyAcknowledged',
         label: 'Privacy and redaction acknowledged',
         inputType: 'checkbox',
-        required: isSealed || category === 'sealed',
+        required:
+          catalogEvent?.requiredFields.includes('privacyAcknowledged') ??
+          (isSealed || category === 'sealed'),
       },
       {
         key: 'publicRedactedVersionIncluded',
         label: 'Public redacted version included',
         inputType: 'checkbox',
-        required: isSealed || category === 'sealed',
+        required:
+          catalogEvent?.requiredFields.includes('publicRedactedVersionIncluded') ??
+          (isSealed || category === 'sealed'),
       },
       ...(event.id.includes('amicus')
         ? [
@@ -203,14 +238,12 @@ export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventD
           ]
         : []),
     ],
-    menuPath: event.ecfMenuPath ?? ['Other Filings', event.label],
+    menuPath: catalogEvent?.menuPath ?? event.ecfMenuPath ?? ['Other Filings', event.label],
     courtEventCode: event.courtEventCode ?? event.id.toUpperCase(),
     requiresRelatedEntry,
     requiresReliefText,
-    feeBehavior: event.feeBehavior ?? (isCaseOpening ? 'required' : event.id.includes('ifp') ? 'waivable' : 'none'),
-    serviceBehavior:
-      event.serviceBehavior ??
-      (event.allowedParticipantRoles.includes('amicus') ? 'mixed' : 'cm_ecf'),
+    feeBehavior,
+    serviceBehavior,
     partySelectionMode: event.partySelectionMode ?? 'single',
     receiptTemplateId: event.receiptTemplateId ?? 'standard_noda',
   }
@@ -356,12 +389,18 @@ function ecfCompletenessIssue(
   message: string,
   cureSuggestion: string,
   ruleRefsForIssue = [ruleRefs.frap25, ruleRefs.ca4Local25],
+  sourceVersionIds: string[] = [
+    ca4SourceVersionIds.frap2025,
+    ca4SourceVersionIds.ca4LocalRules2026,
+    ca4SourceVersionIds.ca4EcfEvents2026,
+  ],
 ): ValidationIssue {
   return {
     severity: 'error',
     code,
     message,
     ruleRefs: ruleRefsForIssue,
+    sourceVersionIds,
     cureSuggestion,
   }
 }
@@ -383,6 +422,7 @@ export function validateEcfWizardCompleteness(
   }
 
   const definition = ecfEventDefinitionFromFilingEvent(event)
+  const catalogEvent = getCa4EcfCatalogEvent(event.id)
   const issues: ValidationIssue[] = []
 
   if (!submission.metadata.filingAttorneyName?.trim()) {
@@ -418,6 +458,25 @@ export function validateEcfWizardCompleteness(
         'This CM/ECF event requires relief-requested text before rule preflight.',
         'Enter the motion relief or procedural action requested.',
         [ruleRefs.frap27, ruleRefs.ca4Local27],
+      ),
+    )
+  }
+
+  if (
+    catalogEvent?.reliefs.length &&
+    submission.metadata.reliefRequested?.trim() &&
+    !catalogEvent.reliefs.some(
+      (relief) =>
+        relief.toLowerCase() === submission.metadata.reliefRequested?.trim().toLowerCase(),
+    )
+  ) {
+    issues.push(
+      ecfCompletenessIssue(
+        'ecf_motion_relief_not_in_catalog',
+        'The requested relief is not one of the source-mapped Fourth Circuit motion relief options for this event.',
+        'Select a relief option from the court event catalog or use the generic motion event if appropriate.',
+        [ruleRefs.frap27, ruleRefs.ca4Local27],
+        catalogEvent.sourceVersionIds,
       ),
     )
   }
@@ -620,10 +679,14 @@ export function getAvailableEcfEventDefinitions(session: CaseSession): EcfEventA
   const courtPack = getCourtPack(session.courtPackId)
   return courtPack.filingEvents.map((event) => {
     const unavailableReasons = availabilityReasons(session, event)
+    const definition = ecfEventDefinitionFromFilingEvent(event)
     return {
-      ...ecfEventDefinitionFromFilingEvent(event),
+      ...definition,
       available: unavailableReasons.length === 0,
       unavailableReasons,
+      availabilityReason: unavailableReasons.length
+        ? unavailableReasons.join(' ')
+        : `${definition.courtEventName ?? definition.displayName} is available in the source-mapped Fourth Circuit CM/ECF catalog.`,
     }
   })
 }

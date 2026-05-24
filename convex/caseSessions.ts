@@ -60,6 +60,7 @@ import {
   inferProcedureState,
   transitionAfterFiling,
 } from '../src/domain/procedure/state-machine'
+import { advanceSimulationTurn as advanceSimulationTurnDomain } from '../src/domain/simulation/director'
 import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -318,6 +319,7 @@ async function assembleCaseSession(
     panelDispositions,
     assessments,
     actorWorkProducts,
+    simulationTurns,
   ] = await Promise.all([
     ctx.db
       .query('scenarioIssues')
@@ -373,6 +375,10 @@ async function assembleCaseSession(
       .collect(),
     ctx.db
       .query('actorWorkProducts')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
+      .collect(),
+    ctx.db
+      .query('simulationTurns')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
       .collect(),
   ])
@@ -549,6 +555,27 @@ async function assembleCaseSession(
         sourceFilingIds: product.sourceFilingIds,
         createdAt: product.createdAt,
       })),
+    simulationTurns: simulationTurns
+      .slice()
+      .sort((a, b) => a.turnNumber - b.turnNumber)
+      .map((turn) => {
+        const payload = JSON.parse(turn.payloadJson) as {
+          startedAt?: string
+          completedAt?: string
+          effects?: string[]
+        }
+        return {
+          id: turn._id,
+          caseSessionId: turn.caseSessionId,
+          turnNumber: turn.turnNumber,
+          actorId: turn.actorId,
+          kind: turn.kind as NonNullable<CaseSession['simulationTurns']>[number]['kind'],
+          status: turn.status as NonNullable<CaseSession['simulationTurns']>[number]['status'],
+          startedAt: payload.startedAt ?? turn.createdAt,
+          ...(payload.completedAt ? { completedAt: payload.completedAt } : {}),
+          effects: payload.effects ?? [],
+        }
+      }),
   }
 }
 
@@ -571,6 +598,9 @@ async function deleteExistingSessionState(
     panelDispositions,
     panelVotes,
     assessments,
+    simulationTurns,
+    actorPackets,
+    actorDecisions,
   ] =
     await Promise.all([
       ctx.db
@@ -629,6 +659,18 @@ async function deleteExistingSessionState(
         .query('assessments')
         .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
         .collect(),
+      ctx.db
+        .query('simulationTurns')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('actorPackets')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      ctx.db
+        .query('actorDecisions')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
     ])
 
   await Promise.all(
@@ -647,6 +689,9 @@ async function deleteExistingSessionState(
       ...panelDispositions,
       ...panelVotes,
       ...assessments,
+      ...actorPackets,
+      ...actorDecisions,
+      ...simulationTurns,
     ].map((doc) => ctx.db.delete(doc._id)),
   )
 }
@@ -865,6 +910,22 @@ async function replaceSessionState(
       proceduralFindings: session.assessment.proceduralFindings,
       meritsFindings: session.assessment.meritsFindings,
       nextPracticeTargets: session.assessment.nextPracticeTargets,
+    })
+  }
+
+  for (const turn of session.simulationTurns ?? []) {
+    await ctx.db.insert('simulationTurns', {
+      caseSessionId,
+      turnNumber: turn.turnNumber,
+      actorId: turn.actorId,
+      kind: turn.kind,
+      status: turn.status,
+      payloadJson: JSON.stringify({
+        startedAt: turn.startedAt,
+        completedAt: turn.completedAt,
+        effects: turn.effects,
+      }),
+      createdAt: turn.startedAt,
     })
   }
 
@@ -1330,6 +1391,43 @@ export const advanceProcedure = mutation({
         tool: result.toolCall.tool,
         fromState: result.transition.fromState,
         toState: result.transition.toState,
+      },
+      user._id,
+    )
+    return {
+      session: saved,
+      toolCall: result.toolCall,
+    }
+  },
+})
+
+export const advanceSimulationTurn = mutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    debugRejectedAttempts: v.optional(v.boolean()),
+  },
+  returns: v.object({
+    session: caseSessionValidator,
+    toolCall: toolCallValidator,
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const result = advanceSimulationTurnDomain(session, {
+      debugRejectedAttempts: args.debugRejectedAttempts ?? false,
+    })
+    const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionDoc._id,
+      'simulation_turn_advanced',
+      {
+        turnNumber: result.turn.turnNumber,
+        actorId: result.turn.actorId,
+        kind: result.turn.kind,
+        status: result.turn.status,
+        tool: result.toolCall.tool,
       },
       user._id,
     )

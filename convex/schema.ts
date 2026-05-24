@@ -155,6 +155,39 @@ export default defineSchema({
     .index('by_rule_module', ['ruleModuleId'])
     .index('by_rule', ['ruleId']),
 
+  ecfCatalogEvents: defineTable({
+    courtPackId: v.string(),
+    eventId: v.string(),
+    catalogJson: v.string(),
+    sourceVersionIds: v.array(v.string()),
+    published: v.boolean(),
+  })
+    .index('by_court_pack', ['courtPackId'])
+    .index('by_event', ['courtPackId', 'eventId'])
+    .index('by_published', ['published']),
+
+  deadlineRules: defineTable({
+    courtPackId: v.string(),
+    deadlineId: v.string(),
+    deadlineJson: v.string(),
+    sourceVersionIds: v.array(v.string()),
+    published: v.boolean(),
+  })
+    .index('by_court_pack', ['courtPackId'])
+    .index('by_deadline', ['courtPackId', 'deadlineId'])
+    .index('by_published', ['published']),
+
+  sourceBackedConstraints: defineTable({
+    courtPackId: v.string(),
+    constraintId: v.string(),
+    constraintJson: v.string(),
+    sourceVersionIds: v.array(v.string()),
+    published: v.boolean(),
+  })
+    .index('by_court_pack', ['courtPackId'])
+    .index('by_constraint', ['courtPackId', 'constraintId'])
+    .index('by_published', ['published']),
+
   moduleManifests: defineTable({
     moduleId: v.string(),
     type: v.string(),
@@ -438,6 +471,40 @@ export default defineSchema({
   })
     .index('by_case', ['caseSessionId'])
     .index('by_user_month', ['userId', 'createdMonth']),
+
+  simulationTurns: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    turnNumber: v.number(),
+    actorId: v.string(),
+    kind: v.string(),
+    status: v.string(),
+    payloadJson: v.string(),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_case_turn', ['caseSessionId', 'turnNumber']),
+
+  actorPackets: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    turnId: v.id('simulationTurns'),
+    actorId: v.string(),
+    packetJson: v.string(),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_turn', ['turnId']),
+
+  actorDecisions: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    turnId: v.id('simulationTurns'),
+    actorId: v.string(),
+    decisionJson: v.string(),
+    accepted: v.boolean(),
+    issues: v.array(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_turn', ['turnId']),
 
   integrationEvents: defineTable({
     userId: v.id('users'),
