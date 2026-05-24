@@ -31,10 +31,22 @@ const disclosurePdf: UploadedDocument = {
   extractedSignals: ['disclosure'],
 }
 
+const docketingPdf: UploadedDocument = {
+  ...pdf,
+  fileName: 'docketing-statement.pdf',
+  extractedSignals: ['docketing statement'],
+}
+
+const transcriptAckPdf: UploadedDocument = {
+  ...pdf,
+  fileName: 'transcript-order-acknowledgment.pdf',
+  extractedSignals: ['transcript'],
+}
+
 const appendixPdf: UploadedDocument = {
   ...pdf,
   fileName: 'joint-appendix.pdf',
-  extractedSignals: ['appendix'],
+  extractedSignals: ['appendix', 'pagination', 'record citation'],
 }
 
 const replyPdf: UploadedDocument = {
@@ -82,6 +94,21 @@ describe('simulation engine', () => {
     expect(scenarios.every((scenario) => courtPackIds.has(scenario.courtPackId))).toBe(
       true,
     )
+  })
+
+  it('keeps every seed scenario training-ready', () => {
+    const courtPackIds = new Set(courtPacks.map((pack) => pack.id))
+    for (const scenario of scenarios) {
+      expect(courtPackIds.has(scenario.courtPackId)).toBe(true)
+      expect(scenario.training).toBeTruthy()
+      expect(scenario.issues?.length ?? 0).toBeGreaterThanOrEqual(3)
+      expect(scenario.recordExcerpts?.length ?? 0).toBeGreaterThanOrEqual(4)
+
+      const issueIds = new Set((scenario.issues ?? []).map((issue) => issue.id))
+      for (const amicus of scenario.training?.likelyAmici ?? []) {
+        expect(amicus.triggerIssueIds.every((issueId) => issueIds.has(issueId))).toBe(true)
+      }
+    }
   })
 
   it('rejects a reply brief before an appellee brief', () => {
@@ -172,6 +199,14 @@ describe('simulation engine', () => {
       ...draft('appearance_disclosure'),
       documents: [disclosurePdf],
     })
+    session = fileDraft(session, {
+      ...draft('docketing_statement'),
+      documents: [docketingPdf],
+    })
+    session = fileDraft(session, {
+      ...draft('transcript_order_acknowledgment'),
+      documents: [transcriptAckPdf],
+    })
 
     session = applyToolCall(session, nextExpectedToolCall(session))
     session = applyToolCall(session, nextExpectedToolCall(session))
@@ -192,6 +227,14 @@ describe('simulation engine', () => {
     session = fileDraft(session, {
       ...draft('appearance_disclosure'),
       documents: [disclosurePdf],
+    })
+    session = fileDraft(session, {
+      ...draft('docketing_statement'),
+      documents: [docketingPdf],
+    })
+    session = fileDraft(session, {
+      ...draft('transcript_order_acknowledgment'),
+      documents: [transcriptAckPdf],
     })
     session = fileDraft(session, draft('opening_brief'))
     session = fileDraft(session, {
@@ -214,6 +257,14 @@ describe('simulation engine', () => {
     session = fileDraft(session, {
       ...draft('appearance_disclosure'),
       documents: [disclosurePdf],
+    })
+    session = fileDraft(session, {
+      ...draft('docketing_statement'),
+      documents: [docketingPdf],
+    })
+    session = fileDraft(session, {
+      ...draft('transcript_order_acknowledgment'),
+      documents: [transcriptAckPdf],
     })
     session = fileDraft(session, draft('opening_brief'))
     session = fileDraft(session, {

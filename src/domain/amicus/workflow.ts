@@ -36,6 +36,39 @@ function hasBroadLegalSignificance(session: CaseSession) {
   ].some((signal) => text.includes(signal))
 }
 
+function candidateId(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64)
+}
+
+function explicitScenarioAmici(session: CaseSession): AmicusCandidate[] {
+  const amici = session.scenario.training?.likelyAmici ?? []
+  if (!amici.length) return []
+  const issueLabels = new Map(scenarioIssues(session).map((issue) => [issue.id, issue.label]))
+
+  return amici.map((amicus) => {
+    const triggeredLabels = amicus.triggerIssueIds
+      .map((issueId) => issueLabels.get(issueId) ?? issueId)
+      .join(', ')
+    return {
+      id: candidateId(amicus.organizationName),
+      organizationName: amicus.organizationName,
+      organizationType: amicus.organizationType as AmicusCandidate['organizationType'],
+      supportsRole: amicus.supportsRole,
+      interestStatement: amicus.interestStatement,
+      requiresLeave: amicus.requiresLeave,
+      consentStatus: 'unknown',
+      recommended: true,
+      rationale: triggeredLabels
+        ? `Scenario metadata identifies amicus interest tied to: ${triggeredLabels}.`
+        : 'Scenario metadata identifies a likely amicus interest.',
+    }
+  })
+}
+
 function issue(
   severity: ValidationIssue['severity'],
   code: string,
@@ -55,7 +88,24 @@ function issue(
 
 export function recommendAmicusParticipation(session: CaseSession): AmicusParticipation {
   const filedEvents = activeFiledEventSet(session)
-  if (!filedEvents.has('opening_brief') || !hasBroadLegalSignificance(session)) {
+  if (!filedEvents.has('opening_brief')) {
+    return {
+      candidates: [],
+      acceptedBriefIds: session.amicusParticipation?.acceptedBriefIds ?? [],
+      deniedCandidateIds: session.amicusParticipation?.deniedCandidateIds ?? [],
+    }
+  }
+
+  const explicitCandidates = explicitScenarioAmici(session)
+  if (explicitCandidates.length) {
+    return {
+      candidates: explicitCandidates,
+      acceptedBriefIds: session.amicusParticipation?.acceptedBriefIds ?? [],
+      deniedCandidateIds: session.amicusParticipation?.deniedCandidateIds ?? [],
+    }
+  }
+
+  if (!hasBroadLegalSignificance(session)) {
     return {
       candidates: [],
       acceptedBriefIds: session.amicusParticipation?.acceptedBriefIds ?? [],

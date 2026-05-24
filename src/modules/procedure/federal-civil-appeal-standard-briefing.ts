@@ -39,12 +39,30 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
       toState: 'disclosure_complete',
       filingEventId: 'appearance_disclosure',
       guard: 'appearance/disclosure is filed by a party',
+      effect: 'enable docketing statement review',
+      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+    },
+    {
+      id: 'docketing-statement-filed',
+      fromState: 'disclosure_complete',
+      toState: 'docketing-statement-complete',
+      filingEventId: 'docketing_statement',
+      guard: 'docketing statement is filed after notice',
+      effect: 'enable transcript and record-ordering branch',
+      ruleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3],
+    },
+    {
+      id: 'transcript-acknowledgment-filed',
+      fromState: 'docketing-statement-complete',
+      toState: 'record-ordering-complete',
+      filingEventId: 'transcript_order_acknowledgment',
+      guard: 'transcript order acknowledgment or no-transcript statement is filed',
       effect: 'enable briefing schedule',
-      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+      ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
     },
     {
       id: 'briefing-schedule',
-      fromState: 'disclosure_complete',
+      fromState: 'record-ordering-complete',
       toState: 'opening-brief-due',
       actorToolName: 'setDeadline',
       guard: 'no opening brief deadline is already open',
@@ -152,12 +170,34 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
           : ['Notice of appeal should be filed first.'],
       ),
       eventAvailability(
+        'docketing_statement',
+        'Docketing Statement',
+        filedEvents.has('notice_of_appeal') && !filedEvents.has('docketing_statement'),
+        filedEvents.has('notice_of_appeal')
+          ? []
+          : ['Notice of appeal should be filed first.'],
+      ),
+      eventAvailability(
+        'transcript_order_acknowledgment',
+        'Transcript Order Acknowledgment',
+        filedEvents.has('notice_of_appeal') &&
+          !filedEvents.has('transcript_order_acknowledgment'),
+        filedEvents.has('notice_of_appeal')
+          ? []
+          : ['Notice of appeal should be filed first.'],
+      ),
+      eventAvailability(
         'opening_brief',
         'Opening Brief',
-        filedEvents.has('appearance_disclosure') && !filedEvents.has('opening_brief'),
-        filedEvents.has('appearance_disclosure')
+        filedEvents.has('appearance_disclosure') &&
+          filedEvents.has('docketing_statement') &&
+          filedEvents.has('transcript_order_acknowledgment') &&
+          !filedEvents.has('opening_brief'),
+        filedEvents.has('appearance_disclosure') &&
+          filedEvents.has('docketing_statement') &&
+          filedEvents.has('transcript_order_acknowledgment')
           ? []
-          : ['Appearance/disclosure remains pending.'],
+          : ['Opening-stage appearance, docketing, or transcript-order filing remains pending.'],
       ),
       eventAvailability(
         'joint_appendix',
@@ -180,6 +220,11 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
       ),
       eventAvailability('motion_to_seal', 'Motion to Seal', session.status === 'active'),
       eventAvailability(
+        'motion_stay_pending_appeal',
+        'Motion to Stay or for Injunction Pending Appeal',
+        session.status === 'active',
+      ),
+      eventAvailability(
         'sealed_filing_acknowledgment',
         'Sealed Filing Acknowledgment',
         session.status === 'active',
@@ -193,6 +238,7 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
       eventAvailability('amicus_notice_or_consent', 'Amicus Notice / Consent Statement', session.status === 'active'),
       eventAvailability('motion_for_leave_to_file_amicus', 'Motion for Leave to File Amicus Brief', session.status === 'active'),
       eventAvailability('amicus_brief', 'Amicus Brief', session.status === 'active'),
+      eventAvailability('rule_28j_letter', 'Rule 28(j) Letter', session.status === 'active'),
       eventAvailability(
         'corrected_brief',
         'Corrected Brief',
@@ -210,6 +256,12 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
       eventAvailability(
         'mandate_stay_motion',
         'Motion to Stay Mandate',
+        session.status === 'closed',
+        session.status === 'closed' ? [] : ['Judgment has not been entered.'],
+      ),
+      eventAvailability(
+        'bill_of_costs',
+        'Bill of Costs',
         session.status === 'closed',
         session.status === 'closed' ? [] : ['Judgment has not been entered.'],
       ),

@@ -956,9 +956,29 @@ function SessionChooser({
             <article className="grid gap-3 p-4 lg:grid-cols-[1fr_auto]" key={scenario.id}>
               <div>
                 <h2 className="font-semibold">{scenario.title}</h2>
+                {scenario.training ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                      {formatLabel(scenario.training.difficulty)}
+                    </span>
+                    {scenario.training.practiceFocus.slice(0, 3).map((focus) => (
+                      <span
+                        className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs"
+                        key={`${scenario.id}-${focus}`}
+                      >
+                        {formatLabel(focus)}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <p className="mt-2 text-sm leading-6 text-[#59625d]">
                   {scenario.proceduralPosture}
                 </p>
+                {scenario.training?.learningObjectives.length ? (
+                  <p className="mt-2 line-clamp-2 text-xs leading-5 text-[#68716c]">
+                    {scenario.training.learningObjectives.slice(0, 2).join(' ')}
+                  </p>
+                ) : null}
               </div>
               <button
                 className="flex h-10 items-center justify-center gap-2 rounded-md bg-[#1d4d4f] px-3 text-sm font-semibold text-white hover:bg-[#173f41] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
@@ -1765,8 +1785,15 @@ function FilingView({
         </div>
         <div className="space-y-3">
           {validationIssues.length ? (
-            validationIssues.map((issue, index) => (
-              <ValidationItem issue={issue} key={`${issue.message}-${index}`} />
+            groupValidationIssuesBySource(validationIssues).map((group) => (
+              <div className="space-y-2" key={group.source}>
+                <div className="text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+                  {group.source}
+                </div>
+                {group.issues.map((issue, index) => (
+                  <ValidationItem issue={issue} key={`${issue.message}-${index}`} />
+                ))}
+              </div>
             ))
           ) : (
             <div className="rounded-md border border-[#c8dfcb] bg-[#eff8f0] p-3 text-sm text-[#285b38]">
@@ -1780,6 +1807,23 @@ function FilingView({
       </section>
     </div>
   )
+}
+
+function validationSource(issue: ValidationIssue) {
+  const ruleIds = issue.ruleRefs.map((rule) => rule.ruleId)
+  if (ruleIds.some((ruleId) => ruleId.startsWith('FRAP'))) return 'FRAP'
+  if (ruleIds.some((ruleId) => ruleId.startsWith('CA4_LR'))) return 'CA4 Local Rule'
+  return 'Simulator'
+}
+
+function groupValidationIssuesBySource(issues: ValidationIssue[]) {
+  const order = ['FRAP', 'CA4 Local Rule', 'Simulator']
+  return order
+    .map((source) => ({
+      source,
+      issues: issues.filter((issue) => validationSource(issue) === source),
+    }))
+    .filter((group) => group.issues.length)
 }
 
 function Toggle({
@@ -2446,10 +2490,34 @@ function ScenariosView({
                 <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
                   {formatLabel(scenario.source)}
                 </span>
+                {scenario.training ? (
+                  <span className="rounded bg-[#e7f1ef] px-2 py-1 text-xs font-semibold text-[#305f58]">
+                    {formatLabel(scenario.training.difficulty)}
+                  </span>
+                ) : null}
               </div>
               <p className="mt-2 text-sm leading-6 text-[#59625d]">
                 {scenario.proceduralPosture}
               </p>
+              {scenario.training ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {scenario.training.practiceFocus.map((focus) => (
+                    <span
+                      className="rounded border border-[#d8d1c4] bg-white px-2 py-1 text-xs"
+                      key={`${scenario.id}-${focus}`}
+                    >
+                      {formatLabel(focus)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {scenario.training?.learningObjectives.length ? (
+                <ul className="mt-3 space-y-1 text-xs leading-5 text-[#59625d]">
+                  {scenario.training.learningObjectives.slice(0, 3).map((objective) => (
+                    <li key={objective}>{objective}</li>
+                  ))}
+                </ul>
+              ) : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 {scenario.issuesPresented.map((issue) => (
                   <span

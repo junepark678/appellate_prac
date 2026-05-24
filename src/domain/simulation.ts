@@ -21,6 +21,7 @@ import {
   validatePanelDisposition,
   validatePanelVote,
 } from './panel/deliberation'
+import { preflightFilingSubmission, sessionJurisdictionIssues } from './rules/executable-constraints'
 import type {
   Assessment,
   CaseSession,
@@ -357,8 +358,13 @@ function syntheticDocumentsForEvent(event: FilingEvent): UploadedDocument[] {
     extractedSignals: [
       ...(requirement.mustContain ?? []),
       'argument',
+      event.id.includes('brief') ? 'jurisdiction' : '',
+      event.id.includes('brief') ? 'conclusion' : '',
+      event.id.includes('brief') ? 'record citation' : '',
+      event.id.includes('brief') ? 'oral argument' : '',
+      event.id === 'joint_appendix' ? 'pagination' : '',
       event.label.toLowerCase(),
-    ],
+    ].filter(Boolean),
   }))
 }
 
@@ -432,13 +438,18 @@ export function inferDocumentSignals(file: File): UploadedDocument {
   const extractedSignals = [
     normalizedName.includes('notice') ? 'notice of appeal' : '',
     normalizedName.includes('disclosure') ? 'disclosure' : '',
+    normalizedName.includes('docketing') ? 'docketing statement' : '',
+    normalizedName.includes('transcript') ? 'transcript' : '',
     normalizedName.includes('motion') ? 'motion' : '',
+    normalizedName.includes('stay') ? 'stay' : '',
     normalizedName.includes('response') ? 'response' : '',
     normalizedName.includes('reply') ? 'reply' : '',
     normalizedName.includes('brief') ? 'argument' : '',
     normalizedName.includes('appendix') ? 'appendix' : '',
     normalizedName.includes('amicus') ? 'amicus' : '',
     normalizedName.includes('rehearing') ? 'rehearing' : '',
+    normalizedName.includes('28j') || normalizedName.includes('28-j') ? '28(j)' : '',
+    normalizedName.includes('cost') ? 'costs' : '',
   ].filter(Boolean)
 
   return {
@@ -450,191 +461,56 @@ export function inferDocumentSignals(file: File): UploadedDocument {
   }
 }
 
+function draftToSubmission(draft: FilingDraft) {
+  const [mainDocument, ...attachmentDocuments] = draft.documents
+  if (!mainDocument) return null
+
+  return {
+    eventId: draft.eventId,
+    participantRole: draft.participantRole,
+    title: draft.title,
+    mainDocument,
+    attachments: attachmentDocuments.map((document, index) => ({
+      id: `draft_attachment_${index + 1}`,
+      label: document.fileName,
+      document,
+      attachmentType: draft.eventId === 'joint_appendix' ? 'appendix' as const : 'other' as const,
+    })),
+    metadata: {
+      serviceMethod: 'cm_ecf' as const,
+      ...(draft.eventId.includes('amicus') ? { consentStatus: 'unknown' as const } : {}),
+      ...(draft.sealed ? { sealedDocumentType: 'sealed material' } : {}),
+      emergency: draft.eventId === 'motion_stay_pending_appeal',
+      sealed: draft.sealed,
+      redactionAcknowledged: !draft.sealed,
+      certificateOfService: draft.certificateOfService,
+      certificateOfCompliance: draft.certificateOfCompliance,
+    },
+    notes: draft.notes,
+  }
+}
+
 export function validateFiling(
   session: CaseSession,
   draft: FilingDraft,
 ): ValidationIssue[] {
-  const courtPack = getCourtPack(session.courtPackId)
-  const event = getFilingEvent(session.courtPackId, draft.eventId)
-  const issues: ValidationIssue[] = []
-
-  if (!event) {
+  const submission = draftToSubmission(draft)
+  if (!submission) {
+    const event = getFilingEvent(session.courtPackId, draft.eventId)
     return [
       {
         severity: 'error',
-        message: 'The selected filing event is not available in this court pack.',
-        ruleRefs: [],
+        code: event ? `required_document_${event.requiredDocuments[0]?.id ?? 'main'}_missing` : 'required_document_missing',
+        message: event?.requiredDocuments[0]?.label
+          ? `${event.requiredDocuments[0].label} is required.`
+          : 'A main document is required.',
+        ruleRefs: event?.validationRuleRefs ?? [],
+        cureSuggestion: 'Attach the required PDF before filing.',
       },
     ]
   }
 
-  if (!event.allowedCourtLevels.includes(courtPack.courtLevel)) {
-    issues.push({
-      severity: 'error',
-      message: `${event.label} is not available at this court level.`,
-      ruleRefs: event.validationRuleRefs,
-    })
-  }
-
-  if (!event.allowedParticipantRoles.includes(draft.participantRole)) {
-    issues.push({
-      severity: 'error',
-      message: `${formatParticipant(draft.participantRole)} cannot file ${event.label} in this posture.`,
-      ruleRefs: event.validationRuleRefs,
-    })
-  }
-
-  const unmatchedDocuments = [...draft.documents]
-
-  for (const requirement of event.requiredDocuments) {
-    const matchingIndex = unmatchedDocuments.findIndex((document) =>
-      requirement.acceptedMimeTypes.includes(document.mimeType),
-    )
-    const matchingDocument =
-      matchingIndex >= 0 ? unmatchedDocuments.splice(matchingIndex, 1)[0] : undefined
-
-    if (!matchingDocument) {
-      issues.push({
-        severity: 'error',
-        message: `${requirement.label} is required.`,
-        ruleRefs: event.validationRuleRefs,
-      })
-      continue
-    }
-
-    if (matchingDocument.sizeBytes > 25 * 1024 * 1024) {
-      issues.push({
-        severity: 'warning',
-        message: `${matchingDocument.fileName} is large enough that a real filing system may require extra handling.`,
-        ruleRefs: [ruleRefs.frap25],
-      })
-    }
-
-    if (
-      typeof requirement.maxPages === 'number' &&
-      typeof matchingDocument.pageCount === 'number' &&
-      matchingDocument.pageCount > requirement.maxPages
-    ) {
-      issues.push({
-        severity: 'error',
-        message: `${matchingDocument.fileName} exceeds the ${requirement.maxPages}-page simulator limit for ${requirement.label}.`,
-        ruleRefs: event.validationRuleRefs,
-      })
-    }
-
-    for (const signal of requirement.mustContain ?? []) {
-      if (!matchingDocument.extractedSignals.includes(signal)) {
-        issues.push({
-          severity: 'warning',
-          message: `${requirement.label} does not show a "${signal}" signal in the filename/text extraction stub.`,
-          ruleRefs: event.validationRuleRefs,
-        })
-      }
-    }
-  }
-
-  if (!draft.certificateOfService) {
-    issues.push({
-      severity: 'error',
-      message: 'Certificate of service is missing.',
-      ruleRefs: [ruleRefs.frap25],
-    })
-  }
-
-  if (
-    ['opening_brief', 'appellee_brief', 'reply_brief', 'amicus_brief'].includes(
-      draft.eventId,
-    ) &&
-    !draft.certificateOfCompliance
-  ) {
-    issues.push({
-      severity: 'error',
-      message: 'Certificate of compliance is missing for this brief.',
-      ruleRefs: [ruleRefs.frap32],
-    })
-  }
-
-  if (
-    draft.eventId === 'opening_brief' &&
-    !activeFiledEventSet(session).has('appearance_disclosure')
-  ) {
-    issues.push({
-      severity: 'warning',
-      message:
-        'Opening brief is being filed before an appellant appearance/disclosure statement appears on the docket.',
-      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
-    })
-  }
-
-  if (
-    draft.eventId === 'opening_brief' &&
-    !activeFiledEventSet(session).has('joint_appendix')
-  ) {
-    issues.push({
-      severity: 'warning',
-      message:
-        'Opening brief is being filed before the joint appendix appears on the docket.',
-      ruleRefs: [ruleRefs.frap30, ruleRefs.ca4Local30],
-    })
-  }
-
-  if (
-    draft.eventId === 'reply_brief' &&
-    !activeFiledEventSet(session).has('appellee_brief')
-  ) {
-    issues.push({
-      severity: 'error',
-      message: 'A reply brief cannot precede the appellee brief.',
-      ruleRefs: [ruleRefs.frap31],
-    })
-  }
-
-  const draftSignals = draft.documents
-    .flatMap((document) => [
-      document.fileName,
-      document.extractedText ?? '',
-      ...document.extractedSignals,
-    ])
-    .join(' ')
-    .toLowerCase()
-  if (draft.eventId === 'opening_brief' && !draftSignals.includes('standard of review')) {
-    issues.push({
-      severity: 'warning',
-      message: 'Legal realism check: missing standard of review.',
-      ruleRefs: [ruleRefs.frap28, ruleRefs.ca4Local28],
-    })
-  }
-  if (
-    ['opening_brief', 'appellee_brief', 'reply_brief'].includes(draft.eventId) &&
-    !draftSignals.includes('record citation')
-  ) {
-    issues.push({
-      severity: 'warning',
-      message: 'Legal realism check: missing record citations.',
-      ruleRefs: [ruleRefs.frap28, ruleRefs.ca4Local28],
-    })
-  }
-
-  if (session.status === 'closed' && draft.eventId !== 'petition_rehearing') {
-    issues.push({
-      severity: 'error',
-      message: 'Only authorized post-disposition filings are available after closure.',
-      ruleRefs: [ruleRefs.frap40, ruleRefs.frap41],
-    })
-  }
-
-  const openDeadline = session.deadlines.find(
-    (deadline) => deadline.targetEventId === draft.eventId && deadline.status === 'open',
-  )
-  if (openDeadline && new Date(session.simulatedDate) > new Date(openDeadline.dueDate)) {
-    issues.push({
-      severity: 'warning',
-      message: `${event.label} appears after the open example deadline.`,
-      ruleRefs: openDeadline.sourceRuleRefs,
-    })
-  }
-
-  return issues
+  return preflightFilingSubmission(session, submission, session.simulatedDate).issues
 }
 
 export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession {
@@ -766,6 +642,14 @@ export function validateToolCall(
     session.status === 'closed'
   ) {
     issues.push('The case is already closed.')
+  }
+
+  if (normalized.tool === 'disposeCase') {
+    issues.push(
+      ...sessionJurisdictionIssues(session)
+        .filter((issue) => issue.severity === 'error')
+        .map((issue) => issue.message),
+    )
   }
 
   if (normalized.tool === 'submitToPanel') {
@@ -1145,7 +1029,7 @@ export function nextExpectedToolCall(session: CaseSession): ToolCall {
       actorId: 'ca4_clerk',
       title: 'Notice Regarding Case Opening',
       text: 'The appeal is opened for training purposes. Appellant must file a notice of appeal and required appearance/disclosure materials before merits briefing proceeds.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local12],
+      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3, ruleRefs.ca4Local26_1],
     }
   }
 
@@ -1155,7 +1039,27 @@ export function nextExpectedToolCall(session: CaseSession): ToolCall {
       actorId: 'ca4_clerk',
       title: 'Clerk Order Directing Disclosure Statement',
       text: 'Appellant is directed to file an appearance and disclosure statement. Failure to comply may delay briefing or result in further order.',
-      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+    }
+  }
+
+  if (!filedEvents.has('docketing_statement')) {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'Clerk Order Directing Docketing Statement',
+      text: 'Appellant must file the docketing statement before merits briefing is scheduled.',
+      ruleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
+    }
+  }
+
+  if (!filedEvents.has('transcript_order_acknowledgment')) {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'Clerk Order Regarding Transcript Order',
+      text: 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before merits briefing is scheduled.',
+      ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
     }
   }
 

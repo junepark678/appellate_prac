@@ -104,6 +104,9 @@ function scenarioFromDoc(
   recordExcerpts: ScenarioRecordExcerpt[] = [],
 ): Scenario {
   const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
+  const training = doc.trainingJson
+    ? { training: JSON.parse(doc.trainingJson) as Scenario['training'] }
+    : {}
   return {
     id: doc.scenarioKey,
     title: doc.title,
@@ -117,6 +120,7 @@ function scenarioFromDoc(
     meritsRecord: doc.meritsRecord,
     ...(issues.length ? { issues } : {}),
     ...(recordExcerpts.length ? { recordExcerpts } : {}),
+    ...training,
     ...sourceCaseUrl,
   }
 }
@@ -133,6 +137,20 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
   }
 
   if (existing) {
+    await ctx.db.patch(existing._id, {
+      title: bundled.title,
+      source: bundled.source,
+      courtPackId: bundled.courtPackId,
+      shortCaption: bundled.shortCaption,
+      lowerTribunal: bundled.lowerTribunal,
+      natureOfSuit: bundled.natureOfSuit,
+      proceduralPosture: bundled.proceduralPosture,
+      issuesPresented: bundled.issuesPresented,
+      meritsRecord: bundled.meritsRecord,
+      ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
+      ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
+      published: true,
+    })
     const [existingIssues, existingExcerpts] = await Promise.all([
       ctx.db
         .query('scenarioIssues')
@@ -143,7 +161,8 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
         .withIndex('by_scenario', (index) => index.eq('scenarioId', existing._id))
         .collect(),
     ])
-    if (!existingIssues.length) {
+    if (existingIssues.length !== (bundled.issues?.length ?? 0)) {
+      await Promise.all(existingIssues.map((issue) => ctx.db.delete(issue._id)))
       for (const issue of bundled.issues ?? []) {
         await ctx.db.insert('scenarioIssues', {
           scenarioId: existing._id,
@@ -158,7 +177,8 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
         })
       }
     }
-    if (!existingExcerpts.length) {
+    if (existingExcerpts.length !== (bundled.recordExcerpts?.length ?? 0)) {
+      await Promise.all(existingExcerpts.map((excerpt) => ctx.db.delete(excerpt._id)))
       for (const excerpt of bundled.recordExcerpts ?? []) {
         await ctx.db.insert('scenarioRecordExcerpts', {
           scenarioId: existing._id,
@@ -184,6 +204,7 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
     proceduralPosture: bundled.proceduralPosture,
     issuesPresented: bundled.issuesPresented,
     meritsRecord: bundled.meritsRecord,
+    ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
     ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
     published: true,
   })

@@ -150,6 +150,7 @@ function scenarioDoc(scenario: Scenario) {
     proceduralPosture: scenario.proceduralPosture,
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
+    ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
     ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
     published: true,
   }
@@ -167,6 +168,7 @@ function scenarioCurrent(doc: Doc<'scenarios'>) {
     proceduralPosture: doc.proceduralPosture,
     issuesPresented: doc.issuesPresented,
     meritsRecord: doc.meritsRecord,
+    ...(doc.trainingJson ? { trainingJson: doc.trainingJson } : {}),
     ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
     published: doc.published,
   }
@@ -498,6 +500,7 @@ async function upsertProcedureTransitions(ctx: MutationCtx) {
 
 async function upsertScenarios(ctx: MutationCtx) {
   const counts = emptyCounts()
+  const seededScenarioKeys = new Set(scenarios.map((scenario) => scenario.id))
 
   for (const scenario of scenarios) {
     const doc = scenarioDoc(scenario)
@@ -517,6 +520,18 @@ async function upsertScenarios(ctx: MutationCtx) {
       counts.inserted += 1
     } else if (!sameRecord(scenarioCurrent(existing), doc)) {
       await ctx.db.patch(existing._id, doc)
+      counts.updated += 1
+    }
+  }
+
+  const existingScenarios = await ctx.db.query('scenarios').collect()
+  for (const existing of existingScenarios) {
+    if (
+      existing.published &&
+      !existing.ownerUserId &&
+      !seededScenarioKeys.has(existing.scenarioKey)
+    ) {
+      await ctx.db.patch(existing._id, { published: false })
       counts.updated += 1
     }
   }

@@ -38,6 +38,8 @@ export function inferProcedureState(session: CaseSession): ProcedureState {
   const filedEvents = activeFiledEventSet(session)
   if (!filedEvents.has('notice_of_appeal')) return 'notice_pending'
   if (!filedEvents.has('appearance_disclosure')) return 'appearance_pending'
+  if (!filedEvents.has('docketing_statement')) return 'docketing_statement_pending'
+  if (!filedEvents.has('transcript_order_acknowledgment')) return 'record_ordering_pending'
   if (!hasOpenDeadline(session, openingBriefDeadline.targetEventId) && !filedEvents.has('opening_brief')) {
     return 'briefing_schedule_pending'
   }
@@ -57,7 +59,7 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
       actorId: 'ca4_clerk',
       title: 'Notice Regarding Case Opening',
       text: 'The appeal is opened for training purposes. Appellant must file a notice of appeal and required appearance/disclosure materials before merits briefing proceeds.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local12],
+      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3, ruleRefs.ca4Local26_1],
     }
   }
 
@@ -67,7 +69,27 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
       actorId: 'ca4_clerk',
       title: 'Clerk Order Directing Disclosure Statement',
       text: 'Appellant is directed to file an appearance and disclosure statement. Failure to comply may delay briefing or result in further order.',
-      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+      ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+    }
+  }
+
+  if (state === 'docketing_statement_pending') {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'Clerk Order Directing Docketing Statement',
+      text: 'Appellant is directed to file the docketing statement so jurisdictional and opening-stage information can be reviewed before merits briefing.',
+      ruleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
+    }
+  }
+
+  if (state === 'record_ordering_pending') {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'Clerk Order Regarding Transcript Order',
+      text: 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before the opening brief schedule is set.',
+      ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
     }
   }
 

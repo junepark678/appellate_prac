@@ -214,6 +214,7 @@ export default defineSchema({
     proceduralPosture: v.string(),
     issuesPresented: v.array(v.string()),
     meritsRecord: v.array(v.string()),
+    trainingJson: v.optional(v.string()),
     sourceCaseUrl: v.optional(v.string()),
     ownerUserId: v.optional(v.id('users')),
     published: v.boolean(),

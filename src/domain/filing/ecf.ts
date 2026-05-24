@@ -17,7 +17,7 @@ import { preflightFilingSubmission } from '../rules/executable-constraints'
 export function defaultFilingMetadata(eventId: string, sealed = false): FilingMetadata {
   return {
     serviceMethod: 'cm_ecf',
-    emergency: false,
+    emergency: eventId === 'motion_stay_pending_appeal',
     sealed,
     redactionAcknowledged: !sealed,
     certificateOfService: true,
@@ -76,13 +76,16 @@ function receiptNumber(session: CaseSession, filingCount: number) {
 
 function categoryForEvent(eventId: string): EcfEventCategory {
   if (eventId === 'notice_of_appeal') return 'case_opening'
-  if (eventId === 'appearance_disclosure') return 'appearance'
+  if (['appearance_disclosure', 'docketing_statement', 'transcript_order_acknowledgment'].includes(eventId)) {
+    return 'appearance'
+  }
   if (eventId.includes('appendix')) return 'appendix'
+  if (eventId === 'rule_28j_letter') return 'brief'
   if (eventId.includes('brief') || eventId === 'corrected_brief') return 'brief'
   if (eventId.includes('response')) return 'response'
   if (eventId.includes('seal')) return 'sealed'
   if (eventId.includes('amicus')) return 'amicus'
-  if (eventId.includes('rehearing') || eventId.includes('mandate')) return 'post_disposition'
+  if (eventId.includes('rehearing') || eventId.includes('mandate') || eventId === 'bill_of_costs') return 'post_disposition'
   return 'motion'
 }
 

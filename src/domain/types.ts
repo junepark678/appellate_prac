@@ -47,6 +47,8 @@ export type ProcedureState =
   | 'appearance_pending'
   | 'fee_or_ifp_pending'
   | 'record_pending'
+  | 'docketing_statement_pending'
+  | 'record_ordering_pending'
   | 'briefing_schedule_pending'
   | 'opening_brief_pending'
   | 'appendix_pending'
@@ -92,14 +94,14 @@ export type StructuredConstraint = {
     | 'word_limit'
     | 'page_limit'
     | 'certificate'
-      | 'service'
-      | 'jurisdiction'
-      | 'event_sequence'
-      | 'fee_or_ifp'
-      | 'privacy_redaction'
-      | 'sealed_filing'
-      | 'attachment_type'
-      | 'brief_content_section'
+    | 'service'
+    | 'jurisdiction'
+    | 'event_sequence'
+    | 'fee_or_ifp'
+    | 'privacy_redaction'
+    | 'sealed_filing'
+    | 'attachment_type'
+    | 'brief_content_section'
   value: string
 }
 
@@ -374,6 +376,7 @@ export type Scenario = {
   meritsRecord: string[]
   issues?: ScenarioIssue[]
   recordExcerpts?: ScenarioRecordExcerpt[]
+  training?: ScenarioTrainingMetadata
   sourceCaseUrl?: string
 }
 
@@ -843,6 +846,35 @@ export type ScenarioIssue = {
   likelyArgumentsForAppellant: string[]
   likelyArgumentsForAppellee: string[]
   possibleRelief: string[]
+}
+
+export type ScenarioDifficulty = 'intro' | 'intermediate' | 'advanced'
+
+export type ScenarioPracticeFocus =
+  | 'jurisdiction'
+  | 'case_opening'
+  | 'motions'
+  | 'briefing'
+  | 'record_appendix'
+  | 'amicus'
+  | 'panel_merits'
+  | 'post_judgment'
+  | 'sealed_materials'
+
+export type ScenarioTrainingMetadata = {
+  difficulty: ScenarioDifficulty
+  practiceFocus: ScenarioPracticeFocus[]
+  learningObjectives: string[]
+  modeledPitfalls: string[]
+  expectedProceduralPath: string[]
+  likelyAmici?: Array<{
+    organizationName: string
+    organizationType: string
+    supportsRole: 'appellant' | 'appellee' | 'neither'
+    triggerIssueIds: string[]
+    interestStatement: string
+    requiresLeave: boolean
+  }>
 }
 
 export type PreservationEvaluation = {

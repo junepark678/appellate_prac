@@ -19,10 +19,14 @@ function scenarioFromDoc(scenario: {
   proceduralPosture: string
   issuesPresented: string[]
   meritsRecord: string[]
+  trainingJson?: string
   sourceCaseUrl?: string
 }): Scenario {
   const sourceCaseUrl = scenario.sourceCaseUrl
     ? { sourceCaseUrl: scenario.sourceCaseUrl }
+    : {}
+  const training = scenario.trainingJson
+    ? { training: JSON.parse(scenario.trainingJson) as Scenario['training'] }
     : {}
   return {
     id: scenario.scenarioKey,
@@ -35,6 +39,7 @@ function scenarioFromDoc(scenario: {
     proceduralPosture: scenario.proceduralPosture,
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
+    ...training,
     ...sourceCaseUrl,
   }
 }
@@ -43,16 +48,23 @@ export const listPublished = query({
   args: {},
   returns: v.array(scenarioValidator),
   handler: async (ctx) => {
-    const persisted = await ctx.db
+    const persisted = (await ctx.db
       .query('scenarios')
       .withIndex('by_published', (index) => index.eq('published', true))
-      .collect()
+      .collect()).filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
 
-    if (!persisted.length) {
-      return seedScenarios
-    }
+    const persistedByKey = new Map(
+      persisted.map((scenario) => [scenario.scenarioKey, scenarioFromDoc(scenario)]),
+    )
+    const seededKeys = new Set(seedScenarios.map((scenario) => scenario.id))
+    const mergedSeeded = seedScenarios.map(
+      (scenario) => persistedByKey.get(scenario.id) ?? scenario,
+    )
+    const extraPublished = persisted
+      .filter((scenario) => !seededKeys.has(scenario.scenarioKey))
+      .map(scenarioFromDoc)
 
-    return persisted.map(scenarioFromDoc)
+    return [...mergedSeeded, ...extraPublished]
   },
 })
 
@@ -83,6 +95,7 @@ export const seedPublished = mutation({
         proceduralPosture: scenario.proceduralPosture,
         issuesPresented: scenario.issuesPresented,
         meritsRecord: scenario.meritsRecord,
+        ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
         ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
         published: true,
       }
@@ -94,6 +107,15 @@ export const seedPublished = mutation({
         await ctx.db.insert('scenarios', scenarioDoc)
         inserted += 1
       }
+    }
+
+    const stalePlaceholder = await ctx.db
+      .query('scenarios')
+      .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', 'recap-import-placeholder'))
+      .unique()
+    if (stalePlaceholder?.published) {
+      await ctx.db.patch(stalePlaceholder._id, { published: false })
+      updated += 1
     }
 
     return { inserted, updated }

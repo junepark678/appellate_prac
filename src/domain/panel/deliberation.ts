@@ -4,6 +4,7 @@ import {
   evaluateIssues,
   evaluateRelief,
 } from '../legal/evaluators'
+import { sessionJurisdictionIssues } from '../rules/executable-constraints'
 import type {
   BenchMemo,
   CaseSession,
@@ -81,7 +82,14 @@ export function canSubmitToPanel(session: CaseSession): ToolValidationResult {
   const filedEvents = activeFiledEventSet(session)
   const issues: string[] = []
 
-  for (const eventId of ['opening_brief', 'joint_appendix', 'appellee_brief', 'reply_brief']) {
+  for (const eventId of [
+    'docketing_statement',
+    'transcript_order_acknowledgment',
+    'opening_brief',
+    'joint_appendix',
+    'appellee_brief',
+    'reply_brief',
+  ]) {
     if (!filedEvents.has(eventId)) {
       issues.push(`Panel submission requires ${eventId.replaceAll('_', ' ')}.`)
     }
@@ -90,6 +98,12 @@ export function canSubmitToPanel(session: CaseSession): ToolValidationResult {
   if (!['active', 'submitted'].includes(session.status)) {
     issues.push('Only active or submitted cases can enter panel deliberation.')
   }
+
+  issues.push(
+    ...sessionJurisdictionIssues(session)
+      .filter((issue) => issue.severity === 'error')
+      .map((issue) => issue.message),
+  )
 
   return { accepted: issues.length === 0, issues }
 }
@@ -124,6 +138,7 @@ export function createBenchMemo(session: CaseSession): BenchMemo {
   const relief = evaluateRelief(session)
   const issues = evaluateIssues(session)
   const recommendedDisposition = recommendedRelief(relief)
+  const jurisdictionIssues = sessionJurisdictionIssues(session)
 
   return {
     id: makeId('bench_memo', session.docketEntries.length),
@@ -135,6 +150,10 @@ export function createBenchMemo(session: CaseSession): BenchMemo {
     recommendedDisposition,
     reliefEvaluation: relief,
     risks: [
+      ...(session.scenario.training?.modeledPitfalls ?? []).map(
+        (pitfall) => `Scenario pitfall: ${pitfall}`,
+      ),
+      ...jurisdictionIssues.map((issue) => issue.message),
       ...issues
         .filter((issue) => issue.preservationStatus !== 'preserved')
         .map((issue) => `${issue.label} may be forfeited or underdeveloped.`),
@@ -180,9 +199,27 @@ export function deterministicPanelVote(
   )
   const fallbackOption = options.find((option) => option.available && option.position === 'affirm')
   const reliefOption = preferredOption?.relief ?? fallbackOption?.relief ?? 'affirm'
-  const splitToAffirm = judgeIndex === 2 && reliefOption !== 'affirm' && relief.availableRelief.includes('affirm')
+  const difficulty = session.scenario.training?.difficulty ?? 'intro'
+  const pitfallText = (session.scenario.training?.modeledPitfalls ?? []).join(' ').toLowerCase()
+  const jurisdictionPressure = sessionJurisdictionIssues(session).some(
+    (issue) => issue.severity === 'error',
+  )
+  const splitEligible =
+    difficulty === 'advanced' ||
+    pitfallText.includes('jurisdiction') ||
+    pitfallText.includes('record') ||
+    pitfallText.includes('appendix') ||
+    pitfallText.includes('standard-of-review')
+  const splitToAffirm =
+    !jurisdictionPressure &&
+    splitEligible &&
+    judgeIndex === 2 &&
+    reliefOption !== 'affirm' &&
+    relief.availableRelief.includes('affirm')
   const finalRelief = splitToAffirm ? 'affirm' : reliefOption
   const vote = voteFromRelief(finalRelief)
+  const baseConfidence = difficulty === 'advanced' ? 0.68 : difficulty === 'intermediate' ? 0.74 : 0.8
+  const confidence = jurisdictionPressure ? 0.86 : splitToAffirm ? 0.61 : baseConfidence
 
   return {
     id: makeId('panel_vote', session.panelDeliberation?.votes.length ?? 0),
@@ -191,10 +228,12 @@ export function deterministicPanelVote(
     reliefOption: finalRelief,
     rationale: splitToAffirm
       ? 'The judge would affirm because any error is harmless or insufficiently supported by the appendix.'
-      : `The judge follows the staff memo because available relief includes ${finalRelief}.`,
+      : jurisdictionPressure
+        ? `The judge treats jurisdiction as controlling because available relief includes ${finalRelief}.`
+        : `The judge follows the staff memo because available relief includes ${finalRelief}.`,
     joinsMajority: false,
     ...(splitToAffirm ? { separateWritingType: 'dissent' as const } : {}),
-    confidence: splitToAffirm ? 0.64 : 0.78,
+    confidence,
     createdAt: session.simulatedDate,
   }
 }
@@ -260,6 +299,9 @@ export function validatePanelDisposition(
   const majority = majorityPosition(votes)
   const relief = evaluateRelief(session)
   const ruleIds = new Set(disposition.ruleRefs.map((rule) => rule.ruleId))
+  const jurisdictionBlocks = sessionJurisdictionIssues(session).filter(
+    (issue) => issue.severity === 'error',
+  )
 
   if (votes.length < 3) {
     issues.push('A panel disposition requires three valid judge votes.')
@@ -275,6 +317,14 @@ export function validatePanelDisposition(
 
   const dispositionText = normalizedRelief(disposition.disposition)
   const allowedRelief = new Set(relief.availableRelief.map(normalizedRelief))
+  if (
+    jurisdictionBlocks.length &&
+    !dispositionText.includes('dismiss') &&
+    !dispositionText.includes('jurisdiction')
+  ) {
+    issues.push('Panel disposition cannot bypass unresolved appellate jurisdiction constraints.')
+  }
+
   if (
     !allowedRelief.has(dispositionText) &&
     !dispositionText.includes('opinion') &&

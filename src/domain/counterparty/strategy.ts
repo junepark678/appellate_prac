@@ -1,4 +1,5 @@
 import { evaluateIssues, evaluateRelief, scenarioIssues } from '../legal/evaluators'
+import { sessionJurisdictionIssues } from '../rules/executable-constraints'
 import type { CaseSession, CounterpartyStrategy, FilingRecord } from '../types'
 
 function activeFiledEventSet(session: CaseSession) {
@@ -41,6 +42,8 @@ export function draftCounterpartyStrategy(session: CaseSession): CounterpartyStr
   const issueEvaluations = evaluateIssues(session)
   const relief = evaluateRelief(session)
   const responseDeadline = openResponseDeadline(session)
+  const jurisdictionConstraintIssues = sessionJurisdictionIssues(session)
+  const training = session.scenario.training
 
   const preservedIssues = issueEvaluations
     .filter((issue) => issue.preservationStatus === 'preserved')
@@ -57,6 +60,10 @@ export function draftCounterpartyStrategy(session: CaseSession): CounterpartyStr
     latest?.eventId === 'opening_brief' && !latestText.includes('jurisdiction')
       ? 'The opening brief does not show a strong jurisdictional statement signal.'
       : '',
+    ...jurisdictionConstraintIssues.map((issue) => issue.message),
+    ...(training?.modeledPitfalls
+      .filter((pitfall) => /jurisdiction|finality|rule 54|interlocutory/i.test(pitfall))
+      .map((pitfall) => `Scenario pitfall supports a jurisdiction response: ${pitfall}`) ?? []),
   ].filter(Boolean)
 
   const meritsArguments = scenarioIssues(session).flatMap((issue) =>
@@ -69,6 +76,19 @@ export function draftCounterpartyStrategy(session: CaseSession): CounterpartyStr
     !filedEvents.has('joint_appendix') && filedEvents.has('opening_brief')
       ? 'Move to strike or request appendix deficiency relief if record materials remain absent.'
       : '',
+    !filedEvents.has('docketing_statement') && filedEvents.has('notice_of_appeal')
+      ? 'Ask the clerk to require a docketing statement before merits briefing proceeds.'
+      : '',
+    !filedEvents.has('transcript_order_acknowledgment') && filedEvents.has('notice_of_appeal')
+      ? 'Raise record-ordering defects if appellant relies on transcripts or trial excerpts.'
+      : '',
+    ...(training?.modeledPitfalls
+      .filter((pitfall) => /record|appendix|transcript|sealed|redaction|standard-of-review/i.test(pitfall))
+      .map((pitfall) => `Use the scenario pitfall in procedural opposition: ${pitfall}`) ?? []),
+    ...(training?.expectedProceduralPath
+      .filter((eventId) => !filedEvents.has(eventId) && !['panel_deliberation', 'judgment_entered'].includes(eventId))
+      .slice(0, 2)
+      .map((eventId) => `Expected path not yet satisfied: ${eventId.replaceAll('_', ' ')}.`) ?? []),
     relief.availableRelief.length === 1 && relief.availableRelief[0] === 'affirm'
       ? 'Emphasize procedural default and harmless error to narrow relief.'
       : '',

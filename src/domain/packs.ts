@@ -13,7 +13,7 @@ import scenarioSeed from './scenarios.seed.json'
 const usCourtsFrapSource =
   'https://www.uscourts.gov/forms-rules/current-rules-practice-procedure/federal-rules-appellate-procedure'
 
-const ca4RulesSource = 'https://www.ca4.uscourts.gov/rules-and-procedures'
+const ca4RulesSource = 'https://www.ca4.uscourts.gov/LocalRules/toc.html'
 
 export const ruleRefs = {
   frap3: {
@@ -24,6 +24,11 @@ export const ruleRefs = {
   frap4: {
     ruleId: 'FRAP_4_A_1',
     label: 'Fed. R. App. P. 4(a)(1)',
+    sourceUrl: usCourtsFrapSource,
+  },
+  frap8: {
+    ruleId: 'FRAP_8',
+    label: 'Fed. R. App. P. 8',
     sourceUrl: usCourtsFrapSource,
   },
   frap10: {
@@ -86,6 +91,11 @@ export const ruleRefs = {
     label: 'Fed. R. App. P. 36',
     sourceUrl: usCourtsFrapSource,
   },
+  frap39: {
+    ruleId: 'FRAP_39',
+    label: 'Fed. R. App. P. 39',
+    sourceUrl: usCourtsFrapSource,
+  },
   frap40: {
     ruleId: 'FRAP_40',
     label: 'Fed. R. App. P. 40',
@@ -99,6 +109,36 @@ export const ruleRefs = {
   ca4Local12: {
     ruleId: 'CA4_LR_12',
     label: '4th Cir. Loc. R. 12',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local3: {
+    ruleId: 'CA4_LR_3',
+    label: '4th Cir. Loc. R. 3',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local8: {
+    ruleId: 'CA4_LR_8',
+    label: '4th Cir. Loc. R. 8',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local10: {
+    ruleId: 'CA4_LR_10',
+    label: '4th Cir. Loc. R. 10',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local11: {
+    ruleId: 'CA4_LR_11',
+    label: '4th Cir. Loc. R. 11',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local25: {
+    ruleId: 'CA4_LR_25',
+    label: '4th Cir. Loc. R. 25',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local26_1: {
+    ruleId: 'CA4_LR_26_1',
+    label: '4th Cir. Loc. R. 26.1',
     sourceUrl: ca4RulesSource,
   },
   ca4Local27: {
@@ -121,6 +161,31 @@ export const ruleRefs = {
     label: '4th Cir. Loc. R. 31',
     sourceUrl: ca4RulesSource,
   },
+  ca4Local32: {
+    ruleId: 'CA4_LR_32',
+    label: '4th Cir. Loc. R. 32',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local34: {
+    ruleId: 'CA4_LR_34',
+    label: '4th Cir. Loc. R. 34',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local39: {
+    ruleId: 'CA4_LR_39',
+    label: '4th Cir. Loc. R. 39',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local40: {
+    ruleId: 'CA4_LR_40',
+    label: '4th Cir. Loc. R. 40',
+    sourceUrl: ca4RulesSource,
+  },
+  ca4Local41: {
+    ruleId: 'CA4_LR_41',
+    label: '4th Cir. Loc. R. 41',
+    sourceUrl: ca4RulesSource,
+  },
   ca4Local45: {
     ruleId: 'CA4_LR_45',
     label: '4th Cir. Loc. R. 45',
@@ -139,14 +204,14 @@ const appelleeBriefDeadline: DeadlineEffect = {
   targetEventId: 'appellee_brief',
   offsetDays: 30,
   label: 'Appellee brief due',
-  sourceRuleRefs: [ruleRefs.frap31],
+  sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
 }
 
 const replyBriefDeadline: DeadlineEffect = {
   targetEventId: 'reply_brief',
   offsetDays: 21,
   label: 'Reply brief due',
-  sourceRuleRefs: [ruleRefs.frap31],
+  sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
 }
 
 const pdfRequirement = (id: string, label: string, maxPages?: number) => ({
@@ -171,13 +236,25 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap3, ruleRefs.frap4],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3],
     deadlineEffects: [
       {
         targetEventId: 'appearance_disclosure',
         offsetDays: 14,
         label: 'Appearance and disclosure statement due',
-        sourceRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+        sourceRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+      },
+      {
+        targetEventId: 'docketing_statement',
+        offsetDays: 14,
+        label: 'Docketing statement due',
+        sourceRuleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3],
+      },
+      {
+        targetEventId: 'transcript_order_acknowledgment',
+        offsetDays: 14,
+        label: 'Transcript order acknowledgment due',
+        sourceRuleRefs: [ruleRefs.frap10, ruleRefs.ca4Local11],
       },
     ],
     docketTextTemplate:
@@ -197,10 +274,46 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local12],
+    validationRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
     deadlineEffects: [],
     docketTextTemplate: 'Appearance and disclosure statement filed by {participant}.',
     possibleClerkResponses: ['Filed', 'Corporate disclosure deficiency noted'],
+  },
+  {
+    id: 'docketing_statement',
+    label: 'Docketing Statement',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('docketing_statement_pdf', 'Docketing statement PDF', 20),
+        mustContain: ['docketing statement'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3],
+    deadlineEffects: [],
+    docketTextTemplate: 'Docketing statement filed by {participant}.',
+    possibleClerkResponses: ['Docketing statement filed', 'Jurisdictional issue noted'],
+  },
+  {
+    id: 'transcript_order_acknowledgment',
+    label: 'Transcript Order Acknowledgment',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('transcript_ack_pdf', 'Transcript order acknowledgment PDF', 20),
+        mustContain: ['transcript'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+    deadlineEffects: [],
+    docketTextTemplate: 'Transcript order acknowledgment filed by {participant}.',
+    possibleClerkResponses: ['Transcript order acknowledged', 'Record issue noted'],
   },
   {
     id: 'motion',
@@ -246,6 +359,31 @@ export const filingEvents: FilingEvent[] = [
     possibleClerkResponses: ['Filed', 'Referred to panel with motion'],
   },
   {
+    id: 'motion_stay_pending_appeal',
+    label: 'Motion to Stay or for Injunction Pending Appeal',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('stay_motion_pdf', 'Stay pending appeal motion PDF', 35),
+        mustContain: ['motion', 'stay'],
+      },
+    ],
+    optionalDocuments: [pdfRequirement('district_court_order_pdf', 'District-court stay order PDF')],
+    validationRuleRefs: [ruleRefs.frap8, ruleRefs.frap27, ruleRefs.ca4Local8, ruleRefs.ca4Local27],
+    deadlineEffects: [
+      {
+        targetEventId: 'motion_response',
+        offsetDays: 7,
+        label: 'Response to stay motion due',
+        sourceRuleRefs: [ruleRefs.frap8, ruleRefs.frap27, ruleRefs.ca4Local27],
+      },
+    ],
+    docketTextTemplate: 'Motion to stay or for injunction pending appeal filed by {participant}: {title}.',
+    possibleClerkResponses: ['Emergency motion referred to panel', 'Response requested'],
+  },
+  {
     id: 'opening_brief',
     label: 'Opening Brief',
     domain: 'civil_appeal',
@@ -263,6 +401,7 @@ export const filingEvents: FilingEvent[] = [
       ruleRefs.frap31,
       ruleRefs.frap32,
       ruleRefs.ca4Local28,
+      ruleRefs.ca4Local32,
     ],
     deadlineEffects: [appelleeBriefDeadline],
     docketTextTemplate: 'Opening brief filed by {participant}.',
@@ -299,7 +438,7 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap31, ruleRefs.frap32],
+    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap31, ruleRefs.frap32, ruleRefs.ca4Local32],
     deadlineEffects: [replyBriefDeadline],
     docketTextTemplate: 'Appellee brief filed by {participant}.',
     possibleClerkResponses: ['Brief accepted', 'Deficiency notice issued'],
@@ -317,7 +456,7 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap31, ruleRefs.frap32],
+    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap31, ruleRefs.frap32, ruleRefs.ca4Local32],
     deadlineEffects: [],
     docketTextTemplate: 'Reply brief filed by {participant}.',
     possibleClerkResponses: ['Brief accepted', 'Submitted to panel'],
@@ -414,10 +553,28 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap32, ruleRefs.ca4Local28],
+    validationRuleRefs: [ruleRefs.frap28, ruleRefs.frap32, ruleRefs.ca4Local28, ruleRefs.ca4Local32],
     deadlineEffects: [],
     docketTextTemplate: 'Corrected brief filed by {participant}: {title}.',
     possibleClerkResponses: ['Deficiency cured', 'Further deficiency noted'],
+  },
+  {
+    id: 'rule_28j_letter',
+    label: 'Rule 28(j) Letter',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'amicus'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('rule_28j_pdf', 'Rule 28(j) letter PDF', 8),
+        mustContain: ['28(j)'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap28, ruleRefs.ca4Local28],
+    deadlineEffects: [],
+    docketTextTemplate: 'Rule 28(j) letter filed by {participant}.',
+    possibleClerkResponses: ['Filed', 'Returned if post-judgment'],
   },
   {
     id: 'motion_extend_time',
@@ -457,7 +614,7 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap27, ruleRefs.frap32],
+    validationRuleRefs: [ruleRefs.frap27, ruleRefs.frap32, ruleRefs.ca4Local32],
     deadlineEffects: [
       {
         targetEventId: 'motion_response',
@@ -482,13 +639,13 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [pdfRequirement('sealed_material_pdf', 'Proposed sealed material PDF')],
-    validationRuleRefs: [ruleRefs.frap25, ruleRefs.frap27, ruleRefs.ca4Local27],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.frap27, ruleRefs.ca4Local25, ruleRefs.ca4Local27],
     deadlineEffects: [
       {
         targetEventId: 'sealed_filing_acknowledgment',
         offsetDays: 0,
         label: 'Sealed filing acknowledgement due',
-        sourceRuleRefs: [ruleRefs.frap25],
+        sourceRuleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
       },
     ],
     docketTextTemplate: 'Motion to seal filed by {participant}: {title}.',
@@ -507,7 +664,7 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap25],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
     deadlineEffects: [],
     docketTextTemplate: 'Sealed filing acknowledgement filed by {participant}.',
     possibleClerkResponses: ['Acknowledgement accepted', 'Redaction issue noted'],
@@ -525,7 +682,7 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap27, ruleRefs.frap41],
+    validationRuleRefs: [ruleRefs.frap27, ruleRefs.frap41, ruleRefs.ca4Local41],
     deadlineEffects: [],
     docketTextTemplate: 'Motion to stay mandate filed by {participant}: {title}.',
     possibleClerkResponses: ['Referred to panel', 'Response requested'],
@@ -543,10 +700,28 @@ export const filingEvents: FilingEvent[] = [
       },
     ],
     optionalDocuments: [],
-    validationRuleRefs: [ruleRefs.frap40],
+    validationRuleRefs: [ruleRefs.frap40, ruleRefs.ca4Local40],
     deadlineEffects: [],
     docketTextTemplate: 'Petition for rehearing filed by {participant}.',
     possibleClerkResponses: ['Distributed to panel', 'Denied as untimely'],
+  },
+  {
+    id: 'bill_of_costs',
+    label: 'Bill of Costs',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('costs_pdf', 'Bill of costs PDF', 20),
+        mustContain: ['costs'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap39, ruleRefs.ca4Local39],
+    deadlineEffects: [],
+    docketTextTemplate: 'Bill of costs filed by {participant}.',
+    possibleClerkResponses: ['Costs taxed if timely', 'Returned if premature'],
   },
 ]
 
@@ -580,6 +755,22 @@ const frapItems: RuleItem[] = [
     ],
     simulatorNotes:
       'The MVP gives example deadline pressure without real waiting or live legal advice.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_8',
+    topic: 'stay_pending_appeal',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText:
+      'Stay or injunction pending appeal practice requires a motion and district-court-first information unless impracticable.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'stay or injunction pending appeal motion' },
+      { kind: 'event_sequence', value: 'district-court-first signal' },
+    ],
+    simulatorNotes:
+      'The validator warns when emergency stay papers omit district-court-first information.',
   },
   {
     jurisdiction: 'us-federal',
@@ -746,6 +937,18 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_39',
+    topic: 'costs',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: usCourtsFrapSource,
+    plainText: 'Costs are handled after judgment under appellate cost rules.',
+    structuredConstraints: [{ kind: 'event_sequence', value: 'post-judgment bill of costs' }],
+    simulatorNotes:
+      'Bills of costs are rejected as premature before judgment is entered.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_40',
     topic: 'rehearing',
     effectiveFrom: '2025-12-01',
@@ -773,9 +976,66 @@ const frapItems: RuleItem[] = [
 const ca4Items: RuleItem[] = [
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_3',
+    topic: 'notice_and_docketing_statement',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Fourth Circuit local practice includes filing fees and docketing statement requirements for new appeals.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'docketing statement' },
+      { kind: 'fee_or_ifp', value: 'filing or docketing fee signal' },
+    ],
+    simulatorNotes:
+      'After a notice of appeal, the simulator expects a docketing statement before merits scheduling.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_8',
+    topic: 'stay_pending_appeal',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Fourth Circuit local stay practice supplements federal stay and emergency motion practice.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'stay motion and emergency handling' },
+    ],
+    simulatorNotes:
+      'Stay motions can trigger expedited response deadlines and panel referral.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_10',
+    topic: 'record_on_appeal',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local record rules govern record retention, transcripts, and supplemental record handling.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'record and transcript materials' },
+    ],
+    simulatorNotes:
+      'Record defects are modeled as warnings, deficiency notices, and limited panel relief.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_11',
+    topic: 'transcript_acknowledgment',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local forwarding-record practice includes transcript acknowledgments and transcript timing.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'transcript order acknowledgment' },
+    ],
+    simulatorNotes:
+      'The opening stage expects transcript order acknowledgment before briefing is scheduled.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_12',
     topic: 'appearance_disclosure',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText:
@@ -788,9 +1048,37 @@ const ca4Items: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_25',
+    topic: 'filing_service_sealed_materials',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local filing and service rules include CM/ECF practice and sealed or confidential materials handling.',
+    structuredConstraints: [
+      { kind: 'service', value: 'electronic filing and service' },
+      { kind: 'sealed_filing', value: 'sealed and confidential material handling' },
+      { kind: 'privacy_redaction', value: 'redaction acknowledgement' },
+    ],
+    simulatorNotes:
+      'Sealed filings without redaction acknowledgement are rejected by preflight.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_26_1',
+    topic: 'disclosure',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local disclosure statement practice supplements federal disclosure requirements.',
+    structuredConstraints: [{ kind: 'certificate', value: 'disclosure statement' }],
+    simulatorNotes:
+      'Disclosure sequencing is checked before opening-brief scheduling.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_27',
     topic: 'motions',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText: 'Local motion practice can alter clerk handling and panel referral.',
@@ -802,7 +1090,7 @@ const ca4Items: RuleItem[] = [
     jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_28',
     topic: 'briefs',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText: 'Fourth Circuit local briefing rules supplement federal brief requirements.',
@@ -816,7 +1104,7 @@ const ca4Items: RuleItem[] = [
     jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_30',
     topic: 'appendix',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText: 'Appendix practice is governed by federal and local appellate rules.',
@@ -828,7 +1116,7 @@ const ca4Items: RuleItem[] = [
     jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_31',
     topic: 'briefing_deadlines',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText: 'Fourth Circuit local practice supplements federal briefing schedules.',
@@ -840,9 +1128,72 @@ const ca4Items: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_32',
+    topic: 'form_and_length',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local form rules supplement federal form, appendix reproduction, length, and correction rules.',
+    structuredConstraints: [
+      { kind: 'word_limit', value: 'brief type-volume and overlength handling' },
+      { kind: 'attachment_type', value: 'corrected briefs and appendices' },
+    ],
+    simulatorNotes:
+      'The validator warns about potentially overlength briefs and requires compliance certificates.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_34',
+    topic: 'oral_argument',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local oral argument practice includes statements regarding the need for oral argument.',
+    structuredConstraints: [{ kind: 'brief_content_section', value: 'oral argument statement' }],
+    simulatorNotes:
+      'Merits briefs without an oral-argument signal receive a training warning.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_39',
+    topic: 'costs',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local cost rules govern reproduction costs, bills of costs, and district-court cost recovery.',
+    structuredConstraints: [{ kind: 'event_sequence', value: 'bill of costs after judgment' }],
+    simulatorNotes:
+      'Bill-of-costs filings are available only after judgment in the simulator.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_40',
+    topic: 'rehearing',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local rehearing rules govern filing, purpose, timing, and post-denial papers.',
+    structuredConstraints: [{ kind: 'deadline', value: 'post-judgment rehearing petition' }],
+    simulatorNotes:
+      'Rehearing petitions are rejected before judgment and create post-judgment workflow after judgment.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_41',
+    topic: 'mandate',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4RulesSource,
+    plainText: 'Local mandate practice supplements federal mandate issuance and stay rules.',
+    structuredConstraints: [{ kind: 'deadline', value: 'mandate issuance and stay' }],
+    simulatorNotes:
+      'Mandate stays are post-judgment events and must cite mandate authority.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_45',
     topic: 'clerk_authority',
-    effectiveFrom: '2026-05-23',
+    effectiveFrom: '2026-03-23',
     sourceLabel: 'Fourth Circuit Local Rules and IOPs',
     sourceUrl: ca4RulesSource,
     plainText: 'The clerk handles routine procedural matters under local practice.',
@@ -894,9 +1245,9 @@ export const rulePacks: RulePack[] = [
     courtSystem: 'federal',
     courtLevel: 'intermediate_appellate',
     procedureDomain: 'civil_appeal',
-    version: '2026-05-23',
+    version: '2026-03-23',
     sourceUrl: ca4RulesSource,
-    sourceVersionIds: ['ca4-current:2026-05-23'],
+    sourceVersionIds: ['ca4-current:2026-03-23'],
     items: ca4Items,
   },
 ]

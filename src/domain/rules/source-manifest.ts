@@ -33,20 +33,20 @@ export const fourthCircuitCivilAppealSourceManifest: RuleSourceManifestItem[] = 
     ],
   },
   {
-    sourceVersionId: 'ca4-local-rules-iop-2026-04',
-    moduleId: 'ca4-local-rules-2026',
+    sourceVersionId: 'ca4-current:2026-03-23',
+    moduleId: 'ca4-current',
     label: 'Fourth Circuit Local Rules and Internal Operating Procedures',
     jurisdiction: 'US-CA4',
-    version: '2026-04',
-    effectiveFrom: '2026-04-01',
-    sourceUrl: 'https://www.ca4.uscourts.gov/Rules/Rulebook_TOC.pdf',
+    version: '2026-03-23',
+    effectiveFrom: '2026-03-23',
+    sourceUrl: 'https://www.ca4.uscourts.gov/LocalRules/toc.html',
     sourceSystem: 'court',
     parserVersion: 'manual-v1',
     ruleRefs: [
       {
         ruleId: 'CA4-LOCAL',
         label: 'Fourth Circuit Rules and IOPs',
-        sourceUrl: 'https://www.ca4.uscourts.gov/Rules/Rulebook_TOC.pdf',
+        sourceUrl: 'https://www.ca4.uscourts.gov/LocalRules/toc.html',
       },
     ],
   },
@@ -69,4 +69,3 @@ export const fourthCircuitCivilAppealSourceManifest: RuleSourceManifestItem[] = 
     ],
   },
 ]
-

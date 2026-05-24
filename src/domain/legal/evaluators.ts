@@ -18,6 +18,31 @@ function activeFiledEventSet(session: CaseSession) {
   return new Set(activeFilings(session).map((filing) => filing.eventId))
 }
 
+function scenarioText(session: CaseSession) {
+  return [
+    session.scenario.id,
+    session.scenario.proceduralPosture,
+    ...session.scenario.issuesPresented,
+    ...(session.scenario.training?.modeledPitfalls ?? []),
+    ...(session.scenario.issues?.map((issue) => `${issue.id} ${issue.label}`) ?? []),
+  ]
+    .join(' ')
+    .toLowerCase()
+}
+
+function hasFinalityTrap(session: CaseSession) {
+  const text = scenarioText(session)
+  if (!text.includes('rule 54') && !text.includes('partial judgment')) return false
+  return !session.docketEntries.some((entry) =>
+    /rule 54\(b\)|final judgment|certification/i.test(`${entry.title} ${entry.text}`),
+  )
+}
+
+function hasQualifiedImmunityLimitedJurisdiction(session: CaseSession) {
+  const text = scenarioText(session)
+  return text.includes('qualified immunity') && text.includes('legal questions')
+}
+
 function allDocumentsForEvent(session: CaseSession, eventId: string): UploadedDocument[] {
   return activeFilings(session)
     .filter((filing) => filing.eventId === eventId)
@@ -198,6 +223,7 @@ export function evaluateRelief(session: CaseSession): ReliefEvaluation {
       ['strong', 'mixed'].includes(issue.recordSupport),
   )
   const jurisdictionDefect = !activeFiledEventSet(session).has('notice_of_appeal')
+  const finalityTrap = hasFinalityTrap(session)
 
   if (session.status === 'dismissed' || session.procedureState === 'dismissed') {
     return {
@@ -212,6 +238,33 @@ export function evaluateRelief(session: CaseSession): ReliefEvaluation {
       availableRelief: ['affirm', 'dismiss for lack of jurisdiction'],
       barredRelief: ['reverse', 'vacate', 'remand'],
       reasons: ['Merits relief is unavailable until the notice of appeal path is satisfied.'],
+    }
+  }
+
+  if (finalityTrap) {
+    return {
+      availableRelief: ['dismiss for lack of jurisdiction'],
+      barredRelief: ['affirm', 'reverse', 'vacate', 'vacate in part', 'remand'],
+      reasons: [
+        'The scenario presents a partial judgment without a final judgment or Rule 54(b) certification.',
+      ],
+    }
+  }
+
+  if (hasQualifiedImmunityLimitedJurisdiction(session)) {
+    const preservedLegalQuestion = issues.some(
+      (issue) =>
+        issue.issueId.includes('legal-question') &&
+        issue.preservationStatus === 'preserved',
+    )
+    return {
+      availableRelief: preservedLegalQuestion
+        ? ['affirm', 'dismiss for lack of jurisdiction', 'remand']
+        : ['affirm', 'dismiss for lack of jurisdiction'],
+      barredRelief: ['reverse', 'vacate in part', 'fact-bound reversal'],
+      reasons: [
+        'Qualified-immunity interlocutory review is limited to legal questions and does not allow ordinary fact-bound merits relief.',
+      ],
     }
   }
 
@@ -231,7 +284,14 @@ export function evaluateDispositionOptions(session: CaseSession): DispositionOpt
   const available = new Set(relief.availableRelief.map((value) => value.toLowerCase()))
 
   return [
-    { position: 'affirm', relief: 'affirm', available: true, reasons: ['Affirmance is always a valid merits disposition if jurisdiction exists.'] },
+    {
+      position: 'affirm',
+      relief: 'affirm',
+      available: available.has('affirm'),
+      reasons: available.has('affirm')
+        ? ['Affirmance is available when jurisdiction and merits posture permit it.']
+        : relief.reasons,
+    },
     { position: 'vacate', relief: 'vacate', available: available.has('vacate'), reasons: relief.reasons },
     { position: 'vacate_in_part', relief: 'vacate in part', available: available.has('vacate in part'), reasons: relief.reasons },
     { position: 'remand', relief: 'remand', available: available.has('remand'), reasons: relief.reasons },

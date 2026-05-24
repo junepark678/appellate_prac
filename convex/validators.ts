@@ -28,6 +28,8 @@ export const procedureStateValidator = v.union(
   v.literal('appearance_pending'),
   v.literal('fee_or_ifp_pending'),
   v.literal('record_pending'),
+  v.literal('docketing_statement_pending'),
+  v.literal('record_ordering_pending'),
   v.literal('briefing_schedule_pending'),
   v.literal('opening_brief_pending'),
   v.literal('appendix_pending'),
@@ -339,6 +341,46 @@ export const scenarioIssueValidator = v.object({
   possibleRelief: v.array(v.string()),
 })
 
+export const scenarioTrainingMetadataValidator = v.object({
+  difficulty: v.union(
+    v.literal('intro'),
+    v.literal('intermediate'),
+    v.literal('advanced'),
+  ),
+  practiceFocus: v.array(
+    v.union(
+      v.literal('jurisdiction'),
+      v.literal('case_opening'),
+      v.literal('motions'),
+      v.literal('briefing'),
+      v.literal('record_appendix'),
+      v.literal('amicus'),
+      v.literal('panel_merits'),
+      v.literal('post_judgment'),
+      v.literal('sealed_materials'),
+    ),
+  ),
+  learningObjectives: v.array(v.string()),
+  modeledPitfalls: v.array(v.string()),
+  expectedProceduralPath: v.array(v.string()),
+  likelyAmici: v.optional(
+    v.array(
+      v.object({
+        organizationName: v.string(),
+        organizationType: v.string(),
+        supportsRole: v.union(
+          v.literal('appellant'),
+          v.literal('appellee'),
+          v.literal('neither'),
+        ),
+        triggerIssueIds: v.array(v.string()),
+        interestStatement: v.string(),
+        requiresLeave: v.boolean(),
+      }),
+    ),
+  ),
+})
+
 export const scenarioValidator = v.object({
   id: v.string(),
   title: v.string(),
@@ -356,6 +398,7 @@ export const scenarioValidator = v.object({
   meritsRecord: v.array(v.string()),
   issues: v.optional(v.array(scenarioIssueValidator)),
   recordExcerpts: v.optional(v.array(scenarioRecordExcerptValidator)),
+  training: v.optional(scenarioTrainingMetadataValidator),
   sourceCaseUrl: v.optional(v.string()),
 })
 
