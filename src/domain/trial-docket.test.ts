@@ -12,10 +12,12 @@ describe('trial docket records', () => {
     for (const scenario of scenarios) {
       const docket = createTrialDocket(createInitialSession(scenario.id))
       expect(docket.caption).toBeTruthy()
-      expect(docket.entries.length).toBeGreaterThanOrEqual(4)
+      expect(docket.entries.length).toBeGreaterThanOrEqual(18)
+      expect(
+        docket.entries.filter((entry) => entry.documents.length > 0).length,
+      ).toBeGreaterThanOrEqual(4)
 
       for (const entry of docket.entries) {
-        expect(entry.documents.length).toBeGreaterThanOrEqual(1)
         for (const document of entry.documents) {
           expect(document.mimeType).toBe('application/pdf')
           expect(document.fileName.endsWith('.pdf')).toBe(true)
