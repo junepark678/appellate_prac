@@ -503,7 +503,7 @@ export const scenarioDocumentAssetValidator = v.object({
     v.literal('courtlistener'),
     v.literal('uploaded'),
   ),
-  publicUrl: v.optional(v.string()),
+  fileUrl: v.optional(v.string()),
   sourceUrl: v.optional(v.string()),
   storageId: v.optional(v.string()),
   sha256: v.optional(v.string()),
@@ -531,6 +531,15 @@ export const scenarioTrialDocketValidator = v.object({
 
 export const scenarioValidator = v.object({
   id: v.string(),
+  visibility: v.optional(v.union(v.literal('public_template'), v.literal('private'))),
+  ownerUserId: v.optional(v.string()),
+  scenarioFamilyKey: v.optional(v.string()),
+  revision: v.optional(v.number()),
+  revisionStatus: v.optional(
+    v.union(v.literal('draft'), v.literal('published'), v.literal('archived')),
+  ),
+  createdFromScenarioId: v.optional(v.string()),
+  supersededByScenarioId: v.optional(v.string()),
   title: v.string(),
   source: v.union(
     v.literal('synthetic'),

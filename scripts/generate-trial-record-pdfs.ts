@@ -435,7 +435,6 @@ function createAssets(scenario: Scenario, docketEntries: TrialDocketEntryDraft[]
       fileName,
       mimeType: 'application/pdf',
       source: 'synthetic',
-      publicUrl: `/trial-records/${scenario.id}/${fileName}`,
       sizeBytes: Buffer.byteLength(pdf),
       pageCount: 1,
       extractedText,

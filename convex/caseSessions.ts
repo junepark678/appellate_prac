@@ -31,6 +31,7 @@ import { applyAcceptedActorWorkProduct } from '../src/domain/actors/effects'
 import {
   applyToolCall,
   createInitialSession,
+  createInitialSessionForScenario,
   fileDraft,
   nextExpectedToolCall,
   validateFiling,
@@ -48,10 +49,12 @@ import type {
   ScenarioIssue,
   ScenarioRecordExcerpt,
   Scenario,
+  ScenarioDocumentAsset,
   TrialDocket,
   TrialDocketEntry,
   UploadedDocument,
 } from '../src/domain/types'
+import { createTrialDocket } from '../src/domain/trial-docket'
 import {
   getAvailableEcfEventDefinitions,
   preflightEcfFiling,
@@ -124,10 +127,27 @@ function parseOptionalJsonField<T>(json: string | undefined, label: string): T |
   return json ? parseJsonField<T>(json, label) : undefined
 }
 
+function scenarioDocumentAssetFromDoc(doc: Doc<'scenarioDocumentAssets'>): ScenarioDocumentAsset {
+  return {
+    id: doc.assetKey,
+    label: doc.label,
+    fileName: doc.fileName,
+    mimeType: doc.mimeType,
+    source: doc.source,
+    storageId: doc.storageId,
+    ...(doc.sha256 ? { sha256: doc.sha256 } : {}),
+    sizeBytes: doc.sizeBytes,
+    pageCount: doc.pageCount,
+    ...(doc.extractedText ? { extractedText: doc.extractedText } : {}),
+    ...(doc.sourceUrl ? { sourceUrl: doc.sourceUrl } : {}),
+  }
+}
+
 function scenarioFromDoc(
   doc: Doc<'scenarios'>,
   issues: ScenarioIssue[] = [],
   recordExcerpts: ScenarioRecordExcerpt[] = [],
+  assets: ScenarioDocumentAsset[] = [],
 ): Scenario {
   const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
   const training = parseOptionalJsonField<Scenario['training']>(
@@ -141,9 +161,20 @@ function scenarioFromDoc(
   const documentAssets = parseOptionalJsonField<Scenario['documentAssets']>(
     doc.documentAssetsJson,
     `scenario ${doc._id} document assets`,
-  )
+  )?.map((asset) => {
+    const { publicUrl: _publicUrl, fileUrl: _fileUrl, ...assetWithoutUrls } =
+      asset as ScenarioDocumentAsset & { publicUrl?: string }
+    return assetWithoutUrls
+  })
   return {
     id: doc.scenarioKey,
+    visibility: doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template'),
+    ...(doc.ownerUserId ? { ownerUserId: doc.ownerUserId } : {}),
+    scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
+    revision: doc.revision ?? 1,
+    revisionStatus: doc.revisionStatus ?? (doc.published ? 'published' : 'draft'),
+    ...(doc.createdFromScenarioId ? { createdFromScenarioId: doc.createdFromScenarioId } : {}),
+    ...(doc.supersededByScenarioId ? { supersededByScenarioId: doc.supersededByScenarioId } : {}),
     title: doc.title,
     source: doc.source,
     courtPackId: doc.courtPackId,
@@ -157,24 +188,42 @@ function scenarioFromDoc(
     ...(recordExcerpts.length ? { recordExcerpts } : {}),
     ...(training ? { training } : {}),
     ...(trialDocket ? { trialDocket } : {}),
-    ...(documentAssets ? { documentAssets } : {}),
+    ...(assets.length ? { documentAssets: assets } : documentAssets ? { documentAssets } : {}),
     ...sourceCaseUrl,
   }
 }
 
-async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
+async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<'users'>) {
   const existing = await ctx.db
     .query('scenarios')
     .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
     .unique()
 
+  if (existing) {
+    const visibility = existing.visibility ?? (existing.ownerUserId ? 'private' : 'public_template')
+    if (visibility === 'private' && existing.ownerUserId !== userId) {
+      throw new Error(`Unknown scenario: ${scenarioKey}`)
+    }
+    if (
+      visibility === 'public_template' &&
+      (existing.revisionStatus ?? (existing.published ? 'published' : 'draft')) !== 'published'
+    ) {
+      throw new Error(`Unknown scenario: ${scenarioKey}`)
+    }
+  }
+
   const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
   if (!bundled) {
+    if (existing) return existing
     throw new Error(`Unknown scenario: ${scenarioKey}`)
   }
 
   if (existing) {
     await ctx.db.patch(existing._id, {
+      visibility: 'public_template',
+      scenarioFamilyKey: bundled.id,
+      revision: existing.revision ?? 1,
+      revisionStatus: 'published',
       title: bundled.title,
       source: bundled.source,
       courtPackId: bundled.courtPackId,
@@ -186,9 +235,7 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
       meritsRecord: bundled.meritsRecord,
       ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
       ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
-      ...(bundled.documentAssets
-        ? { documentAssetsJson: JSON.stringify(bundled.documentAssets) }
-        : {}),
+      documentAssetsJson: undefined,
       ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
       published: true,
     })
@@ -231,11 +278,15 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
         })
       }
     }
-    return existing
+    return (await ctx.db.get(existing._id)) ?? existing
   }
 
   const scenarioId = await ctx.db.insert('scenarios', {
     scenarioKey: bundled.id,
+    visibility: 'public_template',
+    scenarioFamilyKey: bundled.id,
+    revision: 1,
+    revisionStatus: 'published',
     title: bundled.title,
     source: bundled.source,
     courtPackId: bundled.courtPackId,
@@ -247,9 +298,6 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
     meritsRecord: bundled.meritsRecord,
     ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
     ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
-    ...(bundled.documentAssets
-      ? { documentAssetsJson: JSON.stringify(bundled.documentAssets) }
-      : {}),
     ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
     published: true,
   })
@@ -445,6 +493,7 @@ async function assembleCaseSession(
   const [
     scenarioIssues,
     scenarioRecordExcerpts,
+    scenarioDocumentAssets,
     participants,
     filings,
     documentAnalyses,
@@ -465,6 +514,10 @@ async function assembleCaseSession(
       .collect(),
     ctx.db
       .query('scenarioRecordExcerpts')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
+      .collect(),
+    ctx.db
+      .query('scenarioDocumentAssets')
       .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
       .collect(),
     ctx.db
@@ -594,6 +647,7 @@ async function assembleCaseSession(
         text: excerpt.text,
         citedByIssueIds: excerpt.citedByIssueIds,
       })),
+      scenarioDocumentAssets.map(scenarioDocumentAssetFromDoc),
     ),
     courtPackId: caseSession.courtPackId,
     status: caseSession.status,
@@ -1189,6 +1243,33 @@ function normalizeTrialDocketEntries(entriesJson: string): TrialDocketEntry[] {
   }))
 }
 
+async function withAuthorizedTrialDocketFileUrls(
+  ctx: ReadCtx,
+  trialDocket: TrialDocket,
+): Promise<TrialDocket> {
+  return {
+    ...trialDocket,
+    entries: await Promise.all(
+      trialDocket.entries.map(async (entry) => ({
+        ...entry,
+        documents: await Promise.all(
+          entry.documents.map(async (document) => {
+            const {
+              fileUrl: _fileUrl,
+              publicUrl: _publicUrl,
+              ...documentWithoutUrl
+            } = document as typeof document & { publicUrl?: string }
+            const storageId = document.storageId as Id<'_storage'> | undefined
+            if (!storageId) return documentWithoutUrl
+            const fileUrl = await ctx.storage.getUrl(storageId)
+            return fileUrl ? { ...documentWithoutUrl, fileUrl } : documentWithoutUrl
+          }),
+        ),
+      })),
+    ),
+  }
+}
+
 function promptHashForSession(session: CaseSession) {
   return [
     session.id,
@@ -1219,8 +1300,46 @@ export const create = mutation({
   handler: async (ctx, args) => {
     const user = await upsertCurrentUserDoc(ctx)
     const scenarioKey = args.scenarioId ?? defaultScenarioKey
-    const scenario = await ensureScenarioDoc(ctx, scenarioKey)
-    const initialSession = createInitialSession(scenario.scenarioKey)
+    const scenario = await ensureScenarioDoc(ctx, scenarioKey, user._id)
+    const [scenarioIssues, scenarioRecordExcerpts, scenarioDocumentAssets] = await Promise.all([
+      ctx.db
+        .query('scenarioIssues')
+        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
+        .collect(),
+      ctx.db
+        .query('scenarioRecordExcerpts')
+        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
+        .collect(),
+      ctx.db
+        .query('scenarioDocumentAssets')
+        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
+        .collect(),
+    ])
+    const scenarioModel = scenarioFromDoc(
+      scenario,
+      scenarioIssues.map((issue) => ({
+        id: issue.issueId,
+        label: issue.label,
+        standardOfReview: issue.standardOfReview,
+        preservationFacts: issue.preservationFacts,
+        recordSupportFacts: issue.recordSupportFacts,
+        likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+        likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+        possibleRelief: issue.possibleRelief,
+      })),
+      scenarioRecordExcerpts.map((excerpt) => ({
+        id: excerpt.excerptId,
+        label: excerpt.label,
+        source: excerpt.source,
+        text: excerpt.text,
+        citedByIssueIds: excerpt.citedByIssueIds,
+      })),
+      scenarioDocumentAssets.map(scenarioDocumentAssetFromDoc),
+    )
+    const bundledScenario = seedScenarios.some((candidate) => candidate.id === scenario.scenarioKey)
+    const initialSession = bundledScenario
+      ? createInitialSession(scenario.scenarioKey)
+      : createInitialSessionForScenario(scenarioModel)
     const initialProcedureState = inferProcedureState(initialSession)
     const caseSessionId = await ctx.db.insert('caseSessions', {
       scenarioId: scenario._id,
@@ -1788,21 +1907,24 @@ export const getTrialDocketForCurrentUser = query({
     const { user } = await getCurrentUser(ctx)
     if (!user) return null
 
-    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSession = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const imports = await ctx.db
       .query('trialDocketImports')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
       .collect()
     const latest = imports.sort((a, b) => b._creationTime - a._creationTime)[0]
-    if (!latest) return null
-
-    return {
-      caption: latest.caption,
-      court: latest.court,
-      docketNumber: latest.docketNumber,
-      ...(latest.sourceUrl ? { sourceUrl: latest.sourceUrl } : {}),
-      entries: normalizeTrialDocketEntries(latest.entriesJson),
+    if (latest) {
+      return withAuthorizedTrialDocketFileUrls(ctx, {
+        caption: latest.caption,
+        court: latest.court,
+        docketNumber: latest.docketNumber,
+        ...(latest.sourceUrl ? { sourceUrl: latest.sourceUrl } : {}),
+        entries: normalizeTrialDocketEntries(latest.entriesJson),
+      })
     }
+
+    const session = await assembleCaseSession(ctx, caseSession)
+    return withAuthorizedTrialDocketFileUrls(ctx, createTrialDocket(session))
   },
 })
 

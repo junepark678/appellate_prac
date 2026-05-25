@@ -149,6 +149,10 @@ function courtPackCurrent(doc: Doc<'courtPacks'>) {
 function scenarioDoc(scenario: Scenario) {
   return {
     scenarioKey: scenario.id,
+    visibility: 'public_template' as const,
+    scenarioFamilyKey: scenario.id,
+    revision: 1,
+    revisionStatus: 'published' as const,
     title: scenario.title,
     source: scenario.source,
     courtPackId: scenario.courtPackId,
@@ -160,9 +164,6 @@ function scenarioDoc(scenario: Scenario) {
     meritsRecord: scenario.meritsRecord,
     ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
     ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
-    ...(scenario.documentAssets
-      ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
-      : {}),
     ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
     published: true,
   }
@@ -171,6 +172,10 @@ function scenarioDoc(scenario: Scenario) {
 function scenarioCurrent(doc: Doc<'scenarios'>) {
   return {
     scenarioKey: doc.scenarioKey,
+    visibility: doc.visibility ?? (doc.ownerUserId ? 'private' as const : 'public_template' as const),
+    scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
+    revision: doc.revision ?? 1,
+    revisionStatus: doc.revisionStatus ?? (doc.published ? 'published' as const : 'draft' as const),
     title: doc.title,
     source: doc.source,
     courtPackId: doc.courtPackId,
@@ -182,7 +187,6 @@ function scenarioCurrent(doc: Doc<'scenarios'>) {
     meritsRecord: doc.meritsRecord,
     ...(doc.trainingJson ? { trainingJson: doc.trainingJson } : {}),
     ...(doc.trialDocketJson ? { trialDocketJson: doc.trialDocketJson } : {}),
-    ...(doc.documentAssetsJson ? { documentAssetsJson: doc.documentAssetsJson } : {}),
     ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
     published: doc.published,
   }
@@ -533,7 +537,10 @@ async function upsertScenarios(ctx: MutationCtx) {
       await ctx.db.insert('scenarios', doc)
       counts.inserted += 1
     } else if (!sameRecord(scenarioCurrent(existing), doc)) {
-      await ctx.db.patch(existing._id, doc)
+      await ctx.db.patch(existing._id, { ...doc, documentAssetsJson: undefined })
+      counts.updated += 1
+    } else if (existing.documentAssetsJson) {
+      await ctx.db.patch(existing._id, { documentAssetsJson: undefined })
       counts.updated += 1
     }
   }

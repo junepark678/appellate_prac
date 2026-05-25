@@ -183,7 +183,6 @@
         "fileName": "001-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-employment-retaliation/001-complaint.pdf",
         "sizeBytes": 1310,
         "pageCount": 1,
         "extractedText": "Complaint in Jordan v. Meridian Analytics, Inc.. Procedural posture: District court granted summary judgment for employer on causation and pretext. Record material: Employee reported compliance irregularities and was terminated six weeks later. Issue: Comparator evidence at summary judgment. Standard of review: de novo. Record excerpt: Termination timeline. Jordan reported compliance irregularities on January 4 and was terminated six weeks later during a claimed reduction in force. Nature of suit: Civil Rights - Employment. Lower tribunal: U.S. District Court for the Eastern District of Virginia."
@@ -194,7 +193,6 @@
         "fileName": "022-motion-for-summary-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-employment-retaliation/022-motion-for-summary-judgment.pdf",
         "sizeBytes": 1320,
         "pageCount": 1,
         "extractedText": "Motion for Summary Judgment in Jordan v. Meridian Analytics, Inc.. Procedural posture: District court granted summary judgment for employer on causation and pretext. Record material: Employer cited a reduction in force and documented performance concerns. Issue: Application of the summary judgment standard. Standard of review: de novo. Record excerpt: Comparator personnel memoranda. Two employees with similar audit findings were retained after the reduction-in-force review. Nature of suit: Civil Rights - Employment. Lower tribunal: U.S. District Court for the Eastern District of Virginia."
@@ -205,7 +203,6 @@
         "fileName": "031-memorandum-opinion-and-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-employment-retaliation/031-memorandum-opinion-and-order.pdf",
         "sizeBytes": 1380,
         "pageCount": 1,
         "extractedText": "Memorandum Opinion and Order in Jordan v. Meridian Analytics, Inc.. Procedural posture: District court granted summary judgment for employer on causation and pretext. Record material: Two comparator employees were retained despite similar audit findings. Issue: Late evidentiary objection and excluded declaration. Standard of review: abuse of discretion or forfeiture-sensitive review. Record excerpt: Summary judgment order. The order recited the summary judgment standard but resolved the comparator inference in the employer's favor. Nature of suit: Civil Rights - Employment. Lower tribunal: U.S. District Court for the Eastern District of Virginia."
@@ -216,7 +213,6 @@
         "fileName": "032-final-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-employment-retaliation/032-final-judgment.pdf",
         "sizeBytes": 1290,
         "pageCount": 1,
         "extractedText": "Final Judgment in Jordan v. Meridian Analytics, Inc.. Procedural posture: District court granted summary judgment for employer on causation and pretext. Record material: The district court excluded a late-filed declaration in a footnote. Issue: Comparator evidence at summary judgment. Standard of review: de novo. Record excerpt: Excluded declaration. The district court excluded a late-filed declaration in a footnote and stated the ruling was independently harmless. Nature of suit: Civil Rights - Employment. Lower tribunal: U.S. District Court for the Eastern District of Virginia."
@@ -698,7 +694,6 @@
         "fileName": "001-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-finality-rule54-contract/001-complaint.pdf",
         "sizeBytes": 1482,
         "pageCount": 1,
         "extractedText": "Complaint in HarborTech Supply LLC v. Piedmont Components, Inc.. Procedural posture: District court entered partial summary judgment on the main contract claim while counterclaims and fee issues remained pending, with no separate Rule 54(b) certification. Record material: The district court granted summary judgment for Piedmont on liability under a supply agreement. Issue: Finality without Rule 54(b) certification. Standard of review: de novo jurisdictional review. Record excerpt: Partial summary judgment order. The order resolves the contract liability claim but does not address the fraud counterclaim or fees. Nature of suit: Diversity - Commercial Contract. Lower tribunal: U.S. District Court for the District of South Carolina."
@@ -709,7 +704,6 @@
         "fileName": "022-motion-for-partial-summary-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-finality-rule54-contract/022-motion-for-partial-summary-judgment.pdf",
         "sizeBytes": 1474,
         "pageCount": 1,
         "extractedText": "Motion for Partial Summary Judgment in HarborTech Supply LLC v. Piedmont Components, Inc.. Procedural posture: District court entered partial summary judgment on the main contract claim while counterclaims and fee issues remained pending, with no separate Rule 54(b) certification. Record material: HarborTech's fraud counterclaim and fee request remained unresolved. Issue: Effect of unresolved counterclaims. Standard of review: de novo. Record excerpt: District docket with pending counterclaims. The docket lists a pending fraud counterclaim, a damages hearing, and a fee petition deadline. Nature of suit: Diversity - Commercial Contract. Lower tribunal: U.S. District Court for the District of South Carolina."
@@ -720,7 +714,6 @@
         "fileName": "031-order-granting-partial-summary-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-finality-rule54-contract/031-order-granting-partial-summary-judgment.pdf",
         "sizeBytes": 1497,
         "pageCount": 1,
         "extractedText": "Order Granting Partial Summary Judgment in HarborTech Supply LLC v. Piedmont Components, Inc.. Procedural posture: District court entered partial summary judgment on the main contract claim while counterclaims and fee issues remained pending, with no separate Rule 54(b) certification. Record material: No separate judgment or Rule 54(b) certification appears on the docket. Issue: Pendent merits review if jurisdiction is cured. Standard of review: de novo. Record excerpt: Notice of appeal identifying one order. The notice identifies the partial summary judgment order and does not refer to a final judgment. Nature of suit: Diversity - Commercial Contract. Lower tribunal: U.S. District Court for the District of South Carolina."
@@ -731,7 +724,6 @@
         "fileName": "032-partial-judgment-without-rule-54-b-certification.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-finality-rule54-contract/032-partial-judgment-without-rule-54-b-certification.pdf",
         "sizeBytes": 1543,
         "pageCount": 1,
         "extractedText": "Partial Judgment Without Rule 54(b) Certification in HarborTech Supply LLC v. Piedmont Components, Inc.. Procedural posture: District court entered partial summary judgment on the main contract claim while counterclaims and fee issues remained pending, with no separate Rule 54(b) certification. Record material: The notice of appeal identifies only the partial summary judgment order. Issue: Finality without Rule 54(b) certification. Standard of review: de novo jurisdictional review. Record excerpt: Supply agreement termination clause. The agreement allows termination for uncured material breach after thirty days' written notice. Nature of suit: Diversity - Commercial Contract. Lower tribunal: U.S. District Court for the District of South Carolina."
@@ -1211,7 +1203,6 @@
         "fileName": "001-verified-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-preliminary-injunction-stay/001-verified-complaint.pdf",
         "sizeBytes": 1473,
         "pageCount": 1,
         "extractedText": "Verified Complaint in Riverside Booksellers Ass'n v. City of Fairmont. Procedural posture: District court denied a preliminary injunction against a city licensing ordinance, and appellant seeks emergency relief pending appeal. Record material: The ordinance requires event permits for sidewalk book displays within 500 feet of city hall. Issue: District-court-first stay requirement. Standard of review: procedural prerequisite reviewed for abuse or practicality. Record excerpt: Preliminary injunction denial order. The district court found the ordinance content-neutral and denied a preliminary injunction. Nature of suit: Civil Rights - First Amendment. Lower tribunal: U.S. District Court for the Northern District of West Virginia."
@@ -1222,7 +1213,6 @@
         "fileName": "003-motion-for-preliminary-injunction.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-preliminary-injunction-stay/003-motion-for-preliminary-injunction.pdf",
         "sizeBytes": 1519,
         "pageCount": 1,
         "extractedText": "Motion for Preliminary Injunction in Riverside Booksellers Ass'n v. City of Fairmont. Procedural posture: District court denied a preliminary injunction against a city licensing ordinance, and appellant seeks emergency relief pending appeal. Record material: The district court denied a preliminary injunction after finding no likely First Amendment violation. Issue: Preliminary injunction factors. Standard of review: abuse of discretion with legal conclusions reviewed de novo. Record excerpt: City licensing ordinance. The ordinance requires permits for sidewalk book displays within 500 feet of city hall during public events. Nature of suit: Civil Rights - First Amendment. Lower tribunal: U.S. District Court for the Northern District of West Virginia."
@@ -1233,7 +1223,6 @@
         "fileName": "017-order-denying-preliminary-injunction.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-preliminary-injunction-stay/017-order-denying-preliminary-injunction.pdf",
         "sizeBytes": 1463,
         "pageCount": 1,
         "extractedText": "Order Denying Preliminary Injunction in Riverside Booksellers Ass'n v. City of Fairmont. Procedural posture: District court denied a preliminary injunction against a city licensing ordinance, and appellant seeks emergency relief pending appeal. Record material: Appellant filed a notice of appeal within fourteen days of the injunction order. Issue: Expedited briefing and emergency handling. Standard of review: discretionary case-management review. Record excerpt: Festival calendar. The annual city festival begins in twelve days and includes the area covered by the ordinance. Nature of suit: Civil Rights - First Amendment. Lower tribunal: U.S. District Court for the Northern District of West Virginia."
@@ -1244,7 +1233,6 @@
         "fileName": "021-notice-of-interlocutory-appeal.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-preliminary-injunction-stay/021-notice-of-interlocutory-appeal.pdf",
         "sizeBytes": 1499,
         "pageCount": 1,
         "extractedText": "Notice of Interlocutory Appeal in Riverside Booksellers Ass'n v. City of Fairmont. Procedural posture: District court denied a preliminary injunction against a city licensing ordinance, and appellant seeks emergency relief pending appeal. Record material: No district-court stay motion appears in the initial appellate record. Issue: District-court-first stay requirement. Standard of review: procedural prerequisite reviewed for abuse or practicality. Record excerpt: District docket with no stay motion. The docket lists the injunction denial and notice of appeal but no stay or injunction pending appeal motion. Nature of suit: Civil Rights - First Amendment. Lower tribunal: U.S. District Court for the Northern District of West Virginia."
@@ -1657,7 +1645,6 @@
         "fileName": "001-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-section1983-qualified-immunity/001-complaint.pdf",
         "sizeBytes": 1384,
         "pageCount": 1,
         "extractedText": "Complaint in Carter v. Officer Blake. Procedural posture: District court denied qualified immunity at summary judgment after finding disputed facts about a traffic-stop seizure. Record material: The district court identified a dispute over whether the plaintiff was handcuffed after complying. Issue: Interlocutory jurisdiction over legal questions only. Standard of review: de novo jurisdictional review. Record excerpt: Qualified immunity denial order. The order denies qualified immunity after assuming plaintiff's account of compliance and handcuffing. Nature of suit: Civil Rights - Section 1983. Lower tribunal: U.S. District Court for the Middle District of North Carolina."
@@ -1668,7 +1655,6 @@
         "fileName": "022-motion-for-summary-judgment-on-qualified-immunity.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-section1983-qualified-immunity/022-motion-for-summary-judgment-on-qualified-immunity.pdf",
         "sizeBytes": 1389,
         "pageCount": 1,
         "extractedText": "Motion for Summary Judgment on Qualified Immunity in Carter v. Officer Blake. Procedural posture: District court denied qualified immunity at summary judgment after finding disputed facts about a traffic-stop seizure. Record material: The officer's body-camera footage is inconclusive after the first minute. Issue: Disputed fact framing. Standard of review: limited interlocutory review. Record excerpt: Body-camera exhibit summary. The first minute of video shows the stop; audio drops during the disputed handcuffing sequence. Nature of suit: Civil Rights - Section 1983. Lower tribunal: U.S. District Court for the Middle District of North Carolina."
@@ -1679,7 +1665,6 @@
         "fileName": "031-order-denying-qualified-immunity.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-section1983-qualified-immunity/031-order-denying-qualified-immunity.pdf",
         "sizeBytes": 1374,
         "pageCount": 1,
         "extractedText": "Order Denying Qualified Immunity in Carter v. Officer Blake. Procedural posture: District court denied qualified immunity at summary judgment after finding disputed facts about a traffic-stop seizure. Record material: The district court denied qualified immunity on excessive-force and unlawful-seizure theories. Issue: Clearly established law. Standard of review: de novo. Record excerpt: Plaintiff deposition excerpt. Plaintiff testified that he complied with commands before being pulled from the vehicle and handcuffed tightly. Nature of suit: Civil Rights - Section 1983. Lower tribunal: U.S. District Court for the Middle District of North Carolina."
@@ -1690,7 +1675,6 @@
         "fileName": "032-notice-of-interlocutory-appeal.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-section1983-qualified-immunity/032-notice-of-interlocutory-appeal.pdf",
         "sizeBytes": 1355,
         "pageCount": 1,
         "extractedText": "Notice of Interlocutory Appeal in Carter v. Officer Blake. Procedural posture: District court denied qualified immunity at summary judgment after finding disputed facts about a traffic-stop seizure. Record material: The notice of appeal invokes the collateral-order doctrine. Issue: Interlocutory jurisdiction over legal questions only. Standard of review: de novo jurisdictional review. Record excerpt: Officer affidavit. The officer averred that plaintiff resisted and that any force was brief and proportionate. Nature of suit: Civil Rights - Section 1983. Lower tribunal: U.S. District Court for the Middle District of North Carolina."
@@ -2183,7 +2167,6 @@
         "fileName": "001-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-post-trial-contract-jml/001-complaint.pdf",
         "sizeBytes": 1384,
         "pageCount": 1,
         "extractedText": "Complaint in Blue Ridge Biologics, LLC v. Northstar Logistics Corp.. Procedural posture: After a jury verdict for Northstar, the district court denied renewed judgment as a matter of law and a new-trial motion. Record material: Blue Ridge moved for judgment as a matter of law on causation but not on mitigation. Issue: Rule 50 preservation. Standard of review: de novo with preservation constraints. Record excerpt: Preverdict Rule 50 motion transcript. Counsel moved for judgment as a matter of law on causation but did not mention mitigation. Nature of suit: Diversity - Contract. Lower tribunal: U.S. District Court for the Western District of Virginia."
@@ -2194,7 +2177,6 @@
         "fileName": "033-renewed-motion-for-judgment-as-a-matter-of-law.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-post-trial-contract-jml/033-renewed-motion-for-judgment-as-a-matter-of-law.pdf",
         "sizeBytes": 1444,
         "pageCount": 1,
         "extractedText": "Renewed Motion for Judgment as a Matter of Law in Blue Ridge Biologics, LLC v. Northstar Logistics Corp.. Procedural posture: After a jury verdict for Northstar, the district court denied renewed judgment as a matter of law and a new-trial motion. Record material: The jury returned a damages award that included storage costs and lost resale margin. Issue: New-trial discretion. Standard of review: abuse of discretion. Record excerpt: Renewed JML order. The district court denied renewed judgment as a matter of law and found the mitigation ground forfeited. Nature of suit: Diversity - Contract. Lower tribunal: U.S. District Court for the Western District of Virginia."
@@ -2205,7 +2187,6 @@
         "fileName": "038-memorandum-opinion-denying-post-trial-motions.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-post-trial-contract-jml/038-memorandum-opinion-denying-post-trial-motions.pdf",
         "sizeBytes": 1471,
         "pageCount": 1,
         "extractedText": "Memorandum Opinion Denying Post-Trial Motions in Blue Ridge Biologics, LLC v. Northstar Logistics Corp.. Procedural posture: After a jury verdict for Northstar, the district court denied renewed judgment as a matter of law and a new-trial motion. Record material: The renewed Rule 50 motion added a mitigation theory not raised before the verdict. Issue: Damages record support. Standard of review: substantial evidence or abuse of discretion depending issue. Record excerpt: New-trial order. The court denied a new trial after concluding the verdict was supported by competing testimony. Nature of suit: Diversity - Contract. Lower tribunal: U.S. District Court for the Western District of Virginia."
@@ -2216,7 +2197,6 @@
         "fileName": "039-final-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-post-trial-contract-jml/039-final-judgment.pdf",
         "sizeBytes": 1370,
         "pageCount": 1,
         "extractedText": "Final Judgment in Blue Ridge Biologics, LLC v. Northstar Logistics Corp.. Procedural posture: After a jury verdict for Northstar, the district court denied renewed judgment as a matter of law and a new-trial motion. Record material: The new-trial motion argued the damages award was against the weight of the evidence. Issue: Rule 50 preservation. Standard of review: de novo with preservation constraints. Record excerpt: Damages worksheet. The jury award combined storage costs, replacement shipping, and lost resale margin. Nature of suit: Diversity - Contract. Lower tribunal: U.S. District Court for the Western District of Virginia."
@@ -2765,7 +2745,6 @@
         "fileName": "001-foia-complaint.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-sealed-foia-record/001-foia-complaint.pdf",
         "sizeBytes": 1457,
         "pageCount": 1,
         "extractedText": "FOIA Complaint in Open Records Project v. Department of Energy. Procedural posture: District court granted summary judgment to the agency after reviewing sealed declarations and sample withheld records in camera. Record material: The agency withheld technical safety records under FOIA exemptions and filed classified-adjacent declarations under seal. Issue: Sealed appendix and public redacted copy. Standard of review: procedural compliance reviewed for abuse of discretion. Record excerpt: Sealed agency declaration. The sealed declaration describes safety-sensitive systems and exemption harms in unredacted form. Nature of suit: Freedom of Information Act. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -2776,7 +2755,6 @@
         "fileName": "022-cross-motions-for-summary-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-sealed-foia-record/022-cross-motions-for-summary-judgment.pdf",
         "sizeBytes": 1439,
         "pageCount": 1,
         "extractedText": "Cross-Motions for Summary Judgment in Open Records Project v. Department of Energy. Procedural posture: District court granted summary judgment to the agency after reviewing sealed declarations and sample withheld records in camera. Record material: The district court reviewed sample records in camera and granted summary judgment. Issue: Vaughn index and agency declaration adequacy. Standard of review: de novo summary judgment review. Record excerpt: Public redacted agency declaration. The public declaration redacts technical details but describes the exemption categories. Nature of suit: Freedom of Information Act. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -2787,7 +2765,6 @@
         "fileName": "031-memorandum-opinion-and-sealing-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-sealed-foia-record/031-memorandum-opinion-and-sealing-order.pdf",
         "sizeBytes": 1460,
         "pageCount": 1,
         "extractedText": "Memorandum Opinion and Sealing Order in Open Records Project v. Department of Energy. Procedural posture: District court granted summary judgment to the agency after reviewing sealed declarations and sample withheld records in camera. Record material: The public docket contains a redacted declaration but the proposed appendix includes unredacted material. Issue: Public access and redaction obligations. Standard of review: abuse of discretion and de novo legal review. Record excerpt: Vaughn index excerpt. The Vaughn index groups withheld records into categories and cites exemption rationales. Nature of suit: Freedom of Information Act. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -2798,7 +2775,6 @@
         "fileName": "032-final-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-sealed-foia-record/032-final-judgment.pdf",
         "sizeBytes": 1368,
         "pageCount": 1,
         "extractedText": "Final Judgment in Open Records Project v. Department of Energy. Procedural posture: District court granted summary judgment to the agency after reviewing sealed declarations and sample withheld records in camera. Record material: The appellant challenges the adequacy of the Vaughn index. Issue: Sealed appendix and public redacted copy. Standard of review: procedural compliance reviewed for abuse of discretion. Record excerpt: Sealing order. The district court permitted limited sealed filing with a public redacted copy requirement. Nature of suit: Freedom of Information Act. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -3330,7 +3306,6 @@
         "fileName": "001-indictment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-criminal-sentencing-waiver/001-indictment.pdf",
         "sizeBytes": 1529,
         "pageCount": 1,
         "extractedText": "Indictment in United States v. Alvarez. Procedural posture: Defendant filed a timely criminal notice of appeal after a within-Guidelines sentence; the government invokes an appellate waiver while defendant challenges Guidelines calculation and allocution. Record material: The plea agreement contains a waiver of appeal except for claims above the advisory Guidelines range or based on ineffective assistance. Issue: Scope and validity of appellate waiver. Standard of review: de novo with plea-colloquy record review. Record excerpt: Plea agreement appeal waiver. The plea agreement waives appeal of any sentence within or below the advisory Guidelines range, except for limited reserved claims. Nature of suit: Criminal - Sentencing. Lower tribunal: U.S. District Court for the Eastern District of North Carolina."
@@ -3341,7 +3316,6 @@
         "fileName": "014-plea-agreement-and-rule-11-transcript.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-criminal-sentencing-waiver/014-plea-agreement-and-rule-11-transcript.pdf",
         "sizeBytes": 1554,
         "pageCount": 1,
         "extractedText": "Plea Agreement and Rule 11 Transcript in United States v. Alvarez. Procedural posture: Defendant filed a timely criminal notice of appeal after a within-Guidelines sentence; the government invokes an appellate waiver while defendant challenges Guidelines calculation and allocution. Record material: The Rule 11 transcript includes a waiver colloquy but the court summarized the waiver in broad terms. Issue: Leadership enhancement at sentencing. Standard of review: clear error if preserved; plain error if forfeited. Record excerpt: Rule 11 waiver colloquy. The court asked whether Alvarez understood that he was giving up most appeal rights and confirmed counsel had reviewed the agreement. Nature of suit: Criminal - Sentencing. Lower tribunal: U.S. District Court for the Eastern District of North Carolina."
@@ -3352,7 +3326,6 @@
         "fileName": "019-sentencing-memorandum-and-objections.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-criminal-sentencing-waiver/019-sentencing-memorandum-and-objections.pdf",
         "sizeBytes": 1592,
         "pageCount": 1,
         "extractedText": "Sentencing Memorandum and Objections in United States v. Alvarez. Procedural posture: Defendant filed a timely criminal notice of appeal after a within-Guidelines sentence; the government invokes an appellate waiver while defendant challenges Guidelines calculation and allocution. Record material: The presentence report recommended a two-level leadership enhancement based on disputed statements from co-defendants. Issue: Allocution and mitigation explanation. Standard of review: abuse of discretion with procedural reasonableness review. Record excerpt: PSR leadership enhancement excerpt. The PSR applies a two-level enhancement based on co-defendant statements that Alvarez directed deliveries and collected proceeds. Nature of suit: Criminal - Sentencing. Lower tribunal: U.S. District Court for the Eastern District of North Carolina."
@@ -3363,7 +3336,6 @@
         "fileName": "024-criminal-judgment.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-criminal-sentencing-waiver/024-criminal-judgment.pdf",
         "sizeBytes": 1528,
         "pageCount": 1,
         "extractedText": "Criminal Judgment in United States v. Alvarez. Procedural posture: Defendant filed a timely criminal notice of appeal after a within-Guidelines sentence; the government invokes an appellate waiver while defendant challenges Guidelines calculation and allocution. Record material: Defense counsel objected to the enhancement in writing but did not renew the objection after the court adopted the PSR. Issue: Scope and validity of appellate waiver. Standard of review: de novo with plea-colloquy record review. Record excerpt: Sentencing transcript and allocution. Alvarez apologized, described rehabilitation efforts, and requested a variance before the court imposed an 84-month sentence. Nature of suit: Criminal - Sentencing. Lower tribunal: U.S. District Court for the Eastern District of North Carolina."
@@ -3829,7 +3801,6 @@
         "fileName": "008-agency-decision.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-agency-review-removal/008-agency-decision.pdf",
         "sizeBytes": 1389,
         "pageCount": 1,
         "extractedText": "Agency Decision in Santos-Rivera v. Garland. Procedural posture: Petitioner seeks review of a Board of Immigration Appeals decision dismissing asylum and withholding claims and affirming denial of Convention Against Torture protection. Record material: The Board dismissed the appeal thirty days before the petition for review was filed. Issue: Timely petition for review. Standard of review: de novo jurisdictional review. Record excerpt: Board final order. The Board dismissed the appeal and adopted the immigration judge's nexus and CAT findings with a short supplemental explanation. Nature of suit: Agency Review - Immigration. Lower tribunal: Board of Immigration Appeals."
@@ -3840,7 +3811,6 @@
         "fileName": "013-certified-administrative-record-excerpts.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-agency-review-removal/013-certified-administrative-record-excerpts.pdf",
         "sizeBytes": 1525,
         "pageCount": 1,
         "extractedText": "Certified Administrative Record Excerpts in Santos-Rivera v. Garland. Procedural posture: Petitioner seeks review of a Board of Immigration Appeals decision dismissing asylum and withholding claims and affirming denial of Convention Against Torture protection. Record material: The immigration judge found credible testimony but concluded threats were motivated by generalized criminal extortion. Issue: Family-based persecution nexus. Standard of review: legal conclusions reviewed de novo; factual findings for substantial evidence. Record excerpt: Petition for review receipt. The Fourth Circuit receipt shows the petition for review was filed on the thirtieth day after the Board order. Nature of suit: Agency Review - Immigration. Lower tribunal: Board of Immigration Appeals."
@@ -3851,7 +3821,6 @@
         "fileName": "014-certified-agency-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-agency-review-removal/014-certified-agency-order.pdf",
         "sizeBytes": 1455,
         "pageCount": 1,
         "extractedText": "Certified Agency Order in Santos-Rivera v. Garland. Procedural posture: Petitioner seeks review of a Board of Immigration Appeals decision dismissing asylum and withholding claims and affirming denial of Convention Against Torture protection. Record material: The Board adopted the immigration judge's nexus analysis and added a brief alternative finding. Issue: CAT acquiescence and country conditions. Standard of review: substantial evidence with de novo legal framing. Record excerpt: Immigration judge credibility finding. The immigration judge found Santos-Rivera credible but concluded the threats reflected generalized criminal extortion. Nature of suit: Agency Review - Immigration. Lower tribunal: Board of Immigration Appeals."
@@ -3862,7 +3831,6 @@
         "fileName": "015-petitionable-final-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-agency-review-removal/015-petitionable-final-order.pdf",
         "sizeBytes": 1424,
         "pageCount": 1,
         "extractedText": "Petitionable Final Order in Santos-Rivera v. Garland. Procedural posture: Petitioner seeks review of a Board of Immigration Appeals decision dismissing asylum and withholding claims and affirming denial of Convention Against Torture protection. Record material: Country-condition reports discuss police acquiescence in gang violence in the petitioner's home region. Issue: Timely petition for review. Standard of review: de novo jurisdictional review. Record excerpt: Country conditions report excerpt. The report describes repeated failures by local police to investigate gang threats in the petitioner's region. Nature of suit: Agency Review - Immigration. Lower tribunal: Board of Immigration Appeals."
@@ -4249,7 +4217,6 @@
         "fileName": "010-discovery-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-original-writ-discovery/010-discovery-order.pdf",
         "sizeBytes": 1430,
         "pageCount": 1,
         "extractedText": "Discovery Order in In re Atlantic Health Systems. Procedural posture: Corporate petitioner seeks mandamus after the district court ordered production of documents claimed to be attorney-client privileged and denied a stay pending review. Record material: The district court ordered production of internal investigation memoranda within seven days. Issue: Clear and indisputable right to writ relief. Standard of review: extraordinary writ standard. Record excerpt: Discovery production order. The district court ordered production of internal investigation memoranda within seven days after finding waiver. Nature of suit: Original Writ - Mandamus. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -4260,7 +4227,6 @@
         "fileName": "015-stay-denial.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-original-writ-discovery/015-stay-denial.pdf",
         "sizeBytes": 1378,
         "pageCount": 1,
         "extractedText": "Stay Denial in In re Atlantic Health Systems. Procedural posture: Corporate petitioner seeks mandamus after the district court ordered production of documents claimed to be attorney-client privileged and denied a stay pending review. Record material: The court found privilege waived by selective disclosure to outside auditors. Issue: Adequate alternative remedy. Standard of review: mandamus adequacy inquiry. Record excerpt: Privilege log and in camera index. The privilege log lists attorney interview memoranda, compliance advice, and board presentation drafts. Nature of suit: Original Writ - Mandamus. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -4271,7 +4237,6 @@
         "fileName": "017-privilege-log-excerpts.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-original-writ-discovery/017-privilege-log-excerpts.pdf",
         "sizeBytes": 1413,
         "pageCount": 1,
         "extractedText": "Privilege Log Excerpts in In re Atlantic Health Systems. Procedural posture: Corporate petitioner seeks mandamus after the district court ordered production of documents claimed to be attorney-client privileged and denied a stay pending review. Record material: Petitioner moved for a stay in the district court, which was denied the same day. Issue: Emergency stay pending writ review. Standard of review: discretionary emergency motion review. Record excerpt: District-court stay denial. The district court denied a stay pending mandamus and left the production deadline in place. Nature of suit: Original Writ - Mandamus. Lower tribunal: U.S. District Court for the District of Maryland."
@@ -4282,7 +4247,6 @@
         "fileName": "019-mandamus-order.pdf",
         "mimeType": "application/pdf",
         "source": "synthetic",
-        "publicUrl": "/trial-records/synthetic-ca4-original-writ-discovery/019-mandamus-order.pdf",
         "sizeBytes": 1433,
         "pageCount": 1,
         "extractedText": "Mandamus Order in In re Atlantic Health Systems. Procedural posture: Corporate petitioner seeks mandamus after the district court ordered production of documents claimed to be attorney-client privileged and denied a stay pending review. Record material: The disputed documents have not yet been produced but the production deadline is imminent. Issue: Clear and indisputable right to writ relief. Standard of review: extraordinary writ standard. Record excerpt: Auditor disclosure letter. The letter transmitted a high-level investigation summary to outside auditors without attaching attorney interview notes. Nature of suit: Original Writ - Mandamus. Lower tribunal: U.S. District Court for the District of Maryland."

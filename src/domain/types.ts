@@ -699,6 +699,13 @@ export type Deadline = {
 
 export type Scenario = {
   id: string
+  visibility?: 'public_template' | 'private'
+  ownerUserId?: string
+  scenarioFamilyKey?: string
+  revision?: number
+  revisionStatus?: 'draft' | 'published' | 'archived'
+  createdFromScenarioId?: string
+  supersededByScenarioId?: string
   title: string
   source: 'synthetic' | 'recap_import' | 'generated_from_import'
   courtPackId: string
@@ -723,7 +730,7 @@ export type ScenarioDocumentAsset = {
   fileName: string
   mimeType: 'application/pdf'
   source: 'synthetic' | 'courtlistener' | 'uploaded'
-  publicUrl?: string
+  fileUrl?: string
   sourceUrl?: string
   storageId?: string
   sha256?: string

@@ -261,6 +261,14 @@ export default defineSchema({
 
   scenarios: defineTable({
     scenarioKey: v.string(),
+    visibility: v.optional(v.union(v.literal('public_template'), v.literal('private'))),
+    scenarioFamilyKey: v.optional(v.string()),
+    revision: v.optional(v.number()),
+    revisionStatus: v.optional(
+      v.union(v.literal('draft'), v.literal('published'), v.literal('archived')),
+    ),
+    createdFromScenarioId: v.optional(v.id('scenarios')),
+    supersededByScenarioId: v.optional(v.id('scenarios')),
     title: v.string(),
     source: v.union(
       v.literal('synthetic'),
@@ -283,7 +291,29 @@ export default defineSchema({
   })
     .index('by_court_pack', ['courtPackId'])
     .index('by_scenario_key', ['scenarioKey'])
-    .index('by_published', ['published']),
+    .index('by_published', ['published'])
+    .index('by_visibility', ['visibility'])
+    .index('by_owner', ['ownerUserId'])
+    .index('by_family_revision', ['scenarioFamilyKey', 'revision']),
+
+  scenarioDocumentAssets: defineTable({
+    scenarioId: v.id('scenarios'),
+    assetKey: v.string(),
+    label: v.string(),
+    fileName: v.string(),
+    mimeType: v.literal('application/pdf'),
+    source: v.union(v.literal('synthetic'), v.literal('courtlistener'), v.literal('uploaded')),
+    storageId: v.id('_storage'),
+    sha256: v.optional(v.string()),
+    sizeBytes: v.number(),
+    pageCount: v.number(),
+    extractedText: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_scenario', ['scenarioId'])
+    .index('by_scenario_asset_key', ['scenarioId', 'assetKey'])
+    .index('by_storage', ['storageId']),
 
   scenarioIssues: defineTable({
     scenarioId: v.id('scenarios'),

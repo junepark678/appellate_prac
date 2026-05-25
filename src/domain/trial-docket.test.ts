@@ -1,6 +1,3 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-
 import { describe, expect, it } from 'vitest'
 
 import { scenarios } from '../modules/registry'
@@ -23,14 +20,7 @@ describe('trial docket records', () => {
           expect(document.fileName.endsWith('.pdf')).toBe(true)
           expect(document.sizeBytes).toBeGreaterThan(0)
           expect(document.pageCount).toBeGreaterThan(0)
-          expect(Boolean(document.publicUrl ?? document.sourceUrl ?? document.storageId)).toBe(true)
-
-          if (document.publicUrl) {
-            const filePath = join(process.cwd(), 'public', document.publicUrl)
-            expect(existsSync(filePath)).toBe(true)
-            expect(statSync(filePath).size).toBe(document.sizeBytes)
-            expect(readFileSync(filePath, 'utf8').startsWith('%PDF-1.4')).toBe(true)
-          }
+          expect('publicUrl' in document).toBe(false)
         }
       }
     }

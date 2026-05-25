@@ -187,7 +187,7 @@ function Home() {
     canUseConvex ? {} : 'skip',
   )
   const publishedScenarios = useQuery(
-    api.scenarios.listPublished,
+    api.scenarios.listAvailableForCurrentUser,
     canUseConvex ? {} : 'skip',
   )
   const integrationStatus = useQuery(
@@ -259,7 +259,11 @@ function Home() {
     if (!activeSession) return
     setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
     setFilingMetadata(createDefaultMetadata(activeSession, 'notice_of_appeal'))
-    setTrialDocket(importedTrialDocket ?? createTrialDocket(activeSession))
+    if (importedTrialDocket) {
+      setTrialDocket(importedTrialDocket)
+      return
+    }
+    setTrialDocket(createTrialDocket(activeSession))
   }, [activeSession?.id, importedTrialDocket])
 
   useEffect(() => {
@@ -2409,7 +2413,7 @@ function formatFileSize(sizeBytes: number) {
 }
 
 function trialDocketDocumentHref(document: TrialDocket['entries'][number]['documents'][number]) {
-  return document.publicUrl ?? document.sourceUrl
+  return document.fileUrl ?? document.sourceUrl
 }
 
 function trialDocketDocumentLabel(

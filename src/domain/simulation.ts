@@ -35,6 +35,7 @@ import type {
   FilingEvent,
   FilingDraft,
   FilingRecord,
+  Scenario,
   ParticipantRole,
   Participant,
   RuleRef,
@@ -448,8 +449,7 @@ function postProcessAcceptedFiling(session: CaseSession, draft: FilingDraft): Ca
   return nextSession
 }
 
-export function createInitialSession(scenarioId = 'synthetic-employment-retaliation'): CaseSession {
-  const scenario = getScenario(scenarioId)
+export function createInitialSessionForScenario(scenario: Scenario): CaseSession {
   const courtPack = getCourtPack(scenario.courtPackId)
   const participants: Participant[] =
     scenario.participants ??
@@ -539,6 +539,10 @@ export function createInitialSession(scenarioId = 'synthetic-employment-retaliat
       ),
     ],
   }
+}
+
+export function createInitialSession(scenarioId = 'synthetic-employment-retaliation'): CaseSession {
+  return createInitialSessionForScenario(getScenario(scenarioId))
 }
 
 export function inferDocumentSignals(file: File): UploadedDocument {

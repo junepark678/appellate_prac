@@ -1,80 +1,481 @@
 import { v } from 'convex/values'
 
-import { mutation, query } from './_generated/server'
+import { action, internalMutation, mutation, query } from './_generated/server'
+import { internal } from './_generated/api'
+import type { Doc, Id } from './_generated/dataModel'
+import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
 import { requireCurrentUser } from './authHelpers'
-import type { Scenario } from '../src/domain/types'
+import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
 const seedScenarios = scenarioSeed as Scenario[]
 
-function scenarioFromDoc(scenario: {
-  scenarioKey: string
-  title: string
-  source: Scenario['source']
-  courtPackId: string
-  shortCaption: string
-  lowerTribunal: string
-  natureOfSuit: string
-  proceduralPosture: string
-  issuesPresented: string[]
-  meritsRecord: string[]
-  trainingJson?: string
-  trialDocketJson?: string
-  documentAssetsJson?: string
-  sourceCaseUrl?: string
-}): Scenario {
-  const sourceCaseUrl = scenario.sourceCaseUrl
-    ? { sourceCaseUrl: scenario.sourceCaseUrl }
-    : {}
-  const training = scenario.trainingJson
-    ? { training: JSON.parse(scenario.trainingJson) as Scenario['training'] }
-    : {}
-  const trialDocket = scenario.trialDocketJson
-    ? { trialDocket: JSON.parse(scenario.trialDocketJson) as Scenario['trialDocket'] }
-    : {}
-  const documentAssets = scenario.documentAssetsJson
-    ? { documentAssets: JSON.parse(scenario.documentAssetsJson) as Scenario['documentAssets'] }
-    : {}
+function parseJsonField<T>(json: string, label: string): T {
+  try {
+    return JSON.parse(json) as T
+  } catch {
+    throw new Error(`Invalid persisted JSON for ${label}.`)
+  }
+}
+
+function parseOptionalJsonField<T>(json: string | undefined, label: string): T | undefined {
+  return json ? parseJsonField<T>(json, label) : undefined
+}
+
+function visibilityForDoc(doc: Doc<'scenarios'>): 'public_template' | 'private' {
+  if (doc.visibility) return doc.visibility
+  return doc.ownerUserId ? 'private' : 'public_template'
+}
+
+function scenarioAssetFromDoc(doc: Doc<'scenarioDocumentAssets'>): ScenarioDocumentAsset {
   return {
-    id: scenario.scenarioKey,
-    title: scenario.title,
-    source: scenario.source,
-    courtPackId: scenario.courtPackId,
-    shortCaption: scenario.shortCaption,
-    lowerTribunal: scenario.lowerTribunal,
-    natureOfSuit: scenario.natureOfSuit,
-    proceduralPosture: scenario.proceduralPosture,
-    issuesPresented: scenario.issuesPresented,
-    meritsRecord: scenario.meritsRecord,
-    ...training,
-    ...trialDocket,
-    ...documentAssets,
+    id: doc.assetKey,
+    label: doc.label,
+    fileName: doc.fileName,
+    mimeType: doc.mimeType,
+    source: doc.source,
+    storageId: doc.storageId,
+    ...(doc.sha256 ? { sha256: doc.sha256 } : {}),
+    sizeBytes: doc.sizeBytes,
+    pageCount: doc.pageCount,
+    ...(doc.extractedText ? { extractedText: doc.extractedText } : {}),
+    ...(doc.sourceUrl ? { sourceUrl: doc.sourceUrl } : {}),
+  }
+}
+
+function scenarioFromDoc(
+  doc: Doc<'scenarios'>,
+  issues: ScenarioIssue[] = [],
+  recordExcerpts: ScenarioRecordExcerpt[] = [],
+  assets: ScenarioDocumentAsset[] = [],
+): Scenario {
+  const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
+  const training = parseOptionalJsonField<Scenario['training']>(
+    doc.trainingJson,
+    `scenario ${doc._id} training`,
+  )
+  const trialDocket = parseOptionalJsonField<Scenario['trialDocket']>(
+    doc.trialDocketJson,
+    `scenario ${doc._id} trial docket`,
+  )
+  const legacyDocumentAssets = parseOptionalJsonField<Scenario['documentAssets']>(
+    doc.documentAssetsJson,
+    `scenario ${doc._id} document assets`,
+  )?.map((asset) => {
+    const { publicUrl: _publicUrl, fileUrl: _fileUrl, ...assetWithoutUrls } =
+      asset as ScenarioDocumentAsset & { publicUrl?: string }
+    return assetWithoutUrls
+  })
+  const documentAssets = assets.length ? assets : legacyDocumentAssets
+
+  return {
+    id: doc.scenarioKey,
+    visibility: visibilityForDoc(doc),
+    ...(doc.ownerUserId ? { ownerUserId: doc.ownerUserId } : {}),
+    scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
+    revision: doc.revision ?? 1,
+    revisionStatus: doc.revisionStatus ?? (doc.published ? 'published' : 'draft'),
+    ...(doc.createdFromScenarioId ? { createdFromScenarioId: doc.createdFromScenarioId } : {}),
+    ...(doc.supersededByScenarioId ? { supersededByScenarioId: doc.supersededByScenarioId } : {}),
+    title: doc.title,
+    source: doc.source,
+    courtPackId: doc.courtPackId,
+    shortCaption: doc.shortCaption,
+    lowerTribunal: doc.lowerTribunal,
+    natureOfSuit: doc.natureOfSuit,
+    proceduralPosture: doc.proceduralPosture,
+    issuesPresented: doc.issuesPresented,
+    meritsRecord: doc.meritsRecord,
+    ...(issues.length ? { issues } : {}),
+    ...(recordExcerpts.length ? { recordExcerpts } : {}),
+    ...(training ? { training } : {}),
+    ...(trialDocket ? { trialDocket } : {}),
+    ...(documentAssets ? { documentAssets } : {}),
     ...sourceCaseUrl,
   }
 }
+
+function scenarioDocFromInput(
+  input: {
+    title: string
+    source: Scenario['source']
+    courtPackId: string
+    shortCaption: string
+    lowerTribunal: string
+    natureOfSuit: string
+    proceduralPosture: string
+    issuesPresented: string[]
+    meritsRecord: string[]
+    training?: Scenario['training']
+    trialDocket?: Scenario['trialDocket']
+    sourceCaseUrl?: string
+  },
+  systemFields: {
+    scenarioKey: string
+    visibility: 'public_template' | 'private'
+    ownerUserId?: Id<'users'>
+    scenarioFamilyKey: string
+    revision: number
+    revisionStatus: 'draft' | 'published' | 'archived'
+    createdFromScenarioId?: Id<'scenarios'>
+    supersededByScenarioId?: Id<'scenarios'>
+    published: boolean
+  },
+) {
+  return {
+    ...systemFields,
+    title: input.title,
+    source: input.source,
+    courtPackId: input.courtPackId,
+    shortCaption: input.shortCaption,
+    lowerTribunal: input.lowerTribunal,
+    natureOfSuit: input.natureOfSuit,
+    proceduralPosture: input.proceduralPosture,
+    issuesPresented: input.issuesPresented,
+    meritsRecord: input.meritsRecord,
+    ...(input.training ? { trainingJson: JSON.stringify(input.training) } : {}),
+    ...(input.trialDocket ? { trialDocketJson: JSON.stringify(input.trialDocket) } : {}),
+    ...(input.sourceCaseUrl ? { sourceCaseUrl: input.sourceCaseUrl } : {}),
+  }
+}
+
+type ReadCtx = QueryCtx | MutationCtx
+
+async function loadRelatedScenarioData(ctx: ReadCtx, scenarioId: Id<'scenarios'>) {
+  const [issues, recordExcerpts, assets] = await Promise.all([
+    ctx.db
+      .query('scenarioIssues')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioId))
+      .collect(),
+    ctx.db
+      .query('scenarioRecordExcerpts')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioId))
+      .collect(),
+    ctx.db
+      .query('scenarioDocumentAssets')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioId))
+      .collect(),
+  ])
+
+  return {
+    issues: issues.map((issue: Doc<'scenarioIssues'>) => ({
+      id: issue.issueId,
+      label: issue.label,
+      standardOfReview: issue.standardOfReview,
+      preservationFacts: issue.preservationFacts,
+      recordSupportFacts: issue.recordSupportFacts,
+      likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+      likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+      possibleRelief: issue.possibleRelief,
+    })),
+    recordExcerpts: recordExcerpts.map((excerpt: Doc<'scenarioRecordExcerpts'>) => ({
+      id: excerpt.excerptId,
+      label: excerpt.label,
+      source: excerpt.source,
+      text: excerpt.text,
+      citedByIssueIds: excerpt.citedByIssueIds,
+    })),
+    assets: assets.map(scenarioAssetFromDoc),
+  }
+}
+
+async function visibleScenarioDocsForUser(ctx: ReadCtx, userId: Id<'users'>) {
+  const all = await ctx.db.query('scenarios').collect()
+  return all.filter((scenario: Doc<'scenarios'>) => {
+    const visibility = visibilityForDoc(scenario)
+    if (visibility === 'public_template') {
+      return (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) === 'published'
+    }
+    return scenario.ownerUserId === userId
+  })
+}
+
+async function requireVisibleScenario(
+  ctx: ReadCtx,
+  scenarioKey: string,
+  userId: Id<'users'>,
+) {
+  const scenario = await ctx.db
+    .query('scenarios')
+    .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+    .unique()
+  if (!scenario) {
+    throw new Error('Scenario not found')
+  }
+  const visibility = visibilityForDoc(scenario)
+  if (visibility === 'private' && scenario.ownerUserId !== userId) {
+    throw new Error('Scenario not found')
+  }
+  if (
+    visibility === 'public_template' &&
+    (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published'
+  ) {
+    throw new Error('Scenario not found')
+  }
+  return scenario
+}
+
+async function cloneScenarioChildren(
+  ctx: MutationCtx,
+  fromScenarioId: Id<'scenarios'>,
+  toScenarioId: Id<'scenarios'>,
+) {
+  const [issues, excerpts, assets] = await Promise.all([
+    ctx.db
+      .query('scenarioIssues')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', fromScenarioId))
+      .collect(),
+    ctx.db
+      .query('scenarioRecordExcerpts')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', fromScenarioId))
+      .collect(),
+    ctx.db
+      .query('scenarioDocumentAssets')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', fromScenarioId))
+      .collect(),
+  ])
+  for (const issue of issues as Doc<'scenarioIssues'>[]) {
+    await ctx.db.insert('scenarioIssues', {
+      scenarioId: toScenarioId,
+      issueId: issue.issueId,
+      label: issue.label,
+      standardOfReview: issue.standardOfReview,
+      preservationFacts: issue.preservationFacts,
+      recordSupportFacts: issue.recordSupportFacts,
+      likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
+      likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
+      possibleRelief: issue.possibleRelief,
+    })
+  }
+  for (const excerpt of excerpts as Doc<'scenarioRecordExcerpts'>[]) {
+    await ctx.db.insert('scenarioRecordExcerpts', {
+      scenarioId: toScenarioId,
+      excerptId: excerpt.excerptId,
+      label: excerpt.label,
+      source: excerpt.source,
+      text: excerpt.text,
+      citedByIssueIds: excerpt.citedByIssueIds,
+    })
+  }
+  const createdAt = new Date().toISOString()
+  for (const asset of assets as Doc<'scenarioDocumentAssets'>[]) {
+    await ctx.db.insert('scenarioDocumentAssets', {
+      scenarioId: toScenarioId,
+      assetKey: asset.assetKey,
+      label: asset.label,
+      fileName: asset.fileName,
+      mimeType: asset.mimeType,
+      source: asset.source,
+      storageId: asset.storageId,
+      ...(asset.sha256 ? { sha256: asset.sha256 } : {}),
+      sizeBytes: asset.sizeBytes,
+      pageCount: asset.pageCount,
+      ...(asset.extractedText ? { extractedText: asset.extractedText } : {}),
+      ...(asset.sourceUrl ? { sourceUrl: asset.sourceUrl } : {}),
+      createdAt,
+    })
+  }
+}
+
+const scenarioInputValidator = v.object({
+  title: v.string(),
+  source: v.union(v.literal('synthetic'), v.literal('recap_import'), v.literal('generated_from_import')),
+  courtPackId: v.string(),
+  shortCaption: v.string(),
+  lowerTribunal: v.string(),
+  natureOfSuit: v.string(),
+  proceduralPosture: v.string(),
+  issuesPresented: v.array(v.string()),
+  meritsRecord: v.array(v.string()),
+  training: v.optional(v.any()),
+  trialDocket: v.optional(v.any()),
+  sourceCaseUrl: v.optional(v.string()),
+})
+
+export const listAvailableForCurrentUser = query({
+  args: {},
+  returns: v.array(scenarioValidator),
+  handler: async (ctx) => {
+    const { user } = await requireCurrentUser(ctx)
+    const docs = (await visibleScenarioDocsForUser(ctx, user._id)).filter(
+      (scenario) => scenario.scenarioKey !== 'recap-import-placeholder',
+    )
+    const persistedScenarios = await Promise.all(
+      docs.map(async (doc) => {
+        const related = await loadRelatedScenarioData(ctx, doc._id)
+        return scenarioFromDoc(doc, related.issues, related.recordExcerpts, related.assets)
+      }),
+    )
+    const persistedKeys = new Set(persistedScenarios.map((scenario) => scenario.id))
+    const bundledPublicTemplates = seedScenarios
+      .filter((scenario) => !persistedKeys.has(scenario.id))
+      .map((scenario) => ({
+        ...scenario,
+        visibility: 'public_template' as const,
+        scenarioFamilyKey: scenario.id,
+        revision: 1,
+        revisionStatus: 'published' as const,
+      }))
+    const scenarios = [...persistedScenarios, ...bundledPublicTemplates]
+    return scenarios.sort((a, b) => a.title.localeCompare(b.title))
+  },
+})
 
 export const listPublished = query({
   args: {},
   returns: v.array(scenarioValidator),
   handler: async (ctx) => {
-    const persisted = (await ctx.db
-      .query('scenarios')
-      .withIndex('by_published', (index) => index.eq('published', true))
-      .collect()).filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
-
-    const persistedByKey = new Map(
-      persisted.map((scenario) => [scenario.scenarioKey, scenarioFromDoc(scenario)]),
+    const { user } = await requireCurrentUser(ctx)
+    const docs = await visibleScenarioDocsForUser(ctx, user._id)
+    const persistedScenarios = await Promise.all(
+      docs
+        .filter((scenario) => visibilityForDoc(scenario) === 'public_template')
+        .filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
+        .map(async (doc) => {
+          const related = await loadRelatedScenarioData(ctx, doc._id)
+          return scenarioFromDoc(doc, related.issues, related.recordExcerpts, related.assets)
+        }),
     )
-    const seededKeys = new Set(seedScenarios.map((scenario) => scenario.id))
-    const mergedSeeded = seedScenarios.map(
-      (scenario) => persistedByKey.get(scenario.id) ?? scenario,
-    )
-    const extraPublished = persisted
-      .filter((scenario) => !seededKeys.has(scenario.scenarioKey))
-      .map(scenarioFromDoc)
+    const persistedKeys = new Set(persistedScenarios.map((scenario) => scenario.id))
+    const bundledPublicTemplates = seedScenarios
+      .filter((scenario) => !persistedKeys.has(scenario.id))
+      .map((scenario) => ({
+        ...scenario,
+        visibility: 'public_template' as const,
+        scenarioFamilyKey: scenario.id,
+        revision: 1,
+        revisionStatus: 'published' as const,
+      }))
+    const scenarios = [...persistedScenarios, ...bundledPublicTemplates]
+    return scenarios.sort((a, b) => a.title.localeCompare(b.title))
+  },
+})
 
-    return [...mergedSeeded, ...extraPublished]
+export const createPrivateScenario = mutation({
+  args: scenarioInputValidator,
+  returns: scenarioValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const now = Date.now().toString(36)
+    const scenarioKey = `private-${user._id}-${now}`
+    const scenarioId = await ctx.db.insert(
+      'scenarios',
+      scenarioDocFromInput(args, {
+        scenarioKey,
+        visibility: 'private',
+        ownerUserId: user._id,
+        scenarioFamilyKey: scenarioKey,
+        revision: 1,
+        revisionStatus: 'draft',
+        published: false,
+      }),
+    )
+    const scenario = await ctx.db.get(scenarioId)
+    if (!scenario) throw new Error('Unable to create scenario')
+    return scenarioFromDoc(scenario)
+  },
+})
+
+export const copyTemplateForCurrentUser = mutation({
+  args: {
+    scenarioId: v.string(),
+  },
+  returns: scenarioValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const template = await requireVisibleScenario(ctx, args.scenarioId, user._id)
+    if (visibilityForDoc(template) !== 'public_template') {
+      throw new Error('Only public templates can be copied.')
+    }
+    const scenarioKey = `private-${template.scenarioKey}-${user._id}-${Date.now().toString(36)}`
+    const privateScenarioId = await ctx.db.insert('scenarios', {
+      scenarioKey,
+      visibility: 'private',
+      ownerUserId: user._id,
+      scenarioFamilyKey: template.scenarioFamilyKey ?? template.scenarioKey,
+      revision: (template.revision ?? 1) + 1,
+      revisionStatus: 'draft',
+      createdFromScenarioId: template._id,
+      title: template.title,
+      source: template.source,
+      courtPackId: template.courtPackId,
+      shortCaption: template.shortCaption,
+      lowerTribunal: template.lowerTribunal,
+      natureOfSuit: template.natureOfSuit,
+      proceduralPosture: template.proceduralPosture,
+      issuesPresented: template.issuesPresented,
+      meritsRecord: template.meritsRecord,
+      ...(template.trainingJson ? { trainingJson: template.trainingJson } : {}),
+      ...(template.trialDocketJson ? { trialDocketJson: template.trialDocketJson } : {}),
+      ...(template.sourceCaseUrl ? { sourceCaseUrl: template.sourceCaseUrl } : {}),
+      published: false,
+    })
+    await cloneScenarioChildren(ctx, template._id, privateScenarioId)
+    const privateScenario = await ctx.db.get(privateScenarioId)
+    if (!privateScenario) throw new Error('Unable to copy scenario')
+    const related = await loadRelatedScenarioData(ctx, privateScenario._id)
+    return scenarioFromDoc(privateScenario, related.issues, related.recordExcerpts, related.assets)
+  },
+})
+
+export const updatePrivateScenario = mutation({
+  args: {
+    scenarioId: v.string(),
+    input: scenarioInputValidator,
+  },
+  returns: scenarioValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const current = await requireVisibleScenario(ctx, args.scenarioId, user._id)
+    if (visibilityForDoc(current) !== 'private' || current.ownerUserId !== user._id) {
+      throw new Error('Scenario not found')
+    }
+    const sessions = await ctx.db
+      .query('caseSessions')
+      .withIndex('by_scenario', (index) => index.eq('scenarioId', current._id))
+      .collect()
+    if (!sessions.length) {
+      await ctx.db.patch(
+        current._id,
+        scenarioDocFromInput(args.input, {
+          scenarioKey: current.scenarioKey,
+          visibility: 'private',
+          ownerUserId: user._id,
+          scenarioFamilyKey: current.scenarioFamilyKey ?? current.scenarioKey,
+          revision: current.revision ?? 1,
+          revisionStatus: current.revisionStatus ?? 'draft',
+          ...(current.createdFromScenarioId ? { createdFromScenarioId: current.createdFromScenarioId } : {}),
+          ...(current.supersededByScenarioId ? { supersededByScenarioId: current.supersededByScenarioId } : {}),
+          published: false,
+        }),
+      )
+      const updated = await ctx.db.get(current._id)
+      if (!updated) throw new Error('Unable to update scenario')
+      const related = await loadRelatedScenarioData(ctx, updated._id)
+      return scenarioFromDoc(updated, related.issues, related.recordExcerpts, related.assets)
+    }
+
+    const scenarioKey = `${current.scenarioFamilyKey ?? current.scenarioKey}-r${(current.revision ?? 1) + 1}-${Date.now().toString(36)}`
+    const nextId = await ctx.db.insert(
+      'scenarios',
+      scenarioDocFromInput(args.input, {
+        scenarioKey,
+        visibility: 'private',
+        ownerUserId: user._id,
+        scenarioFamilyKey: current.scenarioFamilyKey ?? current.scenarioKey,
+        revision: (current.revision ?? 1) + 1,
+        revisionStatus: 'draft',
+        createdFromScenarioId: current._id,
+        published: false,
+      }),
+    )
+    await cloneScenarioChildren(ctx, current._id, nextId)
+    await ctx.db.patch(current._id, { supersededByScenarioId: nextId, revisionStatus: 'archived' })
+    const next = await ctx.db.get(nextId)
+    if (!next) throw new Error('Unable to create scenario revision')
+    const related = await loadRelatedScenarioData(ctx, next._id)
+    return scenarioFromDoc(next, related.issues, related.recordExcerpts, related.assets)
   },
 })
 
@@ -94,28 +495,17 @@ export const seedPublished = mutation({
         .query('scenarios')
         .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenario.id))
         .unique()
-      const scenarioDoc = {
+      const scenarioDoc = scenarioDocFromInput(scenario, {
         scenarioKey: scenario.id,
-        title: scenario.title,
-        source: scenario.source,
-        courtPackId: scenario.courtPackId,
-        shortCaption: scenario.shortCaption,
-        lowerTribunal: scenario.lowerTribunal,
-        natureOfSuit: scenario.natureOfSuit,
-        proceduralPosture: scenario.proceduralPosture,
-        issuesPresented: scenario.issuesPresented,
-        meritsRecord: scenario.meritsRecord,
-        ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
-        ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
-        ...(scenario.documentAssets
-          ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
-          : {}),
-        ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
+        visibility: 'public_template',
+        scenarioFamilyKey: scenario.id,
+        revision: 1,
+        revisionStatus: 'published',
         published: true,
-      }
+      })
 
       if (existing) {
-        await ctx.db.patch(existing._id, scenarioDoc)
+        await ctx.db.patch(existing._id, { ...scenarioDoc, documentAssetsJson: undefined })
         updated += 1
       } else {
         await ctx.db.insert('scenarios', scenarioDoc)
@@ -128,10 +518,116 @@ export const seedPublished = mutation({
       .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', 'recap-import-placeholder'))
       .unique()
     if (stalePlaceholder?.published) {
-      await ctx.db.patch(stalePlaceholder._id, { published: false })
+      await ctx.db.patch(stalePlaceholder._id, { published: false, revisionStatus: 'archived' })
       updated += 1
     }
 
     return { inserted, updated }
+  },
+})
+
+export const upsertScenarioDocumentAsset = internalMutation({
+  args: {
+    scenarioKey: v.string(),
+    assetKey: v.string(),
+    label: v.string(),
+    fileName: v.string(),
+    mimeType: v.literal('application/pdf'),
+    source: v.union(v.literal('synthetic'), v.literal('courtlistener'), v.literal('uploaded')),
+    storageId: v.id('_storage'),
+    sha256: v.optional(v.string()),
+    sizeBytes: v.number(),
+    pageCount: v.number(),
+    extractedText: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
+    createdAt: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const scenario = await ctx.db
+      .query('scenarios')
+      .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', args.scenarioKey))
+      .unique()
+    if (!scenario) throw new Error(`Scenario not found: ${args.scenarioKey}`)
+    const existing = await ctx.db
+      .query('scenarioDocumentAssets')
+      .withIndex('by_scenario_asset_key', (index) =>
+        index.eq('scenarioId', scenario._id).eq('assetKey', args.assetKey),
+      )
+      .unique()
+    const doc = {
+      scenarioId: scenario._id,
+      assetKey: args.assetKey,
+      label: args.label,
+      fileName: args.fileName,
+      mimeType: args.mimeType,
+      source: args.source,
+      storageId: args.storageId,
+      ...(args.sha256 ? { sha256: args.sha256 } : {}),
+      sizeBytes: args.sizeBytes,
+      pageCount: args.pageCount,
+      ...(args.extractedText ? { extractedText: args.extractedText } : {}),
+      ...(args.sourceUrl ? { sourceUrl: args.sourceUrl } : {}),
+      createdAt: args.createdAt,
+    }
+    if (existing) {
+      await ctx.db.patch(existing._id, doc)
+      return existing._id
+    }
+    return ctx.db.insert('scenarioDocumentAssets', doc)
+  },
+})
+
+async function sha256Hex(buffer: ArrayBuffer) {
+  const digest = await crypto.subtle.digest('SHA-256', buffer)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export const migrateBundledScenarioPdfAssets = action({
+  args: {
+    baseUrl: v.string(),
+  },
+  returns: v.object({
+    uploaded: v.number(),
+    skipped: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    let uploaded = 0
+    let skipped = 0
+    const baseUrl = args.baseUrl.replace(/\/$/, '')
+    for (const scenario of seedScenarios) {
+      for (const asset of scenario.documentAssets ?? []) {
+        if (asset.storageId) {
+          skipped += 1
+          continue
+        }
+        const sourcePath = `/trial-records/${scenario.id}/${asset.fileName}`
+        const response = await fetch(`${baseUrl}${sourcePath}`)
+        if (!response.ok) {
+          skipped += 1
+          continue
+        }
+        const buffer = await response.arrayBuffer()
+        const sha256 = await sha256Hex(buffer)
+        const blob = new Blob([buffer], { type: 'application/pdf' })
+        const storageId = await ctx.storage.store(blob, { sha256 })
+        await ctx.runMutation(internal.scenarios.upsertScenarioDocumentAsset, {
+          scenarioKey: scenario.id,
+          assetKey: asset.id,
+          label: asset.label,
+          fileName: asset.fileName,
+          mimeType: asset.mimeType,
+          source: asset.source,
+          storageId,
+          sha256,
+          sizeBytes: buffer.byteLength,
+          pageCount: asset.pageCount,
+          ...(asset.extractedText ? { extractedText: asset.extractedText } : {}),
+          ...(asset.sourceUrl ? { sourceUrl: asset.sourceUrl } : {}),
+          createdAt: new Date().toISOString(),
+        })
+        uploaded += 1
+      }
+    }
+    return { uploaded, skipped }
   },
 })

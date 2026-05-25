@@ -44,7 +44,6 @@ function fallbackDocument(
     fileName,
     mimeType: 'application/pdf',
     source: 'synthetic',
-    publicUrl: `/trial-records/${scenario.id}/${fileName}`,
     sizeBytes: Math.max(1024, scenarioRecordText(scenario).length * 20),
     pageCount: 1,
     extractedText: `${title}. ${scenario.shortCaption}. ${scenarioRecordText(scenario)}`,
