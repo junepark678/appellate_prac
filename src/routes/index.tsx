@@ -40,6 +40,11 @@ import {
   getRuleItemsForCourt,
   scenarios,
 } from '../modules/registry'
+import { ca4CourtSourceVersions } from '../domain/rules/ca4-source-profile'
+import {
+  evaluateReleaseGate,
+  sourceFreshnessStatuses,
+} from '../domain/rules/source-governance'
 import {
   createInitialSession,
   inferDocumentSignals,
@@ -82,6 +87,7 @@ type ViewKey =
   | 'parties'
   | 'trialDocket'
   | 'rules'
+  | 'governance'
   | 'scenarios'
   | 'assessment'
 
@@ -750,6 +756,10 @@ function Home() {
                     />
                   ) : null}
 
+                  {selectedView === 'governance' ? (
+                    <SourceGovernanceView courtPackId={activeSession.courtPackId} />
+                  ) : null}
+
                   {selectedView === 'trialDocket' ? (
                     <TrialDocketView
                       courtListenerEnabled={courtListenerReady}
@@ -1107,7 +1117,7 @@ function documentFromAnalysis(
   }
 }
 
-function statusClass(status: CaseSession['status']) {
+function statusClass(status: CaseSession['status'] | 'active') {
   const base = 'rounded-md px-3 py-2 text-sm font-semibold'
   if (status === 'closed') return `${base} bg-[#dceadf] text-[#285b38]`
   if (status === 'submitted') return `${base} bg-[#e5e2f4] text-[#443a7a]`
@@ -1172,6 +1182,7 @@ function navigationTabsForSession(session: CaseSession): ViewTab[] {
       : []),
     { key: 'trialDocket', label: 'Trial Record', icon: ListTree },
     { key: 'rules', label: 'Rules', icon: Library },
+    { key: 'governance', label: 'Sources', icon: ShieldCheck },
     { key: 'scenarios', label: 'Scenarios', icon: Search },
     ...(session.assessment
       ? [{ key: 'assessment' as const, label: 'Assessment', icon: BadgeCheck }]
@@ -2226,6 +2237,115 @@ function RulesView({
           </article>
         ))}
       </div>
+    </section>
+  )
+}
+
+function SourceGovernanceView({ courtPackId }: { courtPackId: string }) {
+  const courtPack = getCourtPack(courtPackId)
+  const statuses = sourceFreshnessStatuses(ca4CourtSourceVersions)
+  const betaGate = evaluateReleaseGate({ mode: 'beta' })
+  const productionGate = evaluateReleaseGate({ mode: 'production', env: {} })
+
+  return (
+    <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
+      <div className="border-b border-[#d8d1c4] p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+              <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+              Source Governance
+            </div>
+            <h2 className="mt-1 text-xl font-semibold">{courtPack.label}</h2>
+            <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
+              <span className="rounded border border-[#d8d1c4] bg-white px-2 py-1">
+                Release: {formatLabel(courtPack.releaseStatus ?? 'draft')}
+              </span>
+              <span className={betaGate.pass ? statusClass('active') : statusClass('dismissed')}>
+                Beta gate {betaGate.pass ? 'passed' : 'blocked'}
+              </span>
+              <span className={productionGate.pass ? statusClass('active') : statusClass('dismissed')}>
+                Production gate {productionGate.pass ? 'passed' : 'blocked'}
+              </span>
+            </div>
+          </div>
+          <div className="rounded-md border border-[#d8d1c4] bg-white px-3 py-2 text-sm text-[#59625d] lg:max-w-[420px]">
+            Active constraints, deadlines, and ECF events must reference published source versions before production release.
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[920px] text-left text-sm">
+          <thead className="border-b border-[#d8d1c4] text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            <tr>
+              <th className="px-4 py-3">Source</th>
+              <th className="px-4 py-3">Effective</th>
+              <th className="px-4 py-3">Review</th>
+              <th className="px-4 py-3">Bundled Hash</th>
+              <th className="px-4 py-3">Freshness</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#e2dbcf]">
+            {statuses.map((status) => {
+              const source = ca4CourtSourceVersions.find(
+                (candidate) => candidate.sourceVersionId === status.sourceVersionId,
+              )
+              return (
+                <tr key={status.sourceVersionId}>
+                  <td className="px-4 py-3 align-top">
+                    <a
+                      className="font-semibold text-[#1d4d4f]"
+                      href={status.sourceUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {source?.label ?? status.sourceVersionId}
+                    </a>
+                    <div className="mt-1 font-mono text-xs text-[#68716c]">
+                      {status.sourceVersionId}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 align-top text-[#59625d]">
+                    {status.effectiveDate}
+                  </td>
+                  <td className="px-4 py-3 align-top">
+                    <span className={status.published ? statusClass('active') : statusClass('setup')}>
+                      {formatLabel(status.reviewStatus)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 align-top">
+                    <code className="block max-w-[260px] break-all rounded bg-white px-2 py-1 text-xs text-[#3e4843]">
+                      {status.bundledHash}
+                    </code>
+                  </td>
+                  <td className="px-4 py-3 align-top">
+                    <span className={status.stale ? statusClass('dismissed') : statusClass('active')}>
+                      {status.stale ? 'Stale' : 'Current'}
+                    </span>
+                    {status.staleReason ? (
+                      <div className="mt-2 max-w-[260px] text-xs leading-5 text-[#8a321f]">
+                        {status.staleReason}
+                      </div>
+                    ) : null}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {productionGate.issues.length ? (
+        <div className="border-t border-[#d8d1c4] p-4">
+          <div className="text-sm font-semibold text-[#8a321f]">Production Blockers</div>
+          <ul className="mt-2 grid gap-2 text-sm leading-6 text-[#59625d]">
+            {productionGate.issues.slice(0, 8).map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   )
 }

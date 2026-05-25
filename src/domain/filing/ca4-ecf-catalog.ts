@@ -2,8 +2,10 @@ import type { EcfCatalogEvent, EcfEventCategory } from '../types'
 import { CA4_ECF_EVENTS_URL, ca4SourceVersionIds } from '../rules/ca4-source-profile'
 const rulesAndEcfSources = [
   ca4SourceVersionIds.frap2025,
+  ca4SourceVersionIds.federalCmEcf2026,
   ca4SourceVersionIds.ca4LocalRules2026,
   ca4SourceVersionIds.ca4EcfEvents2026,
+  ca4SourceVersionIds.ca4EcfRules2026,
 ]
 
 export const ca4EcfCatalogEvents: EcfCatalogEvent[] = [

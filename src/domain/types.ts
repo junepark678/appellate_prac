@@ -50,12 +50,21 @@ export type TurnPolicy = {
   stopOnDeficiency: boolean
 }
 
+export type CourtPackReleaseStatus =
+  | 'draft'
+  | 'source_review_pending'
+  | 'eval_pending'
+  | 'beta_approved'
+  | 'production_approved'
+  | 'retired'
+
 export type QualityState =
   | 'draft'
   | 'source_review_pending'
   | 'source_reviewed'
   | 'eval_ready'
   | 'beta_approved'
+  | 'production_approved'
 
 export type ProcedureState =
   | 'case_opened'
@@ -112,7 +121,73 @@ export type CourtSourceVersion = {
   effectiveFrom: string
   effectiveTo?: string
   contentHash: string
+  parsedHash?: string
   reviewStatus: 'draft' | 'reviewed' | 'published' | 'rejected'
+  publishedAt?: string
+  parserVersion?: string
+  sourceKind?:
+    | 'frap'
+    | 'local_rules'
+    | 'iop'
+    | 'ecf_event_catalog'
+    | 'ecf_local_rules'
+    | 'fee_schedule'
+    | 'forms'
+    | 'court_notices'
+    | 'cm_ecf_reference'
+    | 'internal'
+}
+
+export type SourceFreshnessStatus = {
+  sourceVersionId: string
+  sourceUrl: string
+  bundledHash: string
+  fetchedHash?: string
+  parsedHash?: string
+  effectiveDate: string
+  reviewStatus: CourtSourceVersion['reviewStatus']
+  published: boolean
+  stale: boolean
+  staleReason?: string
+  fetchedAt?: string
+}
+
+export type SimulationEvalThresholds = {
+  maxCriticalFailures: number
+  minValidTurnRate: number
+  maxHallucinatedSourceRate: number
+  maxRoleAuthorityFailureRate: number
+}
+
+export type LegalRealismLabel =
+  | 'hallucinated_rule'
+  | 'unsupported_record_cite'
+  | 'unavailable_relief'
+  | 'missed_jurisdiction_issue'
+  | 'wrong_deadline'
+  | 'wrong_role_authority'
+  | 'premature_filing'
+  | 'improper_sealed_treatment'
+
+export type ActorRunAudit = {
+  actorRunId: string
+  caseSessionId: string
+  actorId: string
+  toolName?: AiToolName
+  packetHash: string
+  sourcePacketHash: string
+  promptHash: string
+  rawOutputStorageId?: string
+  rawOutputText?: string
+  normalizedOutputJson: string
+  validatorResult: ToolValidationResult
+  model: string
+  providerId: string
+  costCents: number
+  latencyMs: number
+  legalRiskLabels: LegalRealismLabel[]
+  appliedEffects: boolean
+  createdAt: string
 }
 
 export type SourceBackedConstraint = {
@@ -221,6 +296,47 @@ export type EcfFeeBehavior = 'none' | 'required' | 'waivable' | 'deferred'
 export type EcfServiceBehavior = 'cm_ecf' | 'manual_required' | 'mixed'
 
 export type EcfPartySelectionMode = 'none' | 'single' | 'multiple' | 'all_filers'
+
+export type AttorneyAdmissionStatus =
+  | 'admitted'
+  | 'pending'
+  | 'pro_hac_vice'
+  | 'government_attorney'
+  | 'pro_se'
+  | 'not_admitted'
+
+export type FilingFeeState = {
+  status: 'not_required' | 'due' | 'paid' | 'deferred' | 'waived' | 'pending_ifp'
+  amountCents?: number
+  transactionId?: string
+  waivedReason?: 'ifp_granted' | 'government_exempt' | 'court_order'
+  warning?: string
+}
+
+export type ServiceRecipient = {
+  id: string
+  displayName: string
+  partyId?: string
+  role: ParticipantRole | 'attorney' | 'court' | 'other'
+  serviceMethod: EcfServiceBehavior | 'mail' | 'email' | 'none'
+  email?: string
+  address?: string
+  receivesNoticeOfDocketActivity: boolean
+  manualServiceRequired: boolean
+}
+
+export type FilerProfile = {
+  id: string
+  displayName: string
+  firmName?: string
+  attorneyAdmissionStatus: AttorneyAdmissionStatus
+  representedPartyIds: string[]
+  serviceRecipients: ServiceRecipient[]
+  feeState: FilingFeeState
+  nextGenAccountLinked: boolean
+  pacerExemption?: boolean
+  warnings: string[]
+}
 
 export type EcfRequiredFieldKey =
   | 'filingAttorneyName'
@@ -356,6 +472,9 @@ export type CourtPack = {
   filingEvents: FilingEvent[]
   aiActors: AiActor[]
   docketNumberFormat: string
+  releaseStatus?: CourtPackReleaseStatus
+  sourceVersionIds?: string[]
+  evalThresholds?: SimulationEvalThresholds
 }
 
 export type Participant = {
@@ -425,6 +544,9 @@ export type FilingMetadata = {
     suppressedParticipantIds?: string[]
     manualServiceRecipients?: string[]
   }
+  filerProfile?: FilerProfile
+  feeState?: FilingFeeState
+  serviceRecipients?: ServiceRecipient[]
   feeWaiverRequested?: boolean
   emergency: boolean
   sealed: boolean

@@ -244,6 +244,18 @@ export default defineSchema({
     filingEventsJson: v.optional(v.string()),
     aiActorsJson: v.optional(v.string()),
     docketNumberFormat: v.string(),
+    releaseStatus: v.optional(
+      v.union(
+        v.literal('draft'),
+        v.literal('source_review_pending'),
+        v.literal('eval_pending'),
+        v.literal('beta_approved'),
+        v.literal('production_approved'),
+        v.literal('retired'),
+      ),
+    ),
+    sourceVersionIds: v.optional(v.array(v.string())),
+    evalThresholdsJson: v.optional(v.string()),
     published: v.boolean(),
   }).index('by_pack_id', ['packId']),
 
@@ -510,6 +522,38 @@ export default defineSchema({
     .index('by_case', ['caseSessionId'])
     .index('by_user_month', ['userId', 'createdMonth']),
 
+  actorRunAudits: defineTable({
+    caseSessionId: v.id('caseSessions'),
+    actorId: v.string(),
+    toolName: v.optional(v.string()),
+    packetHash: v.string(),
+    sourcePacketHash: v.string(),
+    promptHash: v.string(),
+    rawOutputStorageId: v.optional(v.id('_storage')),
+    normalizedOutputJson: v.string(),
+    validatorResultJson: v.string(),
+    model: v.string(),
+    providerId: v.string(),
+    costCents: v.number(),
+    latencyMs: v.number(),
+    legalRiskLabels: v.array(
+      v.union(
+        v.literal('hallucinated_rule'),
+        v.literal('unsupported_record_cite'),
+        v.literal('unavailable_relief'),
+        v.literal('missed_jurisdiction_issue'),
+        v.literal('wrong_deadline'),
+        v.literal('wrong_role_authority'),
+        v.literal('premature_filing'),
+        v.literal('improper_sealed_treatment'),
+      ),
+    ),
+    appliedEffects: v.boolean(),
+    createdAt: v.string(),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_actor', ['actorId']),
+
   simulationTurns: defineTable({
     caseSessionId: v.id('caseSessions'),
     turnNumber: v.number(),
@@ -727,6 +771,8 @@ export default defineSchema({
     regressionMetadataJson: v.string(),
     criticalFailureCount: v.number(),
     validTurnRate: v.number(),
+    hallucinatedSourceRate: v.optional(v.number()),
+    roleAuthorityFailureRate: v.optional(v.number()),
     createdAt: v.string(),
   })
     .index('by_scenario', ['scenarioId'])

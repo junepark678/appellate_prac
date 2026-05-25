@@ -1,4 +1,5 @@
 import type { RuleRef } from '../types'
+import { ca4CourtSourceVersions } from './ca4-source-profile'
 
 export type RuleSourceManifestItem = {
   sourceVersionId: string
@@ -10,62 +11,43 @@ export type RuleSourceManifestItem = {
   sourceUrl: string
   sourceSystem: 'court' | 'uscourts' | 'courtlistener' | 'recap' | 'manual'
   parserVersion: string
+  contentHash?: string
+  reviewStatus?: 'draft' | 'reviewed' | 'published' | 'rejected'
   ruleRefs: RuleRef[]
 }
 
-export const fourthCircuitCivilAppealSourceManifest: RuleSourceManifestItem[] = [
-  {
-    sourceVersionId: 'frap-2025-official-rulebook',
-    moduleId: 'frap-2025',
-    label: 'Federal Rules of Appellate Procedure',
-    jurisdiction: 'US',
-    version: '2025',
-    effectiveFrom: '2025-12-01',
-    sourceUrl: 'https://www.uscourts.gov/rules-policies/current-rules-practice-procedure',
-    sourceSystem: 'uscourts',
-    parserVersion: 'manual-v1',
+function moduleIdForSourceKind(sourceKind: RuleSourceManifestItem['sourceSystem'] | string) {
+  if (sourceKind === 'frap') return 'frap-2025'
+  if (sourceKind === 'cm_ecf_reference') return 'cm-ecf-federal-appellate'
+  if (sourceKind === 'ecf_event_catalog') return 'ca4-ecf-event-catalog'
+  if (sourceKind === 'ecf_local_rules') return 'ca4-ecf-local-rules'
+  if (sourceKind === 'fee_schedule') return 'ca4-fee-schedule'
+  if (sourceKind === 'forms') return 'ca4-forms'
+  if (sourceKind === 'court_notices') return 'ca4-notices'
+  return 'ca4-current'
+}
+
+export const fourthCircuitCivilAppealSourceManifest: RuleSourceManifestItem[] =
+  ca4CourtSourceVersions.map((source) => ({
+    sourceVersionId: source.sourceVersionId,
+    moduleId: moduleIdForSourceKind(source.sourceKind ?? 'local_rules'),
+    label: source.label,
+    jurisdiction: source.sourceKind === 'frap' || source.sourceKind === 'cm_ecf_reference' ? 'US' : 'US-CA4',
+    version: source.effectiveFrom,
+    effectiveFrom: source.effectiveFrom,
+    ...(source.effectiveTo ? { effectiveTo: source.effectiveTo } : {}),
+    sourceUrl: source.sourceUrl,
+    sourceSystem: source.sourceUrl.includes('uscourts.gov') && !source.sourceUrl.includes('ca4.')
+      ? 'uscourts'
+      : 'court',
+    parserVersion: source.parserVersion ?? 'html-normalized-sha256-v1',
+    contentHash: source.contentHash,
+    reviewStatus: source.reviewStatus,
     ruleRefs: [
       {
-        ruleId: 'FRAP',
-        label: 'Federal Rules of Appellate Procedure',
-        sourceUrl: 'https://www.uscourts.gov/rules-policies/current-rules-practice-procedure',
+        ruleId: source.sourceKind === 'frap' ? 'FRAP' : source.sourceKind === 'cm_ecf_reference' ? 'CM-ECF' : 'CA4-SOURCE',
+        label: source.label,
+        sourceUrl: source.sourceUrl,
       },
     ],
-  },
-  {
-    sourceVersionId: 'ca4-current:2026-03-23',
-    moduleId: 'ca4-current',
-    label: 'Fourth Circuit Local Rules and Internal Operating Procedures',
-    jurisdiction: 'US-CA4',
-    version: '2026-03-23',
-    effectiveFrom: '2026-03-23',
-    sourceUrl: 'https://www.ca4.uscourts.gov/LocalRules/toc.html',
-    sourceSystem: 'court',
-    parserVersion: 'manual-v1',
-    ruleRefs: [
-      {
-        ruleId: 'CA4-LOCAL',
-        label: 'Fourth Circuit Rules and IOPs',
-        sourceUrl: 'https://www.ca4.uscourts.gov/LocalRules/toc.html',
-      },
-    ],
-  },
-  {
-    sourceVersionId: 'cm-ecf-us-courts-2026',
-    moduleId: 'cm-ecf-federal-appellate',
-    label: 'Federal CM/ECF and PACER Filing Reference',
-    jurisdiction: 'US',
-    version: '2026',
-    effectiveFrom: '2026-01-01',
-    sourceUrl: 'https://www.uscourts.gov/court-records/electronic-filing-cm-ecf',
-    sourceSystem: 'uscourts',
-    parserVersion: 'manual-v1',
-    ruleRefs: [
-      {
-        ruleId: 'CM-ECF',
-        label: 'CM/ECF Filing Reference',
-        sourceUrl: 'https://www.uscourts.gov/court-records/electronic-filing-cm-ecf',
-      },
-    ],
-  },
-]
+  }))

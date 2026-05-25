@@ -8,6 +8,7 @@ import {
   ca4DeadlineRules,
   ca4SourceBackedConstraints,
 } from '../src/domain/rules/ca4-source-profile'
+import { sourceFreshnessStatuses } from '../src/domain/rules/source-governance'
 import { ca4EcfCatalogEvents } from '../src/domain/filing/ca4-ecf-catalog'
 
 function simpleHash(value: string) {
@@ -48,9 +49,11 @@ export const seedSourceManifest = mutation({
         effectiveFrom: source.effectiveFrom,
         sourceUrl: source.sourceUrl,
         sourceSystem: source.sourceSystem,
-        reviewed: false,
+        reviewed: source.reviewStatus === 'reviewed' || source.reviewStatus === 'published',
         metadataJson: JSON.stringify({
           parserVersion: source.parserVersion,
+          contentHash: source.contentHash,
+          reviewStatus: source.reviewStatus,
           ruleRefs: source.ruleRefs,
         }),
       }
@@ -92,6 +95,7 @@ export const upsertSourceArtifact = mutation({
     url: v.string(),
     rawText: v.string(),
     parserVersion: v.string(),
+    contentHash: v.optional(v.string()),
     effectiveDate: v.optional(v.string()),
     mediaType: v.optional(v.string()),
     rawStorageId: v.optional(v.id('_storage')),
@@ -99,7 +103,7 @@ export const upsertSourceArtifact = mutation({
   returns: v.id('sourceArtifacts'),
   handler: async (ctx, args) => {
     await requireAdmin(ctx)
-    const contentHash = simpleHash(args.rawText)
+    const contentHash = args.contentHash ?? simpleHash(args.rawText)
     const existing = await ctx.db
       .query('sourceArtifacts')
       .withIndex('by_hash', (index) => index.eq('contentHash', contentHash))
@@ -398,7 +402,7 @@ export const listSourceArtifacts = query({
     }),
   ),
   handler: async (ctx) => {
-    await requireCurrentUser(ctx)
+    await requireAdmin(ctx)
     const artifacts = await ctx.db.query('sourceArtifacts').collect()
     return artifacts
       .slice()
@@ -413,5 +417,42 @@ export const listSourceArtifacts = query({
         fetchedAt: artifact.fetchedAt,
         reviewStatus: artifact.reviewStatus,
       }))
+  },
+})
+
+export const listSourceFreshness = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      sourceVersionId: v.string(),
+      sourceUrl: v.string(),
+      bundledHash: v.string(),
+      fetchedHash: v.optional(v.string()),
+      parsedHash: v.optional(v.string()),
+      effectiveDate: v.string(),
+      reviewStatus: v.union(
+        v.literal('draft'),
+        v.literal('reviewed'),
+        v.literal('published'),
+        v.literal('rejected'),
+      ),
+      published: v.boolean(),
+      stale: v.boolean(),
+      staleReason: v.optional(v.string()),
+      fetchedAt: v.optional(v.string()),
+    }),
+  ),
+  handler: async (ctx) => {
+    await requireAdmin(ctx)
+    const artifacts = await ctx.db.query('sourceArtifacts').collect()
+    return sourceFreshnessStatuses(
+      ca4CourtSourceVersions,
+      artifacts.map((artifact) => ({
+        sourceVersionId: artifact.sourceVersionId,
+        contentHash: artifact.contentHash,
+        fetchedAt: artifact.fetchedAt,
+        reviewStatus: artifact.reviewStatus,
+      })),
+    )
   },
 })

@@ -41,6 +41,7 @@ export const qualityStateValidator = v.union(
   v.literal('source_reviewed'),
   v.literal('eval_ready'),
   v.literal('beta_approved'),
+  v.literal('production_approved'),
 )
 
 export const procedureStateValidator = v.union(

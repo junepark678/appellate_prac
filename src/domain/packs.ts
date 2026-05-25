@@ -9,12 +9,15 @@ import type {
   Scenario,
 } from './types'
 import scenarioSeed from './scenarios.seed.json'
+import {
+  CA4_LOCAL_RULES_URL,
+  FRAP_SOURCE_URL,
+  ca4ProcedureProfile,
+  ca4SourceVersionIds,
+} from './rules/ca4-source-profile'
 
-const usCourtsFrapSource =
-  'https://www.uscourts.gov/forms-rules/current-rules-practice-procedure/federal-rules-appellate-procedure'
-
-const ca4RulesSource = 'https://www.ca4.uscourts.gov/LocalRules/toc.html'
-const ca4RulesAndProceduresSource = 'https://www.ca4.uscourts.gov/rules-and-procedures'
+const usCourtsFrapSource = FRAP_SOURCE_URL
+const ca4RulesSource = CA4_LOCAL_RULES_URL
 const ca4Rule4Source = 'https://www.ca4.uscourts.gov/rules/Rule4.html'
 const ca4Rule9Source = 'https://www.ca4.uscourts.gov/rules/Rule9.html'
 const ca4Rule15Source = 'https://www.ca4.uscourts.gov/rules/Rule15.html'
@@ -2283,7 +2286,7 @@ export const rulePacks: RulePack[] = [
     procedureDomain: 'civil_appeal',
     version: '2025-12-01',
     sourceUrl: usCourtsFrapSource,
-    sourceVersionIds: ['frap-2025:2025-12-01'],
+    sourceVersionIds: [ca4SourceVersionIds.frap2025],
     items: frapItems,
   },
   {
@@ -2294,8 +2297,8 @@ export const rulePacks: RulePack[] = [
     courtLevel: 'intermediate_appellate',
     procedureDomain: 'civil_appeal',
     version: '2026-03-23',
-    sourceUrl: ca4RulesAndProceduresSource,
-    sourceVersionIds: ['ca4-current:2026-03-23'],
+    sourceUrl: ca4RulesSource,
+    sourceVersionIds: [ca4SourceVersionIds.ca4LocalRules2026],
     items: ca4Items,
   },
 ]
@@ -2414,6 +2417,14 @@ export const courtPacks: CourtPack[] = [
     filingEvents: civilFilingEvents,
     aiActors,
     docketNumberFormat: '26-####',
+    releaseStatus: 'beta_approved',
+    sourceVersionIds: ca4ProcedureProfile.sourceVersionIds,
+    evalThresholds: {
+      maxCriticalFailures: 0,
+      minValidTurnRate: 0.98,
+      maxHallucinatedSourceRate: 0.01,
+      maxRoleAuthorityFailureRate: 0,
+    },
   },
   {
     id: 'us-federal-ca4-criminal-appeal',

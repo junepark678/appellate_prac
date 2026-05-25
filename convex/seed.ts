@@ -114,6 +114,11 @@ function courtPackDoc(pack: CourtPack) {
     filingEventsJson: JSON.stringify(pack.filingEvents),
     aiActorsJson: JSON.stringify(pack.aiActors),
     docketNumberFormat: pack.docketNumberFormat,
+    ...(pack.releaseStatus ? { releaseStatus: pack.releaseStatus } : {}),
+    ...(pack.sourceVersionIds ? { sourceVersionIds: pack.sourceVersionIds } : {}),
+    ...(pack.evalThresholds
+      ? { evalThresholdsJson: JSON.stringify(pack.evalThresholds) }
+      : {}),
     published: publishedCourtPackIds.has(pack.id),
   }
 }
@@ -134,6 +139,9 @@ function courtPackCurrent(doc: Doc<'courtPacks'>) {
     ...(doc.filingEventsJson ? { filingEventsJson: doc.filingEventsJson } : {}),
     ...(doc.aiActorsJson ? { aiActorsJson: doc.aiActorsJson } : {}),
     docketNumberFormat: doc.docketNumberFormat,
+    ...(doc.releaseStatus ? { releaseStatus: doc.releaseStatus } : {}),
+    ...(doc.sourceVersionIds ? { sourceVersionIds: doc.sourceVersionIds } : {}),
+    ...(doc.evalThresholdsJson ? { evalThresholdsJson: doc.evalThresholdsJson } : {}),
     published: doc.published,
   }
 }
