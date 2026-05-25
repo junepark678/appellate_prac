@@ -13,6 +13,8 @@ import type { ReactNode } from 'react'
 import appCss from '../styles.css?url'
 import { convex } from '../convex'
 
+const enableDevtools = import.meta.env.DEV
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
@@ -47,17 +49,19 @@ function RootDocument({ children }: { children: ReactNode }) {
         <ClerkProvider>
           <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
             {children}
-            <TanStackDevtools
-              config={{
-                position: 'bottom-right',
-              }}
-              plugins={[
-                {
-                  name: 'Tanstack Router',
-                  render: <TanStackRouterDevtoolsPanel />,
-                },
-              ]}
-            />
+            {enableDevtools ? (
+              <TanStackDevtools
+                config={{
+                  position: 'bottom-right',
+                }}
+                plugins={[
+                  {
+                    name: 'Tanstack Router',
+                    render: <TanStackRouterDevtoolsPanel />,
+                  },
+                ]}
+              />
+            ) : null}
           </ConvexProviderWithClerk>
         </ClerkProvider>
         <Scripts />
