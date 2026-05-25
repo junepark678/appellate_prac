@@ -52,6 +52,7 @@ import {
   getAvailableEcfEventDefinitions,
   preflightEcfFiling,
 } from '../domain/filing/ecf'
+import { createTrialDocket } from '../domain/trial-docket'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import { defaultPanelJudgeProfiles, formPanelConference } from '../domain/panel/conference'
 import type {
@@ -62,6 +63,7 @@ import type {
   FilingMetadata,
   ParticipantRole,
   Scenario,
+  TrialDocket,
   ToolCall,
   UploadedDocument,
 } from '../domain/types'
@@ -137,21 +139,6 @@ type RejectActorWorkProductMutation = (args: {
   caseSessionId: Id<'caseSessions'>
   workProductId: string
 }) => Promise<ActorWorkProduct>
-
-type TrialDocketEntry = {
-  entryNumber: number
-  filedAt: string
-  title: string
-  text: string
-}
-
-type TrialDocket = {
-  caption: string
-  court: string
-  docketNumber: string
-  sourceUrl?: string
-  entries: TrialDocketEntry[]
-}
 
 type SessionSummary = {
   id: string
@@ -1077,41 +1064,6 @@ function createDefaultMetadata(session: CaseSession, eventId: string): FilingMet
     ...defaultFilingMetadata(eventId, sealed),
     representedPartyId: representedParty?.id ?? learnerRole,
     feePaymentStatus: event?.feeBehavior === 'required' ? 'pending' : 'not_required',
-  }
-}
-
-function createTrialDocket(session: CaseSession): TrialDocket {
-  const { scenario } = session
-  return {
-    caption: scenario.shortCaption,
-    court: scenario.lowerTribunal,
-    docketNumber: '1:25-cv-01482',
-    entries: [
-      {
-        entryNumber: 1,
-        filedAt: '2025-08-18T14:32:00.000Z',
-        title: 'Complaint',
-        text: `Opening pleading filed in ${scenario.shortCaption}. Nature of suit: ${scenario.natureOfSuit}.`,
-      },
-      {
-        entryNumber: 18,
-        filedAt: '2025-11-03T16:20:00.000Z',
-        title: 'Dispositive Motion',
-        text: `A dispositive motion was filed in the lower tribunal. Posture: ${scenario.proceduralPosture}`,
-      },
-      {
-        entryNumber: 31,
-        filedAt: '2026-02-06T19:45:00.000Z',
-        title: 'Memorandum Opinion and Order',
-        text: `The lower tribunal issued an order creating the appellate posture for ${scenario.shortCaption}.`,
-      },
-      {
-        entryNumber: 32,
-        filedAt: '2026-02-06T19:48:00.000Z',
-        title: 'Civil Judgment',
-        text: `Final judgment entered in the ${scenario.natureOfSuit.toLowerCase()} matter.`,
-      },
-    ],
   }
 }
 
@@ -2460,6 +2412,25 @@ function TrialDocketView({
   )
 }
 
+function formatFileSize(sizeBytes: number) {
+  if (sizeBytes >= 1024 * 1024) return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`
+}
+
+function trialDocketDocumentHref(document: TrialDocket['entries'][number]['documents'][number]) {
+  return document.publicUrl ?? document.sourceUrl
+}
+
+function trialDocketDocumentLabel(
+  entry: TrialDocket['entries'][number],
+  document: TrialDocket['entries'][number]['documents'][number],
+) {
+  const value = `${document.label} ${entry.title}`.toLowerCase()
+  if (value.includes('opinion') || value.includes('order')) return 'Opinion PDF'
+  if (value.includes('judgment')) return 'Judgment PDF'
+  return entry.documents.length > 1 ? document.label : 'Open PDF'
+}
+
 function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
   return (
     <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7]">
@@ -2505,6 +2476,44 @@ function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
               <div>
                 <div className="font-semibold">{entry.title}</div>
                 <p className="mt-2 leading-6 text-[#3e4843]">{entry.text}</p>
+                {entry.documents.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {entry.documents.map((document) => {
+                      const href = trialDocketDocumentHref(document)
+                      const metadata = [
+                        `${document.pageCount} ${document.pageCount === 1 ? 'page' : 'pages'}`,
+                        formatFileSize(document.sizeBytes),
+                      ].join(' | ')
+                      const content = (
+                        <>
+                          <FileCheck2 className="h-4 w-4" aria-hidden="true" />
+                          <span>{trialDocketDocumentLabel(entry, document)}</span>
+                          <span className="font-normal text-[#59625d]">{metadata}</span>
+                        </>
+                      )
+                      return href ? (
+                        <a
+                          className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[#cfc7b9] bg-white px-3 py-2 text-xs font-semibold text-[#1d4d4f] hover:border-[#1d4d4f]"
+                          href={href}
+                          key={document.id}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          {content}
+                        </a>
+                      ) : (
+                        <span
+                          className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[#d8d1c4] bg-[#f2eee6] px-3 py-2 text-xs font-semibold text-[#59625d]"
+                          key={document.id}
+                        >
+                          <FileText className="h-4 w-4" aria-hidden="true" />
+                          <span>{document.storageId ? 'Stored PDF' : 'PDF'}</span>
+                          <span className="font-normal">{metadata}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                ) : null}
               </div>
             </article>
           ))}

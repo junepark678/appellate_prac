@@ -26,7 +26,13 @@ import { preflightFilingSubmission } from './rules/executable-constraints'
 import { applyToolCall, createInitialSession, fileDraft } from './simulation'
 import { advanceSimulationTurn } from './simulation/director'
 import { nextCounterpartyReaction } from './counterparty/reactive-strategy'
-import type { ActorWorkProduct, FilingDraft, FilingSubmission, UploadedDocument } from './types'
+import type {
+  ActorWorkProduct,
+  CaseSession,
+  FilingDraft,
+  FilingSubmission,
+  UploadedDocument,
+} from './types'
 
 function actorProduct(
   input: Omit<
@@ -112,6 +118,25 @@ const stayMotionPdf: UploadedDocument = {
   sizeBytes: 100_000,
   extractedText: 'Motion to stay pending appeal. Emergency relief requested.',
   extractedSignals: ['motion', 'stay'],
+}
+
+function expectFilingBackedDocketEntriesResolve(session: CaseSession) {
+  const acceptedFilings = session.filings.filter((filing) => filing.outcome !== 'rejected')
+  for (const filing of acceptedFilings) {
+    expect(session.docketEntries.some((entry) => entry.filingId === filing.id)).toBe(true)
+    for (const document of filing.documents) {
+      expect(document.mimeType).toBe('application/pdf')
+      expect(document.fileName.endsWith('.pdf')).toBe(true)
+      expect(document.sizeBytes).toBeGreaterThan(0)
+      expect(document.pageCount ?? 1).toBeGreaterThan(0)
+    }
+  }
+
+  for (const entry of session.docketEntries.filter((candidate) => candidate.filingId)) {
+    const filing = session.filings.find((candidate) => candidate.id === entry.filingId)
+    expect(filing).toBeTruthy()
+    expect(filing?.documents.length).toBeGreaterThan(0)
+  }
 }
 
 const amicusPdf: UploadedDocument = {
@@ -552,6 +577,7 @@ describe('production appellate flow', () => {
     ])
     expect(formPanelConference(session)?.majorityResult).toBeTruthy()
     expect(session.deadlines.some((deadline) => deadline.targetEventId === 'mandate')).toBe(true)
+    expectFilingBackedDocketEntriesResolve(session)
   })
 
   it('rejects invalid actor decisions without applying unavailable relief', () => {

@@ -263,6 +263,8 @@ export default defineSchema({
     issuesPresented: v.array(v.string()),
     meritsRecord: v.array(v.string()),
     trainingJson: v.optional(v.string()),
+    trialDocketJson: v.optional(v.string()),
+    documentAssetsJson: v.optional(v.string()),
     sourceCaseUrl: v.optional(v.string()),
     ownerUserId: v.optional(v.id('users')),
     published: v.boolean(),

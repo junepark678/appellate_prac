@@ -151,6 +151,10 @@ function scenarioDoc(scenario: Scenario) {
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
     ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
+    ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
+    ...(scenario.documentAssets
+      ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
+      : {}),
     ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
     published: true,
   }
@@ -169,6 +173,8 @@ function scenarioCurrent(doc: Doc<'scenarios'>) {
     issuesPresented: doc.issuesPresented,
     meritsRecord: doc.meritsRecord,
     ...(doc.trainingJson ? { trainingJson: doc.trainingJson } : {}),
+    ...(doc.trialDocketJson ? { trialDocketJson: doc.trialDocketJson } : {}),
+    ...(doc.documentAssetsJson ? { documentAssetsJson: doc.documentAssetsJson } : {}),
     ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
     published: doc.published,
   }

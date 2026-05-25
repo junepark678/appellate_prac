@@ -492,6 +492,42 @@ export const participantValidator = v.object({
   role: participantRoleValidator,
 })
 
+export const scenarioDocumentAssetValidator = v.object({
+  id: v.string(),
+  label: v.string(),
+  fileName: v.string(),
+  mimeType: v.literal('application/pdf'),
+  source: v.union(
+    v.literal('synthetic'),
+    v.literal('courtlistener'),
+    v.literal('uploaded'),
+  ),
+  publicUrl: v.optional(v.string()),
+  sourceUrl: v.optional(v.string()),
+  storageId: v.optional(v.string()),
+  sha256: v.optional(v.string()),
+  sizeBytes: v.number(),
+  pageCount: v.number(),
+  extractedText: v.optional(v.string()),
+})
+
+export const scenarioTrialDocketEntryValidator = v.object({
+  id: v.string(),
+  entryNumber: v.number(),
+  filedAt: v.string(),
+  title: v.string(),
+  text: v.string(),
+  documentAssetIds: v.array(v.string()),
+})
+
+export const scenarioTrialDocketValidator = v.object({
+  caption: v.string(),
+  court: v.string(),
+  docketNumber: v.string(),
+  sourceUrl: v.optional(v.string()),
+  entries: v.array(scenarioTrialDocketEntryValidator),
+})
+
 export const scenarioValidator = v.object({
   id: v.string(),
   title: v.string(),
@@ -512,6 +548,8 @@ export const scenarioValidator = v.object({
   training: v.optional(scenarioTrainingMetadataValidator),
   participants: v.optional(v.array(participantValidator)),
   sourceCaseUrl: v.optional(v.string()),
+  trialDocket: v.optional(scenarioTrialDocketValidator),
+  documentAssets: v.optional(v.array(scenarioDocumentAssetValidator)),
 })
 
 export const docketEntryValidator = v.object({
@@ -1060,10 +1098,12 @@ export const courtListenerSearchResultValidator = v.object({
 })
 
 export const trialDocketEntryValidator = v.object({
+  id: v.string(),
   entryNumber: v.number(),
   filedAt: v.string(),
   title: v.string(),
   text: v.string(),
+  documents: v.array(scenarioDocumentAssetValidator),
 })
 
 export const trialDocketValidator = v.object({

@@ -20,6 +20,8 @@ function scenarioFromDoc(scenario: {
   issuesPresented: string[]
   meritsRecord: string[]
   trainingJson?: string
+  trialDocketJson?: string
+  documentAssetsJson?: string
   sourceCaseUrl?: string
 }): Scenario {
   const sourceCaseUrl = scenario.sourceCaseUrl
@@ -27,6 +29,12 @@ function scenarioFromDoc(scenario: {
     : {}
   const training = scenario.trainingJson
     ? { training: JSON.parse(scenario.trainingJson) as Scenario['training'] }
+    : {}
+  const trialDocket = scenario.trialDocketJson
+    ? { trialDocket: JSON.parse(scenario.trialDocketJson) as Scenario['trialDocket'] }
+    : {}
+  const documentAssets = scenario.documentAssetsJson
+    ? { documentAssets: JSON.parse(scenario.documentAssetsJson) as Scenario['documentAssets'] }
     : {}
   return {
     id: scenario.scenarioKey,
@@ -40,6 +48,8 @@ function scenarioFromDoc(scenario: {
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
     ...training,
+    ...trialDocket,
+    ...documentAssets,
     ...sourceCaseUrl,
   }
 }
@@ -96,6 +106,10 @@ export const seedPublished = mutation({
         issuesPresented: scenario.issuesPresented,
         meritsRecord: scenario.meritsRecord,
         ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
+        ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
+        ...(scenario.documentAssets
+          ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
+          : {}),
         ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
         published: true,
       }

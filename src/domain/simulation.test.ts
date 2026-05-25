@@ -195,6 +195,29 @@ describe('simulation engine', () => {
     )
   })
 
+  it('resolves accepted filing docket entries to filing PDFs through filingId', () => {
+    const next = fileDraft(createInitialSession(), {
+      ...draft('notice_of_appeal'),
+      documents: [noticePdf],
+    })
+    const entry = next.docketEntries.find((candidate) => candidate.filingId)
+    const filing = next.filings.find((candidate) => candidate.id === entry?.filingId)
+
+    expect(entry).toBeTruthy()
+    expect(filing?.documents[0]?.fileName).toBe('notice-of-appeal.pdf')
+    expect(filing?.documents[0]?.mimeType).toBe('application/pdf')
+  })
+
+  it('does not create filing-backed docket entries for rejected filings', () => {
+    const rejected = fileDraft(createInitialSession(), {
+      ...draft('notice_of_appeal'),
+      documents: [],
+    })
+
+    expect(rejected.filings).toHaveLength(0)
+    expect(rejected.docketEntries.some((entry) => entry.filingId)).toBe(false)
+  })
+
   it('rejects invalid AI counterparty filing events', () => {
     const session = createInitialSession()
     const result = validateToolCall(session, {

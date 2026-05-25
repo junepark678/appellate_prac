@@ -47,6 +47,8 @@ import type {
   ScenarioIssue,
   ScenarioRecordExcerpt,
   Scenario,
+  TrialDocket,
+  TrialDocketEntry,
   UploadedDocument,
 } from '../src/domain/types'
 import type { DocumentAnalysis } from '../src/modules/types'
@@ -67,21 +69,6 @@ import {
 } from '../src/domain/simulation/director'
 import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
-
-type TrialDocketEntry = {
-  entryNumber: number
-  filedAt: string
-  title: string
-  text: string
-}
-
-type TrialDocket = {
-  caption: string
-  court: string
-  docketNumber: string
-  sourceUrl?: string
-  entries: TrialDocketEntry[]
-}
 
 type ReadCtx = QueryCtx | MutationCtx
 type WriteCtx = MutationCtx
@@ -122,6 +109,12 @@ function scenarioFromDoc(
   const training = doc.trainingJson
     ? { training: JSON.parse(doc.trainingJson) as Scenario['training'] }
     : {}
+  const trialDocket = doc.trialDocketJson
+    ? { trialDocket: JSON.parse(doc.trialDocketJson) as Scenario['trialDocket'] }
+    : {}
+  const documentAssets = doc.documentAssetsJson
+    ? { documentAssets: JSON.parse(doc.documentAssetsJson) as Scenario['documentAssets'] }
+    : {}
   return {
     id: doc.scenarioKey,
     title: doc.title,
@@ -136,6 +129,8 @@ function scenarioFromDoc(
     ...(issues.length ? { issues } : {}),
     ...(recordExcerpts.length ? { recordExcerpts } : {}),
     ...training,
+    ...trialDocket,
+    ...documentAssets,
     ...sourceCaseUrl,
   }
 }
@@ -163,6 +158,10 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
       issuesPresented: bundled.issuesPresented,
       meritsRecord: bundled.meritsRecord,
       ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
+      ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
+      ...(bundled.documentAssets
+        ? { documentAssetsJson: JSON.stringify(bundled.documentAssets) }
+        : {}),
       ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
       published: true,
     })
@@ -220,6 +219,10 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string) {
     issuesPresented: bundled.issuesPresented,
     meritsRecord: bundled.meritsRecord,
     ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
+    ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
+    ...(bundled.documentAssets
+      ? { documentAssetsJson: JSON.stringify(bundled.documentAssets) }
+      : {}),
     ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
     published: true,
   })
@@ -1121,6 +1124,7 @@ function createImportedTrialDocket(
     sourceUrl,
     entries: [
       {
+        id: `courtlistener-${result.docket_id ?? result.id}-entry-1`,
         entryNumber: 1,
         filedAt: result.dateFiled
           ? new Date(result.dateFiled).toISOString()
@@ -1129,9 +1133,22 @@ function createImportedTrialDocket(
         text: result.snippet
           ? stripHtml(result.snippet)
           : 'Public docket metadata imported from CourtListener. Open the source docket for the complete live docket sheet.',
+        documents: [],
       },
     ],
   }
+}
+
+function normalizeTrialDocketEntries(entriesJson: string): TrialDocketEntry[] {
+  const parsed = JSON.parse(entriesJson) as Array<Partial<TrialDocketEntry>>
+  return parsed.map((entry, index) => ({
+    id: entry.id ?? `trial-docket-import-${String(index + 1).padStart(4, '0')}`,
+    entryNumber: entry.entryNumber ?? index + 1,
+    filedAt: entry.filedAt ?? new Date(0).toISOString(),
+    title: entry.title ?? 'Imported CourtListener Trial Docket Entry',
+    text: entry.text ?? '',
+    documents: entry.documents ?? [],
+  }))
 }
 
 function promptHashForSession(session: CaseSession) {
@@ -1746,7 +1763,7 @@ export const getTrialDocketForCurrentUser = query({
       court: latest.court,
       docketNumber: latest.docketNumber,
       ...(latest.sourceUrl ? { sourceUrl: latest.sourceUrl } : {}),
-      entries: JSON.parse(latest.entriesJson) as TrialDocketEntry[],
+      entries: normalizeTrialDocketEntries(latest.entriesJson),
     }
   },
 })
