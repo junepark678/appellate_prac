@@ -72,6 +72,18 @@ import scenarioSeed from '../src/domain/scenarios.seed.json'
 
 type ReadCtx = QueryCtx | MutationCtx
 type WriteCtx = MutationCtx
+type EcfReceiptRecord = NonNullable<CaseSession['ecfReceipts']>[number]
+type SimulationTurnRecord = NonNullable<CaseSession['simulationTurns']>[number]
+type SimulationTurnPayload = {
+  startedAt?: string
+  completedAt?: string
+  effects?: string[]
+  inputSnapshotHash?: string
+  outputSnapshotHash?: string
+  validatorVersion?: string
+  retryCount?: number
+  stoppedReason?: string
+}
 
 const defaultScenarioKey = 'synthetic-employment-retaliation'
 const openRouterCooldownMs = 10_000
@@ -100,21 +112,36 @@ const defaultTurnPolicy = {
   stopOnDeficiency: true,
 }
 
+function parseJsonField<T>(json: string, label: string): T {
+  try {
+    return JSON.parse(json) as T
+  } catch {
+    throw new Error(`Invalid persisted JSON for ${label}.`)
+  }
+}
+
+function parseOptionalJsonField<T>(json: string | undefined, label: string): T | undefined {
+  return json ? parseJsonField<T>(json, label) : undefined
+}
+
 function scenarioFromDoc(
   doc: Doc<'scenarios'>,
   issues: ScenarioIssue[] = [],
   recordExcerpts: ScenarioRecordExcerpt[] = [],
 ): Scenario {
   const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
-  const training = doc.trainingJson
-    ? { training: JSON.parse(doc.trainingJson) as Scenario['training'] }
-    : {}
-  const trialDocket = doc.trialDocketJson
-    ? { trialDocket: JSON.parse(doc.trialDocketJson) as Scenario['trialDocket'] }
-    : {}
-  const documentAssets = doc.documentAssetsJson
-    ? { documentAssets: JSON.parse(doc.documentAssetsJson) as Scenario['documentAssets'] }
-    : {}
+  const training = parseOptionalJsonField<Scenario['training']>(
+    doc.trainingJson,
+    `scenario ${doc._id} training`,
+  )
+  const trialDocket = parseOptionalJsonField<Scenario['trialDocket']>(
+    doc.trialDocketJson,
+    `scenario ${doc._id} trial docket`,
+  )
+  const documentAssets = parseOptionalJsonField<Scenario['documentAssets']>(
+    doc.documentAssetsJson,
+    `scenario ${doc._id} document assets`,
+  )
   return {
     id: doc.scenarioKey,
     title: doc.title,
@@ -128,9 +155,9 @@ function scenarioFromDoc(
     meritsRecord: doc.meritsRecord,
     ...(issues.length ? { issues } : {}),
     ...(recordExcerpts.length ? { recordExcerpts } : {}),
-    ...training,
-    ...trialDocket,
-    ...documentAssets,
+    ...(training ? { training } : {}),
+    ...(trialDocket ? { trialDocket } : {}),
+    ...(documentAssets ? { documentAssets } : {}),
     ...sourceCaseUrl,
   }
 }
@@ -270,7 +297,7 @@ async function requireAuthorizedSessionDoc(
 
 function analysisFromDoc(doc: Doc<'documentAnalyses'>): DocumentAnalysis {
   if (doc.analysisJson) {
-    return JSON.parse(doc.analysisJson) as DocumentAnalysis
+    return parseJsonField<DocumentAnalysis>(doc.analysisJson, `document analysis ${doc._id}`)
   }
 
   return {
@@ -305,6 +332,104 @@ function documentFromDoc(
     ...(doc.analysisId ? { analysisId: doc.analysisId } : {}),
     ...(parsedAnalysis ? { analysis: parsedAnalysis } : {}),
     extractedSignals: doc.extractedSignals,
+  }
+}
+
+function actorWorkProductFromDoc(product: Doc<'actorWorkProducts'>): ActorWorkProduct {
+  const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
+    product.workProductJson,
+    `actor work product ${product._id}`,
+  )
+  const citations = parseOptionalJsonField<ActorWorkProduct['citations']>(
+    product.citationsJson,
+    `actor work product ${product._id} citations`,
+  )
+
+  return {
+    id: product._id,
+    caseSessionId: product.caseSessionId,
+    actorId: product.actorId,
+    kind: product.kind,
+    status: product.status,
+    reviewStatus:
+      product.reviewStatus ??
+      (product.status === 'accepted'
+        ? 'accepted'
+        : product.status === 'rejected'
+          ? 'rejected'
+          : 'proposed'),
+    workProduct,
+    citations: citations ?? workProduct.citations,
+    ruleRefs: product.ruleRefs ?? workProduct.ruleRefs,
+    recordRefs: product.recordRefs ?? workProduct.recordRefs ?? [],
+    confidence: product.confidence ?? workProduct.confidence ?? 0.75,
+    roleAuthority: product.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
+    sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
+    sourceFilingIds: product.sourceFilingIds,
+    createdAt: product.createdAt,
+  }
+}
+
+function ecfReceiptFromDoc(receipt: Doc<'ecfReceipts'>): EcfReceiptRecord {
+  const documentList = parseOptionalJsonField<EcfReceiptRecord['documentList']>(
+    receipt.documentListJson,
+    `ECF receipt ${receipt._id} document list`,
+  )
+  const nextExpectedDeadline = parseOptionalJsonField<
+    NonNullable<EcfReceiptRecord['nextExpectedDeadline']>
+  >(receipt.nextExpectedDeadlineJson, `ECF receipt ${receipt._id} next deadline`)
+
+  return {
+    id: receipt._id,
+    caseSessionId: receipt.caseSessionId,
+    filingId: receipt.filingId,
+    receiptNumber: receipt.receiptNumber,
+    ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
+    ...(receipt.filer ? { filer: receipt.filer } : {}),
+    ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
+    ...(documentList ? { documentList } : {}),
+    noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
+    serviceList: parseJsonField<string[]>(
+      receipt.serviceListJson,
+      `ECF receipt ${receipt._id} service list`,
+    ),
+    ...(receipt.docketText ? { docketText: receipt.docketText } : {}),
+    ...(receipt.warnings ? { warnings: receipt.warnings } : {}),
+    ...(receipt.deficiencies ? { deficiencies: receipt.deficiencies } : {}),
+    ...(nextExpectedDeadline ? { nextExpectedDeadline } : {}),
+    createdAt: receipt.createdAt,
+  }
+}
+
+function simulationTurnFromDoc(turn: Doc<'simulationTurns'>): SimulationTurnRecord {
+  const payload = parseJsonField<SimulationTurnPayload>(
+    turn.payloadJson,
+    `simulation turn ${turn._id} payload`,
+  )
+
+  return {
+    id: turn._id,
+    caseSessionId: turn.caseSessionId,
+    turnNumber: turn.turnNumber,
+    actorId: turn.actorId,
+    kind: turn.kind as SimulationTurnRecord['kind'],
+    status: turn.status as SimulationTurnRecord['status'],
+    startedAt: payload.startedAt ?? turn.createdAt,
+    ...(payload.completedAt ? { completedAt: payload.completedAt } : {}),
+    effects: payload.effects ?? [],
+    inputSnapshotHash: turn.inputSnapshotHash ?? payload.inputSnapshotHash ?? 'legacy',
+    outputSnapshotHash: turn.outputSnapshotHash ?? payload.outputSnapshotHash ?? 'legacy',
+    validatorVersion: turn.validatorVersion ?? payload.validatorVersion ?? 'legacy',
+    retryCount: turn.retryCount ?? payload.retryCount ?? 0,
+    ...(turn.stoppedReason ?? payload.stoppedReason
+      ? { stoppedReason: turn.stoppedReason ?? payload.stoppedReason }
+      : {}),
+    ...(turn.rawActorPacketStorageId
+      ? { rawActorPacketStorageId: turn.rawActorPacketStorageId }
+      : {}),
+    ...(turn.rawProviderResultStorageId
+      ? { rawProviderResultStorageId: turn.rawProviderResultStorageId }
+      : {}),
   }
 }
 
@@ -515,35 +640,7 @@ async function assembleCaseSession(
     ecfReceipts: receipts
       .slice()
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .map((receipt) => ({
-        id: receipt._id,
-        caseSessionId: receipt.caseSessionId,
-        filingId: receipt.filingId,
-        receiptNumber: receipt.receiptNumber,
-        ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
-        ...(receipt.filer ? { filer: receipt.filer } : {}),
-        ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
-        ...(receipt.documentListJson
-          ? {
-              documentList: JSON.parse(receipt.documentListJson) as NonNullable<
-                CaseSession['ecfReceipts']
-              >[number]['documentList'],
-            }
-          : {}),
-        noticeOfDocketActivityText: receipt.noticeOfDocketActivityText,
-        serviceList: JSON.parse(receipt.serviceListJson) as string[],
-        ...(receipt.docketText ? { docketText: receipt.docketText } : {}),
-        ...(receipt.warnings ? { warnings: receipt.warnings } : {}),
-        ...(receipt.deficiencies ? { deficiencies: receipt.deficiencies } : {}),
-        ...(receipt.nextExpectedDeadlineJson
-          ? {
-              nextExpectedDeadline: JSON.parse(receipt.nextExpectedDeadlineJson) as NonNullable<
-                NonNullable<CaseSession['ecfReceipts']>[number]['nextExpectedDeadline']
-              >,
-            }
-          : {}),
-        createdAt: receipt.createdAt,
-      })),
+      .map(ecfReceiptFromDoc),
     ...(latestStrategy ? { counterpartyStrategy: latestStrategy.strategy } : {}),
     ...(latestAmicus ? { amicusParticipation: latestAmicus.participation } : {}),
     ...(panelAssignment ? { panelAssignment } : {}),
@@ -564,73 +661,11 @@ async function assembleCaseSession(
     actorWorkProducts: actorWorkProducts
       .slice()
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .map((product): ActorWorkProduct => {
-        const workProduct = JSON.parse(product.workProductJson) as ActorWorkProduct['workProduct']
-        return {
-          id: product._id,
-          caseSessionId: product.caseSessionId,
-          actorId: product.actorId,
-          kind: product.kind,
-          status: product.status,
-          reviewStatus:
-            product.reviewStatus ??
-            (product.status === 'accepted'
-              ? 'accepted'
-              : product.status === 'rejected'
-                ? 'rejected'
-                : 'proposed'),
-          workProduct,
-          citations: product.citationsJson
-            ? (JSON.parse(product.citationsJson) as ActorWorkProduct['citations'])
-            : workProduct.citations,
-          ruleRefs: product.ruleRefs ?? workProduct.ruleRefs,
-          recordRefs: product.recordRefs ?? workProduct.recordRefs ?? [],
-          confidence: product.confidence ?? workProduct.confidence ?? 0.75,
-          roleAuthority: product.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
-          sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
-          sourceFilingIds: product.sourceFilingIds,
-          createdAt: product.createdAt,
-        }
-      }),
+      .map(actorWorkProductFromDoc),
     simulationTurns: simulationTurns
       .slice()
       .sort((a, b) => a.turnNumber - b.turnNumber)
-      .map((turn) => {
-        const payload = JSON.parse(turn.payloadJson) as {
-          startedAt?: string
-          completedAt?: string
-          effects?: string[]
-          inputSnapshotHash?: string
-          outputSnapshotHash?: string
-          validatorVersion?: string
-          retryCount?: number
-          stoppedReason?: string
-        }
-        return {
-          id: turn._id,
-          caseSessionId: turn.caseSessionId,
-          turnNumber: turn.turnNumber,
-          actorId: turn.actorId,
-          kind: turn.kind as NonNullable<CaseSession['simulationTurns']>[number]['kind'],
-          status: turn.status as NonNullable<CaseSession['simulationTurns']>[number]['status'],
-          startedAt: payload.startedAt ?? turn.createdAt,
-          ...(payload.completedAt ? { completedAt: payload.completedAt } : {}),
-          effects: payload.effects ?? [],
-          inputSnapshotHash: turn.inputSnapshotHash ?? payload.inputSnapshotHash ?? 'legacy',
-          outputSnapshotHash: turn.outputSnapshotHash ?? payload.outputSnapshotHash ?? 'legacy',
-          validatorVersion: turn.validatorVersion ?? payload.validatorVersion ?? 'legacy',
-          retryCount: turn.retryCount ?? payload.retryCount ?? 0,
-          ...(turn.stoppedReason ?? payload.stoppedReason
-            ? { stoppedReason: turn.stoppedReason ?? payload.stoppedReason }
-            : {}),
-          ...(turn.rawActorPacketStorageId
-            ? { rawActorPacketStorageId: turn.rawActorPacketStorageId }
-            : {}),
-          ...(turn.rawProviderResultStorageId
-            ? { rawProviderResultStorageId: turn.rawProviderResultStorageId }
-            : {}),
-        }
-      }),
+      .map(simulationTurnFromDoc),
   }
 }
 
@@ -1140,7 +1175,10 @@ function createImportedTrialDocket(
 }
 
 function normalizeTrialDocketEntries(entriesJson: string): TrialDocketEntry[] {
-  const parsed = JSON.parse(entriesJson) as Array<Partial<TrialDocketEntry>>
+  const parsed = parseJsonField<Array<Partial<TrialDocketEntry>>>(
+    entriesJson,
+    'CourtListener trial docket entries',
+  )
   return parsed.map((entry, index) => ({
     id: entry.id ?? `trial-docket-import-${String(index + 1).padStart(4, '0')}`,
     entryNumber: entry.entryNumber ?? index + 1,
@@ -1930,7 +1968,10 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
-    const workProduct = JSON.parse(args.workProductJson) as ActorWorkProduct['workProduct']
+    const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
+      args.workProductJson,
+      'actor work product mutation payload',
+    )
     const productId = await ctx.db.insert('actorWorkProducts', {
       caseSessionId: args.caseSessionId,
       actorId: args.actorId,
@@ -2075,32 +2116,7 @@ export const acceptActorWorkProduct = mutation({
     }
 
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    const workProduct = JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct']
-    const product: ActorWorkProduct = {
-      id: productDoc._id,
-      caseSessionId: productDoc.caseSessionId,
-      actorId: productDoc.actorId,
-      kind: productDoc.kind,
-      status: productDoc.status,
-      reviewStatus:
-        productDoc.reviewStatus ??
-        (productDoc.status === 'accepted'
-          ? 'accepted'
-          : productDoc.status === 'rejected'
-            ? 'rejected'
-            : 'proposed'),
-      workProduct,
-      citations: productDoc.citationsJson
-        ? (JSON.parse(productDoc.citationsJson) as ActorWorkProduct['citations'])
-        : workProduct.citations,
-      ruleRefs: productDoc.ruleRefs ?? workProduct.ruleRefs,
-      recordRefs: productDoc.recordRefs ?? workProduct.recordRefs ?? [],
-      confidence: productDoc.confidence ?? workProduct.confidence ?? 0.75,
-      roleAuthority: productDoc.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
-      sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
-      sourceFilingIds: productDoc.sourceFilingIds,
-      createdAt: productDoc.createdAt,
-    }
+    const product = actorWorkProductFromDoc(productDoc)
     const acceptance = canAcceptActorWorkProduct(session, product)
     if (!acceptance.accepted) {
       await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
@@ -2215,25 +2231,10 @@ export const rejectActorWorkProduct = mutation({
       user._id,
     )
 
-    const workProduct = JSON.parse(productDoc.workProductJson) as ActorWorkProduct['workProduct']
     return {
-      id: productDoc._id,
-      caseSessionId: productDoc.caseSessionId,
-      actorId: productDoc.actorId,
-      kind: productDoc.kind,
+      ...actorWorkProductFromDoc(productDoc),
       status: 'rejected' as const,
       reviewStatus: 'rejected' as const,
-      workProduct,
-      citations: productDoc.citationsJson
-        ? (JSON.parse(productDoc.citationsJson) as ActorWorkProduct['citations'])
-        : workProduct.citations,
-      ruleRefs: productDoc.ruleRefs ?? workProduct.ruleRefs,
-      recordRefs: productDoc.recordRefs ?? workProduct.recordRefs ?? [],
-      confidence: productDoc.confidence ?? workProduct.confidence ?? 0.75,
-      roleAuthority: productDoc.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
-      sourceDocumentAnalysisIds: productDoc.sourceDocumentAnalysisIds,
-      sourceFilingIds: productDoc.sourceFilingIds,
-      createdAt: productDoc.createdAt,
     }
   },
 })
