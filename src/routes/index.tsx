@@ -36,6 +36,10 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { EcfWizard } from '../components/ecf/EcfWizard'
 import {
+  analyzeUploadAndPersistDocuments,
+  inferUploadedDocuments,
+} from '../application/document-upload'
+import {
   getCourtPack,
   getRuleItemsForCourt,
   scenarios,
@@ -47,7 +51,6 @@ import {
 } from '../domain/rules/source-governance'
 import {
   createInitialSession,
-  inferDocumentSignals,
   validateFiling,
 } from '../domain/simulation'
 import { nextActorWorkProductTask, type ActorWorkProductTask } from '../domain/actors/orchestration'
@@ -63,14 +66,12 @@ import { defaultPanelJudgeProfiles, formPanelConference } from '../domain/panel/
 import type {
   ActorWorkProduct,
   CaseSession,
-  DocumentAnalysis,
   FilingDraft,
   FilingMetadata,
   ParticipantRole,
   Scenario,
   TrialDocket,
   ToolCall,
-  UploadedDocument,
 } from '../domain/types'
 import type { CourtListenerSearchResult } from '../integrations/courtlistener'
 import { api } from '../../convex/_generated/api'
@@ -455,66 +456,20 @@ function Home() {
     setDocumentPending(true)
     setDocumentError('')
     try {
-      const documents = await Promise.all(
-        Array.from(files ?? []).map((file) =>
-          analyzeUploadAndPersistDocument(asCaseSessionId(activeSession.id), file),
-        ),
+      const documents = await analyzeUploadAndPersistDocuments(
+        { generateDocumentUploadUrl, persistDocumentAnalysis },
+        asCaseSessionId(activeSession.id),
+        files,
       )
       setDraft((current) => ({ ...current, documents }))
     } catch (error) {
       setDocumentError(
         error instanceof Error ? error.message : 'PDF analysis failed; using filename signals',
       )
-      const documents: UploadedDocument[] = Array.from(files ?? []).map(inferDocumentSignals)
-      setDraft((current) => ({ ...current, documents }))
+      setDraft((current) => ({ ...current, documents: inferUploadedDocuments(files) }))
     } finally {
       setDocumentPending(false)
     }
-  }
-
-  async function analyzeUploadAndPersistDocument(
-    caseSessionId: Id<'caseSessions'>,
-    file: File,
-  ): Promise<UploadedDocument> {
-    const base = inferDocumentSignals(file)
-    const { pdfJsAnalyzer } = await import('../modules/documents/pdfjs-analyzer')
-    const [analysis, sha256, storageId] = await Promise.all([
-      pdfJsAnalyzer.analyze({
-        fileName: file.name,
-        mimeType: file.type || 'application/pdf',
-        sizeBytes: file.size,
-        extractedSignals: base.extractedSignals,
-        arrayBuffer: () => file.arrayBuffer(),
-      }),
-      sha256File(file),
-      uploadToConvexStorage(caseSessionId, file),
-    ])
-    const document = documentFromAnalysis(base, analysis, storageId, sha256)
-
-    try {
-      const persisted = await persistDocumentAnalysis({
-        caseSessionId,
-        document,
-        analysis,
-      })
-      return persisted.document
-    } catch {
-      return document
-    }
-  }
-
-  async function uploadToConvexStorage(caseSessionId: Id<'caseSessions'>, file: File) {
-    const uploadUrl = await generateDocumentUploadUrl({ caseSessionId })
-    const response = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': file.type || 'application/pdf' },
-      body: file,
-    })
-    if (!response.ok) {
-      throw new Error('Unable to store PDF in Convex storage.')
-    }
-    const payload = (await response.json()) as { storageId?: string }
-    return payload.storageId
   }
 
   async function searchRecap() {
@@ -1030,46 +985,6 @@ function createDefaultMetadata(session: CaseSession, eventId: string): FilingMet
     ...defaultFilingMetadata(eventId, sealed),
     representedPartyId: representedParty?.id ?? learnerRole,
     feePaymentStatus: event?.feeBehavior === 'required' ? 'pending' : 'not_required',
-  }
-}
-
-async function sha256File(file: File) {
-  if (!globalThis.crypto?.subtle) return undefined
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')
-}
-
-function signalsFromAnalysis(base: UploadedDocument, analysis: DocumentAnalysis) {
-  return [
-    ...base.extractedSignals,
-    ...(analysis.sectionMap?.map((section) => section.label.toLowerCase()) ?? []),
-    ...(analysis.certificateOfServiceDetected ? ['certificate of service'] : []),
-    ...(analysis.certificateOfComplianceDetected ? ['certificate of compliance'] : []),
-    ...((analysis.recordCitations?.length ?? 0) > 0 ? ['record citation'] : []),
-    ...((analysis.appendixCitations?.length ?? 0) > 0 ? ['appendix'] : []),
-  ].filter((signal, index, values) => values.indexOf(signal) === index)
-}
-
-function documentFromAnalysis(
-  base: UploadedDocument,
-  analysis: DocumentAnalysis,
-  storageId?: string,
-  sha256?: string,
-): UploadedDocument {
-  return {
-    ...base,
-    ...(storageId ? { storageId } : {}),
-    ...(sha256 ? { sha256 } : {}),
-    ...(typeof analysis.pageCount === 'number' ? { pageCount: analysis.pageCount } : {}),
-    ...(analysis.normalizedText ? { extractedText: analysis.normalizedText } : {}),
-    ...(analysis.textExtractionStatus
-      ? { textExtractionStatus: analysis.textExtractionStatus }
-      : {}),
-    ...(typeof analysis.wordCount === 'number' ? { wordCount: analysis.wordCount } : {}),
-    extractedSignals: signalsFromAnalysis(base, analysis),
-    analysis,
   }
 }
 
