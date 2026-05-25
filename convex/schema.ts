@@ -35,9 +35,24 @@ export default defineSchema({
   institutions: defineTable({
     name: v.string(),
     slug: v.string(),
+    clerkOrganizationId: v.optional(v.string()),
     status: v.union(v.literal('active'), v.literal('paused'), v.literal('archived')),
     monthlyAiBudgetCents: v.number(),
-  }).index('by_slug', ['slug']),
+  })
+    .index('by_slug', ['slug'])
+    .index('by_clerk_org', ['clerkOrganizationId']),
+
+  institutionMemberships: defineTable({
+    institutionId: v.id('institutions'),
+    userId: v.id('users'),
+    role: v.union(v.literal('learner'), v.literal('instructor'), v.literal('admin')),
+    status: v.union(v.literal('active'), v.literal('suspended')),
+    createdAt: v.string(),
+    expiresAt: v.optional(v.string()),
+  })
+    .index('by_institution', ['institutionId'])
+    .index('by_user', ['userId'])
+    .index('by_institution_user', ['institutionId', 'userId']),
 
   cohorts: defineTable({
     institutionId: v.id('institutions'),
@@ -59,6 +74,22 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_cohort_user', ['cohortId', 'userId']),
 
+  enrollmentInvites: defineTable({
+    institutionId: v.id('institutions'),
+    cohortId: v.optional(v.id('cohorts')),
+    email: v.string(),
+    role: v.union(v.literal('learner'), v.literal('instructor'), v.literal('admin')),
+    tokenHash: v.string(),
+    expiresAt: v.string(),
+    acceptedAt: v.optional(v.string()),
+    createdByUserId: v.id('users'),
+    createdAt: v.string(),
+  })
+    .index('by_token_hash', ['tokenHash'])
+    .index('by_email', ['email'])
+    .index('by_institution', ['institutionId'])
+    .index('by_cohort', ['cohortId']),
+
   assignments: defineTable({
     cohortId: v.id('cohorts'),
     scenarioId: v.id('scenarios'),
@@ -70,8 +101,11 @@ export default defineSchema({
     simulationPolicyId: v.optional(v.id('simulationPolicies')),
     budgetCapCents: v.optional(v.number()),
     hideAiReasoning: v.optional(v.boolean()),
+    allowedFilingEvents: v.optional(v.array(v.string())),
+    archivedAt: v.optional(v.string()),
     createdByUserId: v.id('users'),
     createdAt: v.string(),
+    updatedAt: v.optional(v.string()),
   })
     .index('by_cohort', ['cohortId'])
     .index('by_published', ['published']),
@@ -84,6 +118,9 @@ export default defineSchema({
     reviewedAt: v.optional(v.string()),
     reviewerUserId: v.optional(v.id('users')),
     instructorNote: v.optional(v.string()),
+    score: v.optional(v.number()),
+    reopenedAt: v.optional(v.string()),
+    reopenedByUserId: v.optional(v.id('users')),
   })
     .index('by_assignment', ['assignmentId'])
     .index('by_user', ['userId'])
@@ -811,6 +848,73 @@ export default defineSchema({
     .index('by_scenario', ['scenarioId'])
     .index('by_model', ['model'])
     .index('by_pass', ['pass']),
+
+  policyVersions: defineTable({
+    policyKey: v.union(
+      v.literal('terms'),
+      v.literal('privacy'),
+      v.literal('training_disclaimer'),
+      v.literal('ai_disclosure'),
+      v.literal('ferpa'),
+      v.literal('data_retention'),
+      v.literal('support_access'),
+    ),
+    version: v.string(),
+    title: v.string(),
+    bodyMarkdown: v.string(),
+    effectiveAt: v.string(),
+    published: v.boolean(),
+  })
+    .index('by_policy_key', ['policyKey'])
+    .index('by_policy_version', ['policyKey', 'version'])
+    .index('by_published', ['published']),
+
+  policyAcceptances: defineTable({
+    userId: v.id('users'),
+    policyKey: v.union(
+      v.literal('terms'),
+      v.literal('privacy'),
+      v.literal('training_disclaimer'),
+      v.literal('ai_disclosure'),
+      v.literal('ferpa'),
+      v.literal('data_retention'),
+      v.literal('support_access'),
+    ),
+    version: v.string(),
+    acceptedAt: v.string(),
+    contextJson: v.optional(v.string()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_policy', ['userId', 'policyKey'])
+    .index('by_user_policy_version', ['userId', 'policyKey', 'version']),
+
+  supportAccessGrants: defineTable({
+    institutionId: v.id('institutions'),
+    supportUserId: v.id('users'),
+    grantedByUserId: v.id('users'),
+    reason: v.string(),
+    expiresAt: v.string(),
+    revokedAt: v.optional(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_institution', ['institutionId'])
+    .index('by_support_user', ['supportUserId']),
+
+  auditLog: defineTable({
+    actorUserId: v.optional(v.id('users')),
+    institutionId: v.optional(v.id('institutions')),
+    cohortId: v.optional(v.id('cohorts')),
+    caseSessionId: v.optional(v.id('caseSessions')),
+    action: v.string(),
+    targetTable: v.optional(v.string()),
+    targetId: v.optional(v.string()),
+    metadataJson: v.optional(v.string()),
+    createdAt: v.string(),
+  })
+    .index('by_actor', ['actorUserId'])
+    .index('by_institution', ['institutionId'])
+    .index('by_case', ['caseSessionId'])
+    .index('by_action', ['action']),
 
   userDisclaimers: defineTable({
     userId: v.id('users'),

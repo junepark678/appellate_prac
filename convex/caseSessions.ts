@@ -373,6 +373,20 @@ async function requireAuthorizedSessionDoc(
   return caseSession
 }
 
+async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseSessions'>) {
+  const assignmentSession = await ctx.db
+    .query('assignmentSessions')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .unique()
+  if (
+    assignmentSession?.submittedAt &&
+    (!assignmentSession.reopenedAt ||
+      assignmentSession.reopenedAt <= assignmentSession.submittedAt)
+  ) {
+    throw new Error('Submitted assignment sessions are locked until reopened by an instructor')
+  }
+}
+
 function analysisFromDoc(doc: Doc<'documentAnalyses'>): DocumentAnalysis {
   if (doc.analysisJson) {
     return parseJsonField<DocumentAnalysis>(doc.analysisJson, `document analysis ${doc._id}`)
@@ -1574,6 +1588,7 @@ export const submitFiling = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const nextSession = transitionAfterFiling(
       withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft)),
@@ -1629,6 +1644,7 @@ export const generateDocumentUploadUrl = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     return ctx.storage.generateUploadUrl()
   },
 })
@@ -1646,6 +1662,7 @@ export const persistDocumentAnalysis = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const verifiedDocument = await verifyUploadedPdfDocument(
       ctx,
       args.document as UploadedDocument,
@@ -1756,6 +1773,7 @@ export const submitEcfFiling = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = submitEcfFilingDomain(session, args.submission as FilingSubmission)
     const nextSession = transitionAfterFiling(result.session)
@@ -1791,6 +1809,7 @@ export const advanceExpectedEvent = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const toolCall = nextExpectedToolCall(session)
     const nextSession = transitionAfterFiling(applyToolCall(session, toolCall))
@@ -1817,6 +1836,7 @@ export const advanceProcedure = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceProcedureStateMachine(session)
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
@@ -1853,6 +1873,7 @@ export const advanceAutonomousSimulation = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceAutonomousSimulationDomain(session, {
       ...(typeof args.maxTurnsPerRun === 'number'
@@ -1901,6 +1922,7 @@ export const advanceSimulationTurn = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceSimulationTurnDomain(session, {
       debugRejectedAttempts: args.debugRejectedAttempts ?? false,
@@ -1945,6 +1967,7 @@ export const importCourtListenerSource = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const sourceUrl = sourceUrlForCourtListenerResult(args.result)
     const trialDocket = createImportedTrialDocket(session, args.result, sourceUrl)
@@ -2214,6 +2237,7 @@ export const recordAiRunForCurrentUser = internalMutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     await ctx.db.insert('aiRuns', {
       caseSessionId: args.caseSessionId,
       userId: user._id,
@@ -2249,6 +2273,7 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const validation = validateToolCall(session, args.toolCall)
     if (args.aiRunId) {
@@ -2323,6 +2348,7 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
       args.workProductJson,
       'actor work product mutation payload',
@@ -2465,6 +2491,7 @@ export const acceptActorWorkProduct = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
       throw new Error('Actor work product not found')
@@ -2576,6 +2603,7 @@ export const rejectActorWorkProduct = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
       throw new Error('Actor work product not found')

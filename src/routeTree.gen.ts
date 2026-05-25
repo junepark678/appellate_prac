@@ -9,38 +9,206 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as InstructorRouteImport } from './routes/instructor'
+import { Route as AppRouteImport } from './routes/app'
+import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LegalTrainingDisclaimerRouteImport } from './routes/legal.training-disclaimer'
+import { Route as LegalTermsRouteImport } from './routes/legal.terms'
+import { Route as LegalPrivacyRouteImport } from './routes/legal.privacy'
+import { Route as InstructorCohortsCohortIdRouteImport } from './routes/instructor.cohorts.$cohortId'
+import { Route as InstructorAssignmentsAssignmentIdRouteImport } from './routes/instructor.assignments.$assignmentId'
+import { Route as AppSessionsCaseSessionIdRouteImport } from './routes/app.sessions.$caseSessionId'
+import { Route as AppAssignmentsAssignmentIdRouteImport } from './routes/app.assignments.$assignmentId'
+import { Route as InstructorSessionsCaseSessionIdReviewRouteImport } from './routes/instructor.sessions.$caseSessionId.review'
 
+const InstructorRoute = InstructorRouteImport.update({
+  id: '/instructor',
+  path: '/instructor',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppRoute = AppRouteImport.update({
+  id: '/app',
+  path: '/app',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminRoute = AdminRouteImport.update({
+  id: '/admin',
+  path: '/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LegalTrainingDisclaimerRoute = LegalTrainingDisclaimerRouteImport.update({
+  id: '/legal/training-disclaimer',
+  path: '/legal/training-disclaimer',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LegalTermsRoute = LegalTermsRouteImport.update({
+  id: '/legal/terms',
+  path: '/legal/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LegalPrivacyRoute = LegalPrivacyRouteImport.update({
+  id: '/legal/privacy',
+  path: '/legal/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InstructorCohortsCohortIdRoute =
+  InstructorCohortsCohortIdRouteImport.update({
+    id: '/cohorts/$cohortId',
+    path: '/cohorts/$cohortId',
+    getParentRoute: () => InstructorRoute,
+  } as any)
+const InstructorAssignmentsAssignmentIdRoute =
+  InstructorAssignmentsAssignmentIdRouteImport.update({
+    id: '/assignments/$assignmentId',
+    path: '/assignments/$assignmentId',
+    getParentRoute: () => InstructorRoute,
+  } as any)
+const AppSessionsCaseSessionIdRoute =
+  AppSessionsCaseSessionIdRouteImport.update({
+    id: '/sessions/$caseSessionId',
+    path: '/sessions/$caseSessionId',
+    getParentRoute: () => AppRoute,
+  } as any)
+const AppAssignmentsAssignmentIdRoute =
+  AppAssignmentsAssignmentIdRouteImport.update({
+    id: '/assignments/$assignmentId',
+    path: '/assignments/$assignmentId',
+    getParentRoute: () => AppRoute,
+  } as any)
+const InstructorSessionsCaseSessionIdReviewRoute =
+  InstructorSessionsCaseSessionIdReviewRouteImport.update({
+    id: '/sessions/$caseSessionId/review',
+    path: '/sessions/$caseSessionId/review',
+    getParentRoute: () => InstructorRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/admin': typeof AdminRoute
+  '/app': typeof AppRouteWithChildren
+  '/instructor': typeof InstructorRouteWithChildren
+  '/legal/privacy': typeof LegalPrivacyRoute
+  '/legal/terms': typeof LegalTermsRoute
+  '/legal/training-disclaimer': typeof LegalTrainingDisclaimerRoute
+  '/app/assignments/$assignmentId': typeof AppAssignmentsAssignmentIdRoute
+  '/app/sessions/$caseSessionId': typeof AppSessionsCaseSessionIdRoute
+  '/instructor/assignments/$assignmentId': typeof InstructorAssignmentsAssignmentIdRoute
+  '/instructor/cohorts/$cohortId': typeof InstructorCohortsCohortIdRoute
+  '/instructor/sessions/$caseSessionId/review': typeof InstructorSessionsCaseSessionIdReviewRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/admin': typeof AdminRoute
+  '/app': typeof AppRouteWithChildren
+  '/instructor': typeof InstructorRouteWithChildren
+  '/legal/privacy': typeof LegalPrivacyRoute
+  '/legal/terms': typeof LegalTermsRoute
+  '/legal/training-disclaimer': typeof LegalTrainingDisclaimerRoute
+  '/app/assignments/$assignmentId': typeof AppAssignmentsAssignmentIdRoute
+  '/app/sessions/$caseSessionId': typeof AppSessionsCaseSessionIdRoute
+  '/instructor/assignments/$assignmentId': typeof InstructorAssignmentsAssignmentIdRoute
+  '/instructor/cohorts/$cohortId': typeof InstructorCohortsCohortIdRoute
+  '/instructor/sessions/$caseSessionId/review': typeof InstructorSessionsCaseSessionIdReviewRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/admin': typeof AdminRoute
+  '/app': typeof AppRouteWithChildren
+  '/instructor': typeof InstructorRouteWithChildren
+  '/legal/privacy': typeof LegalPrivacyRoute
+  '/legal/terms': typeof LegalTermsRoute
+  '/legal/training-disclaimer': typeof LegalTrainingDisclaimerRoute
+  '/app/assignments/$assignmentId': typeof AppAssignmentsAssignmentIdRoute
+  '/app/sessions/$caseSessionId': typeof AppSessionsCaseSessionIdRoute
+  '/instructor/assignments/$assignmentId': typeof InstructorAssignmentsAssignmentIdRoute
+  '/instructor/cohorts/$cohortId': typeof InstructorCohortsCohortIdRoute
+  '/instructor/sessions/$caseSessionId/review': typeof InstructorSessionsCaseSessionIdReviewRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/admin'
+    | '/app'
+    | '/instructor'
+    | '/legal/privacy'
+    | '/legal/terms'
+    | '/legal/training-disclaimer'
+    | '/app/assignments/$assignmentId'
+    | '/app/sessions/$caseSessionId'
+    | '/instructor/assignments/$assignmentId'
+    | '/instructor/cohorts/$cohortId'
+    | '/instructor/sessions/$caseSessionId/review'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/admin'
+    | '/app'
+    | '/instructor'
+    | '/legal/privacy'
+    | '/legal/terms'
+    | '/legal/training-disclaimer'
+    | '/app/assignments/$assignmentId'
+    | '/app/sessions/$caseSessionId'
+    | '/instructor/assignments/$assignmentId'
+    | '/instructor/cohorts/$cohortId'
+    | '/instructor/sessions/$caseSessionId/review'
+  id:
+    | '__root__'
+    | '/'
+    | '/admin'
+    | '/app'
+    | '/instructor'
+    | '/legal/privacy'
+    | '/legal/terms'
+    | '/legal/training-disclaimer'
+    | '/app/assignments/$assignmentId'
+    | '/app/sessions/$caseSessionId'
+    | '/instructor/assignments/$assignmentId'
+    | '/instructor/cohorts/$cohortId'
+    | '/instructor/sessions/$caseSessionId/review'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AdminRoute: typeof AdminRoute
+  AppRoute: typeof AppRouteWithChildren
+  InstructorRoute: typeof InstructorRouteWithChildren
+  LegalPrivacyRoute: typeof LegalPrivacyRoute
+  LegalTermsRoute: typeof LegalTermsRoute
+  LegalTrainingDisclaimerRoute: typeof LegalTrainingDisclaimerRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/instructor': {
+      id: '/instructor'
+      path: '/instructor'
+      fullPath: '/instructor'
+      preLoaderRoute: typeof InstructorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/app': {
+      id: '/app'
+      path: '/app'
+      fullPath: '/app'
+      preLoaderRoute: typeof AppRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin': {
+      id: '/admin'
+      path: '/admin'
+      fullPath: '/admin'
+      preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -48,11 +216,103 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/legal/training-disclaimer': {
+      id: '/legal/training-disclaimer'
+      path: '/legal/training-disclaimer'
+      fullPath: '/legal/training-disclaimer'
+      preLoaderRoute: typeof LegalTrainingDisclaimerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/legal/terms': {
+      id: '/legal/terms'
+      path: '/legal/terms'
+      fullPath: '/legal/terms'
+      preLoaderRoute: typeof LegalTermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/legal/privacy': {
+      id: '/legal/privacy'
+      path: '/legal/privacy'
+      fullPath: '/legal/privacy'
+      preLoaderRoute: typeof LegalPrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/instructor/cohorts/$cohortId': {
+      id: '/instructor/cohorts/$cohortId'
+      path: '/cohorts/$cohortId'
+      fullPath: '/instructor/cohorts/$cohortId'
+      preLoaderRoute: typeof InstructorCohortsCohortIdRouteImport
+      parentRoute: typeof InstructorRoute
+    }
+    '/instructor/assignments/$assignmentId': {
+      id: '/instructor/assignments/$assignmentId'
+      path: '/assignments/$assignmentId'
+      fullPath: '/instructor/assignments/$assignmentId'
+      preLoaderRoute: typeof InstructorAssignmentsAssignmentIdRouteImport
+      parentRoute: typeof InstructorRoute
+    }
+    '/app/sessions/$caseSessionId': {
+      id: '/app/sessions/$caseSessionId'
+      path: '/sessions/$caseSessionId'
+      fullPath: '/app/sessions/$caseSessionId'
+      preLoaderRoute: typeof AppSessionsCaseSessionIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/assignments/$assignmentId': {
+      id: '/app/assignments/$assignmentId'
+      path: '/assignments/$assignmentId'
+      fullPath: '/app/assignments/$assignmentId'
+      preLoaderRoute: typeof AppAssignmentsAssignmentIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/instructor/sessions/$caseSessionId/review': {
+      id: '/instructor/sessions/$caseSessionId/review'
+      path: '/sessions/$caseSessionId/review'
+      fullPath: '/instructor/sessions/$caseSessionId/review'
+      preLoaderRoute: typeof InstructorSessionsCaseSessionIdReviewRouteImport
+      parentRoute: typeof InstructorRoute
+    }
   }
 }
 
+interface AppRouteChildren {
+  AppAssignmentsAssignmentIdRoute: typeof AppAssignmentsAssignmentIdRoute
+  AppSessionsCaseSessionIdRoute: typeof AppSessionsCaseSessionIdRoute
+}
+
+const AppRouteChildren: AppRouteChildren = {
+  AppAssignmentsAssignmentIdRoute: AppAssignmentsAssignmentIdRoute,
+  AppSessionsCaseSessionIdRoute: AppSessionsCaseSessionIdRoute,
+}
+
+const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
+
+interface InstructorRouteChildren {
+  InstructorAssignmentsAssignmentIdRoute: typeof InstructorAssignmentsAssignmentIdRoute
+  InstructorCohortsCohortIdRoute: typeof InstructorCohortsCohortIdRoute
+  InstructorSessionsCaseSessionIdReviewRoute: typeof InstructorSessionsCaseSessionIdReviewRoute
+}
+
+const InstructorRouteChildren: InstructorRouteChildren = {
+  InstructorAssignmentsAssignmentIdRoute:
+    InstructorAssignmentsAssignmentIdRoute,
+  InstructorCohortsCohortIdRoute: InstructorCohortsCohortIdRoute,
+  InstructorSessionsCaseSessionIdReviewRoute:
+    InstructorSessionsCaseSessionIdReviewRoute,
+}
+
+const InstructorRouteWithChildren = InstructorRoute._addFileChildren(
+  InstructorRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AdminRoute: AdminRoute,
+  AppRoute: AppRouteWithChildren,
+  InstructorRoute: InstructorRouteWithChildren,
+  LegalPrivacyRoute: LegalPrivacyRoute,
+  LegalTermsRoute: LegalTermsRoute,
+  LegalTrainingDisclaimerRoute: LegalTrainingDisclaimerRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
