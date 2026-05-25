@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { createInitialSession, fileDraft } from '../domain/simulation'
+import { applyToolCall, createInitialSession, fileDraft } from '../domain/simulation'
 import type { FilingDraft, UploadedDocument } from '../domain/types'
 import {
   documentAnalyzers,
   filingEventModules,
   getAvailableFilingEvents,
+  getFilingEvent,
   moduleManifests,
   procedureModules,
+  ruleRefs,
   ruleModules,
   validateModuleRegistry,
 } from './registry'
@@ -66,6 +68,42 @@ describe('module registry', () => {
         (event) => event.eventId === 'appearance_disclosure',
       )?.available,
     ).toBe(true)
+  })
+
+  it('allows writ answers after the clerk opens the answer deadline', () => {
+    let session = createInitialSession('synthetic-ca4-original-writ-discovery')
+    expect(
+      getAvailableFilingEvents(session).find(
+        (event) => event.eventId === 'answer_to_writ_petition',
+      )?.available,
+    ).toBe(false)
+
+    session = applyToolCall(session, {
+      tool: 'setDeadline',
+      actorId: 'ca4_clerk',
+      label: 'Answer to writ petition due',
+      targetEventId: 'answer_to_writ_petition',
+      offsetDays: 14,
+      sourceRuleRefs: [ruleRefs.frap21],
+    })
+
+    expect(
+      getAvailableFilingEvents(session).find(
+        (event) => event.eventId === 'answer_to_writ_petition',
+      )?.available,
+    ).toBe(true)
+  })
+
+  it('wires criminal brief events to criminal follow-on deadlines', () => {
+    const civilOpening = getFilingEvent('us-federal-ca4-civil-appeal', 'opening_brief')
+    const criminalOpening = getFilingEvent('us-federal-ca4-criminal-appeal', 'opening_brief')
+    const criminalAppellee = getFilingEvent('us-federal-ca4-criminal-appeal', 'appellee_brief')
+
+    expect(civilOpening?.deadlineEffects[0]?.offsetDays).toBe(30)
+    expect(criminalOpening?.deadlineEffects[0]?.targetEventId).toBe('appellee_brief')
+    expect(criminalOpening?.deadlineEffects[0]?.offsetDays).toBe(21)
+    expect(criminalAppellee?.deadlineEffects[0]?.targetEventId).toBe('reply_brief')
+    expect(criminalAppellee?.deadlineEffects[0]?.offsetDays).toBe(10)
   })
 
   it('runs document analysis through the analyzer boundary', async () => {

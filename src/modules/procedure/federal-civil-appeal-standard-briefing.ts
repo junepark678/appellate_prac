@@ -10,6 +10,12 @@ function activeFiledEventSet(session: CaseSession) {
   )
 }
 
+function hasOpenDeadline(session: CaseSession, targetEventId: string) {
+  return session.deadlines.some(
+    (deadline) => deadline.targetEventId === targetEventId && deadline.status === 'open',
+  )
+}
+
 function eventAvailability(
   eventId: string,
   label: string,
@@ -309,10 +315,13 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
       eventAvailability(
         'answer_to_writ_petition',
         'Answer to Writ Petition',
-        session.status === 'active' && filedEvents.has('order_inviting_answer'),
-        filedEvents.has('order_inviting_answer')
+        session.status === 'active' &&
+          (filedEvents.has('order_inviting_answer') ||
+            hasOpenDeadline(session, 'answer_to_writ_petition')),
+        filedEvents.has('order_inviting_answer') ||
+          hasOpenDeadline(session, 'answer_to_writ_petition')
           ? []
-          : ['Court order inviting an answer has not been entered.'],
+          : ['Court order inviting an answer or answer deadline has not been entered.'],
       ),
       eventAvailability(
         'reply_in_support_of_writ',

@@ -1493,7 +1493,15 @@ const commonAgencyEventIds = new Set([
 const civilFilingEvents = filingEvents.filter((event) => event.domain === 'civil_appeal')
 const criminalFilingEvents = filingEvents.filter(
   (event) => event.domain === 'criminal_appeal' || commonAppealEventIds.has(event.id),
-)
+).map((event) => {
+  if (event.id === 'opening_brief') {
+    return { ...event, deadlineEffects: [criminalAppelleeBriefDeadline] }
+  }
+  if (event.id === 'appellee_brief') {
+    return { ...event, deadlineEffects: [criminalReplyBriefDeadline] }
+  }
+  return event
+})
 const agencyReviewFilingEvents = filingEvents.filter(
   (event) => event.domain === 'agency_review' || commonAgencyEventIds.has(event.id),
 )
