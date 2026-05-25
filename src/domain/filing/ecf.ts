@@ -1,5 +1,5 @@
 import { fileDraft } from '../simulation'
-import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
+import { getCourtPack, getFilingEvent, ruleRefs } from '../packs'
 import type {
   CaseSession,
   EcfEventCategory,

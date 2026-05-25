@@ -1,4 +1,4 @@
-import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
+import { getCourtPack, getFilingEvent, ruleRefs } from '../packs'
 import { evaluateRelief } from '../legal/evaluators'
 import { defaultFilingMetadata } from '../filing/ecf'
 import { validatePanelDisposition } from '../panel/deliberation'

@@ -1,4 +1,4 @@
-import { getCourtPack } from '../../modules/registry'
+import { getCourtPack } from '../packs'
 import { evaluateRelief } from '../legal/evaluators'
 import { ca4SourceBackedConstraints } from '../rules/ca4-source-profile'
 import type { ActorPacket, AiActorRole, CaseSession, RuleRef } from '../types'

@@ -1,4 +1,4 @@
-import { getCourtPack, ruleRefs } from '../../modules/registry'
+import { getCourtPack, ruleRefs } from '../packs'
 import {
   evaluateDispositionOptions,
   evaluateIssues,

@@ -5,7 +5,9 @@ import type {
   CaseSession,
   CourtLevel,
   CourtSystem,
+  DocumentAnalysis,
   DocumentRequirement,
+  DocumentSection,
   FilingEvent,
   ParticipantRole,
   ProcedureDomain,
@@ -13,8 +15,14 @@ import type {
   RuleRef,
   Scenario,
   StructuredConstraint,
-  UploadedDocument,
 } from '../domain/types'
+import type {
+  AiProvider,
+  DocumentAnalyzer,
+  StructuredAiRequest,
+  StructuredAiResult,
+  UploadedFile,
+} from '../domain/ports'
 
 export type LegalSourceVersion = {
   id: string
@@ -109,54 +117,14 @@ export type ProcedureModule = {
   availableEvents(session: CaseSession): AvailableFilingEvent[]
 }
 
-export type UploadedFile = Pick<
-  UploadedDocument,
-  'fileName' | 'mimeType' | 'sizeBytes' | 'pageCount' | 'extractedSignals'
-> & {
-  arrayBuffer?: () => Promise<ArrayBuffer>
-}
-
-export type DocumentTextExtractionStatus =
-  | 'not_started'
-  | 'extracted'
-  | 'not_searchable'
-  | 'failed'
-  | 'fallback'
-
-export type DocumentSection = {
-  id: string
-  label: string
-  startIndex: number
-  endIndex?: number
-  textSnippet: string
-}
-
-export type DocumentAnalysis = {
-  analyzerId: string
-  pageCount?: number
-  fileSizeBytes: number
-  mimeType: string
-  searchableText: boolean
-  extractedPageText?: Array<{ pageNumber: number; text: string }>
-  normalizedText?: string
-  wordCount?: number
-  sectionMap?: DocumentSection[]
-  certificateOfServiceDetected: boolean
-  certificateOfComplianceDetected: boolean
-  certificateSnippets?: string[]
-  legalCitations?: string[]
-  recordCitations?: string[]
-  appendixCitations?: string[]
-  sealedOrRedactionWarning: boolean
-  privacySealWarnings?: string[]
-  textExtractionStatus?: DocumentTextExtractionStatus
-  extractionConfidence?: number
-  warnings: string[]
-}
-
-export type DocumentAnalyzer = {
-  id: string
-  analyze(file: UploadedFile): Promise<DocumentAnalysis>
+export type {
+  AiProvider,
+  DocumentAnalysis,
+  DocumentAnalyzer,
+  DocumentSection,
+  StructuredAiRequest,
+  StructuredAiResult,
+  UploadedFile,
 }
 
 export type ActorModule = {
@@ -167,28 +135,6 @@ export type ActorModule = {
   allowedTools: AiToolName[]
   promptProfileId: string
   strategyPolicyId?: string
-}
-
-export type StructuredAiRequest<T> = {
-  schemaName: string
-  schema: unknown
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
-  model?: string
-  metadata?: Record<string, unknown>
-  validate?(value: unknown): value is T
-}
-
-export type StructuredAiResult<T> = {
-  value: T | null
-  rawText: string
-  providerId: string
-}
-
-export type AiProvider = {
-  id: string
-  completeStructured<T>(
-    request: StructuredAiRequest<T>,
-  ): Promise<StructuredAiResult<T>>
 }
 
 export type SourceSearchResult = {

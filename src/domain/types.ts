@@ -152,6 +152,44 @@ export type SourceFreshnessStatus = {
   fetchedAt?: string
 }
 
+export type DocumentTextExtractionStatus =
+  | 'not_started'
+  | 'extracted'
+  | 'not_searchable'
+  | 'failed'
+  | 'fallback'
+
+export type DocumentSection = {
+  id: string
+  label: string
+  startIndex: number
+  endIndex?: number
+  textSnippet: string
+}
+
+export type DocumentAnalysis = {
+  analyzerId: string
+  pageCount?: number
+  fileSizeBytes: number
+  mimeType: string
+  searchableText: boolean
+  extractedPageText?: Array<{ pageNumber: number; text: string }>
+  normalizedText?: string
+  wordCount?: number
+  sectionMap?: DocumentSection[]
+  certificateOfServiceDetected: boolean
+  certificateOfComplianceDetected: boolean
+  certificateSnippets?: string[]
+  legalCitations?: string[]
+  recordCitations?: string[]
+  appendixCitations?: string[]
+  sealedOrRedactionWarning: boolean
+  privacySealWarnings?: string[]
+  textExtractionStatus?: DocumentTextExtractionStatus
+  extractionConfidence?: number
+  warnings: string[]
+}
+
 export type SimulationEvalThresholds = {
   maxCriticalFailures: number
   minValidTurnRate: number
@@ -492,10 +530,10 @@ export type UploadedDocument = {
   sha256?: string
   pageCount?: number
   extractedText?: string
-  textExtractionStatus?: 'not_started' | 'extracted' | 'not_searchable' | 'failed' | 'fallback'
+  textExtractionStatus?: DocumentTextExtractionStatus
   wordCount?: number
   analysisId?: string
-  analysis?: import('../modules/types').DocumentAnalysis
+  analysis?: DocumentAnalysis
   extractedSignals: string[]
 }
 

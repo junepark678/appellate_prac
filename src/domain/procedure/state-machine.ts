@@ -1,4 +1,4 @@
-import { criminalOpeningBriefDeadline, openingBriefDeadline, ruleRefs } from '../../modules/registry'
+import { criminalOpeningBriefDeadline, openingBriefDeadline, ruleRefs } from '../packs'
 import { applyToolCall } from '../simulation'
 import {
   createBenchMemo,

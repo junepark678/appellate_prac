@@ -1,4 +1,4 @@
-import { getCourtPack, getFilingEvent, ruleRefs } from '../../modules/registry'
+import { getCourtPack, getFilingEvent, ruleRefs } from '../packs'
 import { validateAmicusSubmission } from '../amicus/workflow'
 import { briefAnalysisIssues } from '../documents/brief-analysis'
 import { ca4SourceVersionIds } from './ca4-source-profile'

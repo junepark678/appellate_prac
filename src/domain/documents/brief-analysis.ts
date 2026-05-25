@@ -1,7 +1,7 @@
-import { ruleRefs } from '../../modules/registry'
-import type { DocumentAnalysis } from '../../modules/types'
+import { ruleRefs } from '../packs'
 import type {
   CaseSession,
+  DocumentAnalysis,
   FilingSubmission,
   RuleRef,
   ScenarioIssue,

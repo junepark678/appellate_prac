@@ -1,4 +1,4 @@
-import { getCourtPack } from '../../modules/registry'
+import { getCourtPack } from '../packs'
 import type { CaseSession, ToolCall, ToolValidationResult } from '../types'
 
 export const proposalOnlyTools = new Set<ToolCall['tool']>([
@@ -40,4 +40,3 @@ export function validateAiProposal(
 
   return { accepted: issues.length === 0, issues }
 }
-

@@ -63,6 +63,7 @@ import { defaultPanelJudgeProfiles, formPanelConference } from '../domain/panel/
 import type {
   ActorWorkProduct,
   CaseSession,
+  DocumentAnalysis,
   EcfEventAvailability,
   FilingDraft,
   FilingMetadata,
@@ -72,7 +73,6 @@ import type {
   ToolCall,
   UploadedDocument,
 } from '../domain/types'
-import type { DocumentAnalysis } from '../modules/types'
 import type { CourtListenerSearchResult } from '../integrations/courtlistener'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'

@@ -1,5 +1,5 @@
-import type { AiProvider } from '../../modules/types'
-import { getCourtPack, getRuleItemsForCourt } from '../../modules/registry'
+import type { AiProvider } from '../ports'
+import { getCourtPack, getRuleItemsForCourt } from '../packs'
 import { getAvailableEcfEventDefinitions } from '../filing/ecf'
 import { evaluateRelief } from '../legal/evaluators'
 import {

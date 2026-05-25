@@ -1,4 +1,4 @@
-import { ruleRefs } from '../../modules/registry'
+import { ruleRefs } from '../packs'
 import { recommendAmicusParticipation } from '../amicus/workflow'
 import { draftCounterpartyStrategy } from '../counterparty/strategy'
 import { evaluateRelief } from '../legal/evaluators'

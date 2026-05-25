@@ -1,4 +1,4 @@
-import { ruleRefs } from '../../modules/registry'
+import { ruleRefs } from '../packs'
 import { scenarioIssues } from '../legal/evaluators'
 import type {
   AmicusCandidate,

@@ -43,6 +43,7 @@ import type {
   CaseSession,
   FilingRecord,
   FilingSubmission,
+  DocumentAnalysis,
   PanelAssignment,
   ScenarioIssue,
   ScenarioRecordExcerpt,
@@ -51,7 +52,6 @@ import type {
   TrialDocketEntry,
   UploadedDocument,
 } from '../src/domain/types'
-import type { DocumentAnalysis } from '../src/modules/types'
 import {
   getAvailableEcfEventDefinitions,
   preflightEcfFiling,

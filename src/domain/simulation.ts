@@ -5,8 +5,8 @@ import {
   criminalOpeningBriefDeadline,
   openingBriefDeadline,
   ruleRefs,
-} from '../modules/registry'
-import { isImplementedAiTool } from '../modules/tools'
+} from './packs'
+import { isImplementedAiTool } from './tools'
 import { updateAmicusAfterAcceptedFiling, withAmicusRecommendations } from './amicus/workflow'
 import { counterpartyBriefText, withCounterpartyStrategy } from './counterparty/strategy'
 import {

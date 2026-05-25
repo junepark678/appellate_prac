@@ -18,7 +18,7 @@ import type {
   GeneratedFilingDraft,
   UploadedDocument,
 } from '../types'
-import type { AiProvider, StructuredAiRequest, StructuredAiResult } from '../../modules/types'
+import type { AiProvider, StructuredAiRequest, StructuredAiResult } from '../ports'
 
 function actorProduct(
   input: Omit<
