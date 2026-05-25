@@ -6,14 +6,18 @@ import {
 import { ClerkProvider } from '@clerk/tanstack-react-start'
 import { useAuth } from '@clerk/tanstack-react-start'
 import { ConvexProviderWithClerk } from 'convex/react-clerk'
-import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
-import { TanStackDevtools } from '@tanstack/react-devtools'
-import type { ReactNode } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 
 import appCss from '../styles.css?url'
 import { convex } from '../convex'
 
-const enableDevtools = import.meta.env.DEV
+const AppDevtools = import.meta.env.DEV
+  ? lazy(() =>
+      import('../components/devtools/AppDevtools').then((module) => ({
+        default: module.AppDevtools,
+      })),
+    )
+  : null
 
 export const Route = createRootRoute({
   head: () => ({
@@ -49,18 +53,10 @@ function RootDocument({ children }: { children: ReactNode }) {
         <ClerkProvider>
           <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
             {children}
-            {enableDevtools ? (
-              <TanStackDevtools
-                config={{
-                  position: 'bottom-right',
-                }}
-                plugins={[
-                  {
-                    name: 'Tanstack Router',
-                    render: <TanStackRouterDevtoolsPanel />,
-                  },
-                ]}
-              />
+            {AppDevtools ? (
+              <Suspense fallback={null}>
+                <AppDevtools />
+              </Suspense>
             ) : null}
           </ConvexProviderWithClerk>
         </ClerkProvider>
