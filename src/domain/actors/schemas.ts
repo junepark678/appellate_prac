@@ -55,7 +55,7 @@ export const generatedFilingDraftSchema = {
     eventId: { type: 'string' },
     participantRole: {
       type: 'string',
-      enum: ['appellant', 'appellee', 'amicus', 'clerk', 'panel', 'district_court', 'plaintiff', 'defendant', 'judge', 'agency'],
+      enum: ['appellant', 'appellee', 'petitioner', 'respondent', 'amicus', 'clerk', 'panel', 'district_court', 'plaintiff', 'defendant', 'judge', 'agency'],
     },
     title: { type: 'string' },
     documentFileName: { type: 'string' },

@@ -1,4 +1,4 @@
-import { ruleRefs } from '../../modules/registry'
+import { getCourtPack, ruleRefs } from '../../modules/registry'
 import {
   evaluateDispositionOptions,
   evaluateIssues,
@@ -81,15 +81,50 @@ function recommendedRelief(relief: ReliefEvaluation) {
 export function canSubmitToPanel(session: CaseSession): ToolValidationResult {
   const filedEvents = activeFiledEventSet(session)
   const issues: string[] = []
+  const courtPack = getCourtPack(session.courtPackId)
+  const requiredEventIds =
+    courtPack.procedureDomain === 'criminal_appeal'
+      ? [
+          'criminal_notice_of_appeal',
+          'appearance_disclosure',
+          'criminal_docketing_statement',
+          'cja_financial_disclosure',
+          'transcript_order_acknowledgment',
+          'opening_brief',
+          'joint_appendix',
+          'appellee_brief',
+          'reply_brief',
+        ]
+      : courtPack.procedureDomain === 'agency_review'
+        ? [
+            'petition_for_review',
+            'appearance_disclosure',
+            'agency_docketing_statement',
+            'certified_agency_record',
+            'opening_brief',
+            'joint_appendix',
+            'appellee_brief',
+            'reply_brief',
+          ]
+        : courtPack.procedureDomain === 'original_writ'
+          ? [
+              'petition_for_writ_mandamus',
+              'appearance_disclosure',
+              'writ_docketing_statement',
+              'appendix_to_writ_petition',
+              'answer_to_writ_petition',
+              'reply_in_support_of_writ',
+            ]
+          : [
+              'docketing_statement',
+              'transcript_order_acknowledgment',
+              'opening_brief',
+              'joint_appendix',
+              'appellee_brief',
+              'reply_brief',
+            ]
 
-  for (const eventId of [
-    'docketing_statement',
-    'transcript_order_acknowledgment',
-    'opening_brief',
-    'joint_appendix',
-    'appellee_brief',
-    'reply_brief',
-  ]) {
+  for (const eventId of requiredEventIds) {
     if (!filedEvents.has(eventId)) {
       issues.push(`Panel submission requires ${eventId.replaceAll('_', ' ')}.`)
     }

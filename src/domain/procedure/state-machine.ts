@@ -1,4 +1,4 @@
-import { openingBriefDeadline, ruleRefs } from '../../modules/registry'
+import { criminalOpeningBriefDeadline, openingBriefDeadline, ruleRefs } from '../../modules/registry'
 import { applyToolCall } from '../simulation'
 import {
   createBenchMemo,
@@ -27,6 +27,43 @@ function hasOpenDeadline(session: CaseSession, targetEventId: string) {
   )
 }
 
+function procedureEventIds(session: CaseSession) {
+  if (session.courtPackId.includes('criminal')) {
+    return {
+      opening: 'criminal_notice_of_appeal',
+      docketing: 'criminal_docketing_statement',
+      record: 'transcript_order_acknowledgment',
+      extra: 'cja_financial_disclosure',
+      openingDeadline: criminalOpeningBriefDeadline,
+    }
+  }
+  if (session.courtPackId.includes('agency')) {
+    return {
+      opening: 'petition_for_review',
+      docketing: 'agency_docketing_statement',
+      record: 'certified_agency_record',
+      extra: undefined,
+      openingDeadline: openingBriefDeadline,
+    }
+  }
+  if (session.courtPackId.includes('original-writ')) {
+    return {
+      opening: 'petition_for_writ_mandamus',
+      docketing: 'writ_docketing_statement',
+      record: 'appendix_to_writ_petition',
+      extra: undefined,
+      openingDeadline: openingBriefDeadline,
+    }
+  }
+  return {
+    opening: 'notice_of_appeal',
+    docketing: 'docketing_statement',
+    record: 'transcript_order_acknowledgment',
+    extra: undefined,
+    openingDeadline: openingBriefDeadline,
+  }
+}
+
 export function inferProcedureState(session: CaseSession): ProcedureState {
   if (session.status === 'dismissed') return 'dismissed'
   if (session.status === 'closed') {
@@ -36,11 +73,18 @@ export function inferProcedureState(session: CaseSession): ProcedureState {
   if (session.status === 'submitted') return 'panel_deliberation'
 
   const filedEvents = activeFiledEventSet(session)
-  if (!filedEvents.has('notice_of_appeal')) return 'notice_pending'
+  const eventIds = procedureEventIds(session)
+  if (!filedEvents.has(eventIds.opening)) return 'notice_pending'
   if (!filedEvents.has('appearance_disclosure')) return 'appearance_pending'
-  if (!filedEvents.has('docketing_statement')) return 'docketing_statement_pending'
-  if (!filedEvents.has('transcript_order_acknowledgment')) return 'record_ordering_pending'
-  if (!hasOpenDeadline(session, openingBriefDeadline.targetEventId) && !filedEvents.has('opening_brief')) {
+  if (!filedEvents.has(eventIds.docketing)) return 'docketing_statement_pending'
+  if (eventIds.extra && !filedEvents.has(eventIds.extra)) return 'fee_or_ifp_pending'
+  if (!filedEvents.has(eventIds.record)) return 'record_ordering_pending'
+  if (session.courtPackId.includes('original-writ')) {
+    if (!filedEvents.has('answer_to_writ_petition')) return 'motion_pending'
+    if (!filedEvents.has('reply_in_support_of_writ')) return 'reply_brief_pending'
+    return 'panel_deliberation'
+  }
+  if (!hasOpenDeadline(session, eventIds.openingDeadline.targetEventId) && !filedEvents.has('opening_brief')) {
     return 'briefing_schedule_pending'
   }
   if (!filedEvents.has('opening_brief')) return 'opening_brief_pending'
@@ -52,14 +96,21 @@ export function inferProcedureState(session: CaseSession): ProcedureState {
 
 export function nextProcedureToolCall(session: CaseSession): ToolCall {
   const state = session.procedureState ?? inferProcedureState(session)
+  const eventIds = procedureEventIds(session)
 
   if (state === 'notice_pending') {
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'Notice Regarding Case Opening',
-      text: 'The appeal is opened for training purposes. Appellant must file a notice of appeal and required appearance/disclosure materials before merits briefing proceeds.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3, ruleRefs.ca4Local26_1],
+      text: 'The proceeding is opened for training purposes. The initiating party must file the required case-opening paper and appearance/disclosure materials before merits briefing proceeds.',
+      ruleRefs: eventIds.opening === 'petition_for_review'
+        ? [ruleRefs.frap15, ruleRefs.ca4Local15, ruleRefs.ca4Local26_1]
+        : eventIds.opening === 'petition_for_writ_mandamus'
+          ? [ruleRefs.frap21, ruleRefs.ca4Local21, ruleRefs.ca4Local26_1]
+          : eventIds.opening === 'criminal_notice_of_appeal'
+            ? [ruleRefs.frap3, ruleRefs.frap4b, ruleRefs.ca4Local26_1]
+            : [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3, ruleRefs.ca4Local26_1],
     }
   }
 
@@ -79,7 +130,21 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
       actorId: 'ca4_clerk',
       title: 'Clerk Order Directing Docketing Statement',
       text: 'Appellant is directed to file the docketing statement so jurisdictional and opening-stage information can be reviewed before merits briefing.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
+      ruleRefs: eventIds.opening === 'petition_for_review'
+        ? [ruleRefs.frap15, ruleRefs.ca4Local15, ruleRefs.ca4Local45]
+        : eventIds.opening === 'petition_for_writ_mandamus'
+          ? [ruleRefs.frap21, ruleRefs.ca4Local21, ruleRefs.ca4Local45]
+          : [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
+    }
+  }
+
+  if (state === 'fee_or_ifp_pending') {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: 'Clerk Order Regarding CJA Financial Disclosure',
+      text: 'Appellant must file the required financial disclosure or CJA-related statement before criminal briefing is scheduled.',
+      ruleRefs: [ruleRefs.frap9, ruleRefs.ca4Local9],
     }
   }
 
@@ -87,9 +152,21 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
-      title: 'Clerk Order Regarding Transcript Order',
-      text: 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before the opening brief schedule is set.',
-      ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+      title: eventIds.record === 'certified_agency_record'
+        ? 'Clerk Order Regarding Agency Record'
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? 'Clerk Order Regarding Writ Appendix'
+          : 'Clerk Order Regarding Transcript Order',
+      text: eventIds.record === 'certified_agency_record'
+        ? 'The agency record, certified list, or record-complete signal must be filed before merits briefing is scheduled.'
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? 'The writ petition requires essential orders or record excerpts before the petition can be screened for answer or disposition.'
+          : 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before the opening brief schedule is set.',
+      ruleRefs: eventIds.record === 'certified_agency_record'
+        ? [ruleRefs.frap16, ruleRefs.frap17]
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? [ruleRefs.frap21, ruleRefs.ca4Local21]
+          : [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
     }
   }
 
@@ -97,10 +174,10 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
     return {
       tool: 'setDeadline',
       actorId: 'ca4_clerk',
-      label: openingBriefDeadline.label,
-      targetEventId: openingBriefDeadline.targetEventId,
-      offsetDays: openingBriefDeadline.offsetDays,
-      sourceRuleRefs: openingBriefDeadline.sourceRuleRefs,
+      label: eventIds.openingDeadline.label,
+      targetEventId: eventIds.openingDeadline.targetEventId,
+      offsetDays: eventIds.openingDeadline.offsetDays,
+      sourceRuleRefs: eventIds.openingDeadline.sourceRuleRefs,
     }
   }
 
@@ -125,12 +202,32 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
   }
 
   if (state === 'reply_brief_pending') {
+    if (session.courtPackId.includes('original-writ')) {
+      return {
+        tool: 'issueClerkOrder',
+        actorId: 'ca4_clerk',
+        title: 'Writ Reply Notice',
+        text: 'The answer to the writ petition has been filed. Petitioner may file any permitted reply before the petition package is submitted to the panel.',
+        ruleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      }
+    }
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'Briefing Notice',
       text: 'Appellant may file a reply brief within the example deadline. The case will be eligible for panel submission after briefing is complete.',
       ruleRefs: [ruleRefs.frap31],
+    }
+  }
+
+  if (state === 'motion_pending' && session.courtPackId.includes('original-writ')) {
+    return {
+      tool: 'setDeadline',
+      actorId: 'ca4_clerk',
+      label: 'Answer to writ petition due',
+      targetEventId: 'answer_to_writ_petition',
+      offsetDays: 14,
+      sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
     }
   }
 

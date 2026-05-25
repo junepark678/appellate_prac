@@ -858,5 +858,545 @@
         }
       ]
     }
+  },
+  {
+    "id": "synthetic-ca4-criminal-sentencing-waiver",
+    "title": "Criminal Sentencing Appeal with Waiver",
+    "source": "synthetic",
+    "courtPackId": "us-federal-ca4-criminal-appeal",
+    "shortCaption": "United States v. Alvarez",
+    "lowerTribunal": "U.S. District Court for the Eastern District of North Carolina",
+    "natureOfSuit": "Criminal - Sentencing",
+    "proceduralPosture": "Defendant filed a timely criminal notice of appeal after a within-Guidelines sentence; the government invokes an appellate waiver while defendant challenges Guidelines calculation and allocution.",
+    "participants": [
+      {
+        "id": "appellant",
+        "displayName": "Daniel Alvarez",
+        "role": "appellant"
+      },
+      {
+        "id": "appellee",
+        "displayName": "United States of America",
+        "role": "appellee"
+      },
+      {
+        "id": "clerk",
+        "displayName": "Fourth Circuit Clerk",
+        "role": "clerk"
+      },
+      {
+        "id": "district_court",
+        "displayName": "U.S. District Court for the Eastern District of North Carolina",
+        "role": "district_court"
+      },
+      {
+        "id": "panel",
+        "displayName": "Three-Judge Panel",
+        "role": "panel"
+      }
+    ],
+    "issuesPresented": [
+      "Whether the appellate waiver bars the Guidelines and reasonableness challenges.",
+      "Whether the district court plainly erred in applying a leadership enhancement.",
+      "Whether the court adequately considered allocution and mitigation under Section 3553(a)."
+    ],
+    "meritsRecord": [
+      "The plea agreement contains a waiver of appeal except for claims above the advisory Guidelines range or based on ineffective assistance.",
+      "The Rule 11 transcript includes a waiver colloquy but the court summarized the waiver in broad terms.",
+      "The presentence report recommended a two-level leadership enhancement based on disputed statements from co-defendants.",
+      "Defense counsel objected to the enhancement in writing but did not renew the objection after the court adopted the PSR.",
+      "The sentencing transcript shows a brief allocution and a within-Guidelines sentence of 84 months."
+    ],
+    "issues": [
+      {
+        "id": "criminal-appeal-waiver",
+        "label": "Scope and validity of appellate waiver",
+        "standardOfReview": "de novo with plea-colloquy record review",
+        "preservationFacts": [
+          "The government invokes the waiver in its response and appellee brief.",
+          "The Rule 11 transcript contains the district court's explanation of the waiver."
+        ],
+        "recordSupportFacts": [
+          "The plea agreement and Rule 11 transcript are necessary to evaluate knowing and voluntary waiver.",
+          "The sentence fell within the advisory range adopted by the district court."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The waiver was not knowing because the colloquy described appeal rights too generally.",
+          "The allocution and procedural sentencing issues fall outside the waiver or satisfy miscarriage-of-justice limits."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The waiver is valid and bars ordinary Guidelines and reasonableness challenges.",
+          "The sentence was within the range covered by the agreement."
+        ],
+        "possibleRelief": ["dismiss in part", "affirm", "remand"]
+      },
+      {
+        "id": "leadership-enhancement",
+        "label": "Leadership enhancement at sentencing",
+        "standardOfReview": "clear error if preserved; plain error if forfeited",
+        "preservationFacts": [
+          "Defense counsel filed a written objection to the PSR enhancement.",
+          "Counsel did not renew the objection after the court adopted the PSR findings."
+        ],
+        "recordSupportFacts": [
+          "The PSR addendum and sentencing transcript identify the factual basis for the enhancement."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The record does not show control over another participant or organizing authority.",
+          "The written objection preserved the issue for ordinary sentencing review."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Co-defendant statements and drug ledger excerpts support the enhancement.",
+          "Any error is harmless because the sentence would be substantively reasonable."
+        ],
+        "possibleRelief": ["affirm", "vacate sentence", "remand for resentencing"]
+      },
+      {
+        "id": "allocution-mitigation",
+        "label": "Allocution and mitigation explanation",
+        "standardOfReview": "abuse of discretion with procedural reasonableness review",
+        "preservationFacts": [
+          "Defense counsel requested a variance based on family support and rehabilitation.",
+          "The defendant personally allocuted before sentence was imposed."
+        ],
+        "recordSupportFacts": [
+          "The sentencing transcript includes the allocution and the court's explanation."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The court did not meaningfully address nonfrivolous mitigation arguments.",
+          "The explanation was too cursory to permit appellate review."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The court considered the parties' arguments and gave an adequate individualized explanation.",
+          "Any explanation error was harmless in light of the record."
+        ],
+        "possibleRelief": ["affirm", "vacate sentence", "remand for resentencing"]
+      }
+    ],
+    "recordExcerpts": [
+      {
+        "id": "plea-agreement-waiver",
+        "label": "Plea agreement appeal waiver",
+        "source": "synthetic",
+        "text": "The plea agreement waives appeal of any sentence within or below the advisory Guidelines range, except for limited reserved claims.",
+        "citedByIssueIds": ["criminal-appeal-waiver"]
+      },
+      {
+        "id": "rule11-waiver-colloquy",
+        "label": "Rule 11 waiver colloquy",
+        "source": "synthetic",
+        "text": "The court asked whether Alvarez understood that he was giving up most appeal rights and confirmed counsel had reviewed the agreement.",
+        "citedByIssueIds": ["criminal-appeal-waiver"]
+      },
+      {
+        "id": "psr-leadership-enhancement",
+        "label": "PSR leadership enhancement excerpt",
+        "source": "synthetic",
+        "text": "The PSR applies a two-level enhancement based on co-defendant statements that Alvarez directed deliveries and collected proceeds.",
+        "citedByIssueIds": ["leadership-enhancement"]
+      },
+      {
+        "id": "sentencing-transcript-allocution",
+        "label": "Sentencing transcript and allocution",
+        "source": "synthetic",
+        "text": "Alvarez apologized, described rehabilitation efforts, and requested a variance before the court imposed an 84-month sentence.",
+        "citedByIssueIds": ["leadership-enhancement", "allocution-mitigation"]
+      },
+      {
+        "id": "statement-of-reasons",
+        "label": "Statement of reasons",
+        "source": "synthetic",
+        "text": "The court adopted the PSR Guidelines range and cited deterrence, public safety, and Alvarez's history.",
+        "citedByIssueIds": ["allocution-mitigation"]
+      }
+    ],
+    "training": {
+      "difficulty": "advanced",
+      "practiceFocus": ["case_opening", "record_appendix", "briefing", "jurisdiction", "panel_merits"],
+      "learningObjectives": [
+        "Open a criminal appeal with the criminal notice event and required appearance materials.",
+        "Screen appeal-waiver issues before investing in ordinary sentencing merits briefing.",
+        "Build a sentencing appendix around the plea, Rule 11, PSR, and sentencing transcript excerpts."
+      ],
+      "modeledPitfalls": [
+        "Opening brief ignores an enforceable appellate waiver.",
+        "Guidelines issue is argued without the PSR addendum or sentencing transcript.",
+        "Allocution challenge uses the wrong standard of review or omits harmless-error analysis."
+      ],
+      "expectedProceduralPath": [
+        "criminal_notice_of_appeal",
+        "appearance_disclosure",
+        "criminal_docketing_statement",
+        "cja_financial_disclosure",
+        "transcript_order_acknowledgment",
+        "opening_brief",
+        "joint_appendix",
+        "appellee_brief",
+        "reply_brief",
+        "panel_deliberation",
+        "judgment_entered"
+      ]
+    }
+  },
+  {
+    "id": "synthetic-ca4-agency-review-removal",
+    "title": "Immigration Agency Review Petition",
+    "source": "synthetic",
+    "courtPackId": "us-federal-ca4-agency-review",
+    "shortCaption": "Santos-Rivera v. Garland",
+    "lowerTribunal": "Board of Immigration Appeals",
+    "natureOfSuit": "Agency Review - Immigration",
+    "proceduralPosture": "Petitioner seeks review of a Board of Immigration Appeals decision dismissing asylum and withholding claims and affirming denial of Convention Against Torture protection.",
+    "participants": [
+      {
+        "id": "appellant",
+        "displayName": "Elena Santos-Rivera",
+        "role": "appellant"
+      },
+      {
+        "id": "appellee",
+        "displayName": "Attorney General of the United States",
+        "role": "appellee"
+      },
+      {
+        "id": "agency",
+        "displayName": "Board of Immigration Appeals",
+        "role": "agency"
+      },
+      {
+        "id": "clerk",
+        "displayName": "Fourth Circuit Clerk",
+        "role": "clerk"
+      },
+      {
+        "id": "panel",
+        "displayName": "Three-Judge Panel",
+        "role": "panel"
+      }
+    ],
+    "issuesPresented": [
+      "Whether the petition for review was timely from the Board's final order.",
+      "Whether the Board applied the correct nexus standard for family-based persecution.",
+      "Whether substantial evidence supports denial of Convention Against Torture protection."
+    ],
+    "meritsRecord": [
+      "The Board dismissed the appeal thirty days before the petition for review was filed.",
+      "The immigration judge found credible testimony but concluded threats were motivated by generalized criminal extortion.",
+      "The Board adopted the immigration judge's nexus analysis and added a brief alternative finding.",
+      "Country-condition reports discuss police acquiescence in gang violence in the petitioner's home region.",
+      "The certified administrative record is incomplete because one translated declaration is missing from the index."
+    ],
+    "issues": [
+      {
+        "id": "agency-review-timeliness",
+        "label": "Timely petition for review",
+        "standardOfReview": "de novo jurisdictional review",
+        "preservationFacts": [
+          "The petition for review was filed on the thirtieth day after the Board's final order.",
+          "The filing receipt and Board order date are both in the appellate record."
+        ],
+        "recordSupportFacts": [
+          "The Board decision date and petition receipt establish the jurisdictional timeline."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The petition was filed within the statutory window measured from the final Board order."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Any defect in payment or service does not expand jurisdiction and must be checked at opening."
+        ],
+        "possibleRelief": ["proceed to merits", "dismiss for lack of jurisdiction"]
+      },
+      {
+        "id": "family-nexus-standard",
+        "label": "Family-based persecution nexus",
+        "standardOfReview": "legal conclusions reviewed de novo; factual findings for substantial evidence",
+        "preservationFacts": [
+          "The nexus argument was presented to the Board in the administrative appeal brief."
+        ],
+        "recordSupportFacts": [
+          "The immigration judge's credible testimony finding and the Board's nexus paragraph are central excerpts."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The Board treated family membership as incidental despite targeted threats tied to the family relationship.",
+          "The Board's alternative finding did not cure the legal-standard error."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Substantial evidence supports the finding that criminal extortion, not protected status, motivated the threats."
+        ],
+        "possibleRelief": ["deny petition", "grant petition", "remand to agency"]
+      },
+      {
+        "id": "cat-acquiescence",
+        "label": "CAT acquiescence and country conditions",
+        "standardOfReview": "substantial evidence with de novo legal framing",
+        "preservationFacts": [
+          "The CAT claim and police-acquiescence argument were exhausted before the Board."
+        ],
+        "recordSupportFacts": [
+          "Country reports, declaration excerpts, and the immigration judge's CAT findings must appear in the agency record appendix."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The agency ignored material country-condition evidence of official acquiescence."
+        ],
+        "likelyArgumentsForAppellee": [
+          "The record does not compel a finding of likely torture with official acquiescence."
+        ],
+        "possibleRelief": ["deny petition", "grant petition", "remand to agency"]
+      }
+    ],
+    "recordExcerpts": [
+      {
+        "id": "bia-final-order",
+        "label": "Board final order",
+        "source": "synthetic",
+        "text": "The Board dismissed the appeal and adopted the immigration judge's nexus and CAT findings with a short supplemental explanation.",
+        "citedByIssueIds": ["agency-review-timeliness", "family-nexus-standard", "cat-acquiescence"]
+      },
+      {
+        "id": "petition-review-receipt",
+        "label": "Petition for review receipt",
+        "source": "synthetic",
+        "text": "The Fourth Circuit receipt shows the petition for review was filed on the thirtieth day after the Board order.",
+        "citedByIssueIds": ["agency-review-timeliness"]
+      },
+      {
+        "id": "ij-credible-testimony",
+        "label": "Immigration judge credibility finding",
+        "source": "synthetic",
+        "text": "The immigration judge found Santos-Rivera credible but concluded the threats reflected generalized criminal extortion.",
+        "citedByIssueIds": ["family-nexus-standard"]
+      },
+      {
+        "id": "country-conditions-police-acquiescence",
+        "label": "Country conditions report excerpt",
+        "source": "synthetic",
+        "text": "The report describes repeated failures by local police to investigate gang threats in the petitioner's region.",
+        "citedByIssueIds": ["cat-acquiescence"]
+      },
+      {
+        "id": "missing-translated-declaration",
+        "label": "Administrative record index gap",
+        "source": "synthetic",
+        "text": "The certified index skips one translated declaration cited in the Board appeal brief.",
+        "citedByIssueIds": ["family-nexus-standard", "cat-acquiescence"]
+      }
+    ],
+    "training": {
+      "difficulty": "intermediate",
+      "practiceFocus": ["case_opening", "jurisdiction", "record_appendix", "briefing", "panel_merits"],
+      "learningObjectives": [
+        "File a petition for review and docketing materials using agency-review event IDs.",
+        "Verify agency-review jurisdiction from the final order and petition receipt before briefing.",
+        "Use certified administrative record excerpts rather than district-court appendix assumptions."
+      ],
+      "modeledPitfalls": [
+        "Petition for review filed under an ordinary notice-of-appeal event.",
+        "Brief cites missing administrative record material without a motion to supplement or correct.",
+        "Arguments collapse legal nexus review and substantial-evidence review into one standard."
+      ],
+      "expectedProceduralPath": [
+        "petition_for_review",
+        "appearance_disclosure",
+        "agency_docketing_statement",
+        "certified_agency_record",
+        "motion_to_supplement_record",
+        "opening_brief",
+        "joint_appendix",
+        "appellee_brief",
+        "reply_brief",
+        "panel_deliberation",
+        "judgment_entered"
+      ],
+      "likelyAmici": [
+        {
+          "organizationName": "Immigration Appellate Resource Center",
+          "organizationType": "public_interest",
+          "supportsRole": "appellant",
+          "triggerIssueIds": ["family-nexus-standard", "cat-acquiescence"],
+          "interestStatement": "The organization can address recurring nexus and CAT evidence issues in petitions for review.",
+          "requiresLeave": true
+        }
+      ]
+    }
+  },
+  {
+    "id": "synthetic-ca4-original-writ-discovery",
+    "title": "Original Mandamus Petition for Privileged Discovery",
+    "source": "synthetic",
+    "courtPackId": "us-federal-ca4-original-writ",
+    "shortCaption": "In re Atlantic Health Systems",
+    "lowerTribunal": "U.S. District Court for the District of Maryland",
+    "natureOfSuit": "Original Writ - Mandamus",
+    "proceduralPosture": "Corporate petitioner seeks mandamus after the district court ordered production of documents claimed to be attorney-client privileged and denied a stay pending review.",
+    "participants": [
+      {
+        "id": "appellant",
+        "displayName": "Atlantic Health Systems",
+        "role": "appellant"
+      },
+      {
+        "id": "appellee",
+        "displayName": "United States ex rel. Morgan",
+        "role": "appellee"
+      },
+      {
+        "id": "district_court",
+        "displayName": "U.S. District Court for the District of Maryland",
+        "role": "district_court"
+      },
+      {
+        "id": "clerk",
+        "displayName": "Fourth Circuit Clerk",
+        "role": "clerk"
+      },
+      {
+        "id": "panel",
+        "displayName": "Three-Judge Panel",
+        "role": "panel"
+      }
+    ],
+    "issuesPresented": [
+      "Whether mandamus is available to review a privileged discovery order before final judgment.",
+      "Whether petitioner lacks an adequate alternative remedy because production would destroy the privilege.",
+      "Whether emergency stay relief is warranted while the mandamus petition is screened."
+    ],
+    "meritsRecord": [
+      "The district court ordered production of internal investigation memoranda within seven days.",
+      "The court found privilege waived by selective disclosure to outside auditors.",
+      "Petitioner moved for a stay in the district court, which was denied the same day.",
+      "The disputed documents have not yet been produced but the production deadline is imminent.",
+      "The privilege log and in camera index identify categories of memoranda and interview notes."
+    ],
+    "issues": [
+      {
+        "id": "mandamus-clear-right",
+        "label": "Clear and indisputable right to writ relief",
+        "standardOfReview": "extraordinary writ standard",
+        "preservationFacts": [
+          "Petitioner asserted privilege, requested in camera review, and sought a district-court stay."
+        ],
+        "recordSupportFacts": [
+          "The discovery order, privilege log, and waiver ruling are necessary mandamus appendix materials."
+        ],
+        "likelyArgumentsForAppellant": [
+          "The order compels disclosure of core attorney-client communications based on an overbroad waiver theory.",
+          "Once produced, the privilege injury cannot be fully repaired on appeal from final judgment."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Mandamus is not a substitute for appeal and the waiver ruling is ordinary discovery management.",
+          "Petitioner has not shown a clear and indisputable right to relief."
+        ],
+        "possibleRelief": ["deny petition", "grant writ", "temporary administrative stay"]
+      },
+      {
+        "id": "adequate-alternative-remedy",
+        "label": "Adequate alternative remedy",
+        "standardOfReview": "mandamus adequacy inquiry",
+        "preservationFacts": [
+          "The district court denied stay relief before petitioner filed in the court of appeals."
+        ],
+        "recordSupportFacts": [
+          "The stay denial and production deadline show why ordinary appeal may be inadequate."
+        ],
+        "likelyArgumentsForAppellant": [
+          "Post-judgment appeal cannot unring compelled disclosure of privileged memoranda."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Protective-order safeguards and final appeal provide adequate remedies."
+        ],
+        "possibleRelief": ["deny petition", "invite answer", "grant writ"]
+      },
+      {
+        "id": "emergency-stay-writ",
+        "label": "Emergency stay pending writ review",
+        "standardOfReview": "discretionary emergency motion review",
+        "preservationFacts": [
+          "Petitioner sought a stay first in the district court and attached the denial."
+        ],
+        "recordSupportFacts": [
+          "The production deadline, stay denial, and privilege log support emergency relief."
+        ],
+        "likelyArgumentsForAppellant": [
+          "A short administrative stay preserves the court's ability to consider the writ petition."
+        ],
+        "likelyArgumentsForAppellee": [
+          "Emergency relief would delay discovery based on a weak privilege claim."
+        ],
+        "possibleRelief": ["temporary administrative stay", "deny stay", "request response"]
+      }
+    ],
+    "recordExcerpts": [
+      {
+        "id": "discovery-production-order",
+        "label": "Discovery production order",
+        "source": "synthetic",
+        "text": "The district court ordered production of internal investigation memoranda within seven days after finding waiver.",
+        "citedByIssueIds": ["mandamus-clear-right", "adequate-alternative-remedy", "emergency-stay-writ"]
+      },
+      {
+        "id": "privilege-log-index",
+        "label": "Privilege log and in camera index",
+        "source": "synthetic",
+        "text": "The privilege log lists attorney interview memoranda, compliance advice, and board presentation drafts.",
+        "citedByIssueIds": ["mandamus-clear-right", "emergency-stay-writ"]
+      },
+      {
+        "id": "district-stay-denial",
+        "label": "District-court stay denial",
+        "source": "synthetic",
+        "text": "The district court denied a stay pending mandamus and left the production deadline in place.",
+        "citedByIssueIds": ["adequate-alternative-remedy", "emergency-stay-writ"]
+      },
+      {
+        "id": "auditor-disclosure-letter",
+        "label": "Auditor disclosure letter",
+        "source": "synthetic",
+        "text": "The letter transmitted a high-level investigation summary to outside auditors without attaching attorney interview notes.",
+        "citedByIssueIds": ["mandamus-clear-right"]
+      },
+      {
+        "id": "protective-order",
+        "label": "Protective order",
+        "source": "synthetic",
+        "text": "The protective order limits use of produced material but does not claw back documents after intentional production.",
+        "citedByIssueIds": ["adequate-alternative-remedy"]
+      }
+    ],
+    "training": {
+      "difficulty": "advanced",
+      "practiceFocus": ["case_opening", "motions", "record_appendix", "jurisdiction", "panel_merits"],
+      "learningObjectives": [
+        "Open an original writ matter with a petition event rather than a notice of appeal.",
+        "Assemble a mandamus appendix that proves preservation, urgency, and lack of adequate remedy.",
+        "Pair emergency stay relief with a district-court-first record and a concrete production deadline."
+      ],
+      "modeledPitfalls": [
+        "Writ petition filed as a direct appeal with the wrong initiating event.",
+        "Emergency motion omits the district-court stay denial.",
+        "Petition argues ordinary discovery error without clear-and-indisputable-right framing."
+      ],
+      "expectedProceduralPath": [
+        "petition_for_writ_mandamus",
+        "appearance_disclosure",
+        "writ_docketing_statement",
+        "emergency_motion_stay",
+        "appendix_to_writ_petition",
+        "order_inviting_answer",
+        "answer_to_writ_petition",
+        "reply_in_support_of_writ",
+        "panel_deliberation",
+        "writ_disposition"
+      ],
+      "likelyAmici": [
+        {
+          "organizationName": "Corporate Counsel Privilege Coalition",
+          "organizationType": "trade_association",
+          "supportsRole": "appellant",
+          "triggerIssueIds": ["mandamus-clear-right", "adequate-alternative-remedy"],
+          "interestStatement": "The coalition can address privilege harms and mandamus treatment of compelled disclosure orders.",
+          "requiresLeave": true
+        }
+      ]
+    }
   }
 ]

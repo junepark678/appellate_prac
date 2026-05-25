@@ -24,6 +24,8 @@ export type InstitutionRole = 'learner' | 'instructor' | 'admin'
 export type ParticipantRole =
   | 'appellant'
   | 'appellee'
+  | 'petitioner'
+  | 'respondent'
   | 'amicus'
   | 'clerk'
   | 'panel'
@@ -549,6 +551,7 @@ export type Scenario = {
   issues?: ScenarioIssue[]
   recordExcerpts?: ScenarioRecordExcerpt[]
   training?: ScenarioTrainingMetadata
+  participants?: Participant[]
   sourceCaseUrl?: string
 }
 

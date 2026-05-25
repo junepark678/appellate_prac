@@ -14,6 +14,16 @@ const usCourtsFrapSource =
   'https://www.uscourts.gov/forms-rules/current-rules-practice-procedure/federal-rules-appellate-procedure'
 
 const ca4RulesSource = 'https://www.ca4.uscourts.gov/LocalRules/toc.html'
+const ca4RulesAndProceduresSource = 'https://www.ca4.uscourts.gov/rules-and-procedures'
+const ca4Rule4Source = 'https://www.ca4.uscourts.gov/rules/Rule4.html'
+const ca4Rule9Source = 'https://www.ca4.uscourts.gov/rules/Rule9.html'
+const ca4Rule15Source = 'https://www.ca4.uscourts.gov/rules/Rule15.html'
+const ca4Rule16Source = 'https://www.ca4.uscourts.gov/rules/Rule16.html'
+const ca4Rule17Source = 'https://www.ca4.uscourts.gov/rules/Rule17.html'
+const ca4Rule18Source = 'https://www.ca4.uscourts.gov/rules/Rule18.html'
+const ca4Rule19Source = 'https://www.ca4.uscourts.gov/rules/Rule19.html'
+const ca4Rule20Source = 'https://www.ca4.uscourts.gov/rules/Rule20.html'
+const ca4Rule21Source = 'https://www.ca4.uscourts.gov/rules/Rule21.html'
 const ca4LocalRule31Source = 'https://www.ca4.uscourts.gov/LocalRules/LocalRules.3.22.html'
 const ca4EcfEventsSource =
   'https://www.ca4.uscourts.gov/caseinformationefiling/efiling_cm-ecf/filingevents'
@@ -29,15 +39,60 @@ export const ruleRefs = {
     label: 'Fed. R. App. P. 4(a)(1)',
     sourceUrl: usCourtsFrapSource,
   },
+  frap4b: {
+    ruleId: 'FRAP_4_B',
+    label: 'Fed. R. App. P. 4(b)',
+    sourceUrl: ca4Rule4Source,
+  },
   frap8: {
     ruleId: 'FRAP_8',
     label: 'Fed. R. App. P. 8',
     sourceUrl: usCourtsFrapSource,
   },
+  frap9: {
+    ruleId: 'FRAP_9',
+    label: 'Fed. R. App. P. 9',
+    sourceUrl: ca4Rule9Source,
+  },
   frap10: {
     ruleId: 'FRAP_10',
     label: 'Fed. R. App. P. 10',
     sourceUrl: usCourtsFrapSource,
+  },
+  frap15: {
+    ruleId: 'FRAP_15',
+    label: 'Fed. R. App. P. 15',
+    sourceUrl: ca4Rule15Source,
+  },
+  frap16: {
+    ruleId: 'FRAP_16',
+    label: 'Fed. R. App. P. 16',
+    sourceUrl: ca4Rule16Source,
+  },
+  frap17: {
+    ruleId: 'FRAP_17',
+    label: 'Fed. R. App. P. 17',
+    sourceUrl: ca4Rule17Source,
+  },
+  frap18: {
+    ruleId: 'FRAP_18',
+    label: 'Fed. R. App. P. 18',
+    sourceUrl: ca4Rule18Source,
+  },
+  frap19: {
+    ruleId: 'FRAP_19',
+    label: 'Fed. R. App. P. 19',
+    sourceUrl: ca4Rule19Source,
+  },
+  frap20: {
+    ruleId: 'FRAP_20',
+    label: 'Fed. R. App. P. 20',
+    sourceUrl: ca4Rule20Source,
+  },
+  frap21: {
+    ruleId: 'FRAP_21',
+    label: 'Fed. R. App. P. 21',
+    sourceUrl: ca4Rule21Source,
   },
   frap25: {
     ruleId: 'FRAP_25',
@@ -124,6 +179,11 @@ export const ruleRefs = {
     label: '4th Cir. Loc. R. 8',
     sourceUrl: ca4RulesSource,
   },
+  ca4Local9: {
+    ruleId: 'CA4_LR_9',
+    label: '4th Cir. Loc. R. 9',
+    sourceUrl: ca4Rule9Source,
+  },
   ca4Local10: {
     ruleId: 'CA4_LR_10',
     label: '4th Cir. Loc. R. 10',
@@ -133,6 +193,21 @@ export const ruleRefs = {
     ruleId: 'CA4_LR_11',
     label: '4th Cir. Loc. R. 11',
     sourceUrl: ca4RulesSource,
+  },
+  ca4Local15: {
+    ruleId: 'CA4_LR_15',
+    label: '4th Cir. Loc. R. 15',
+    sourceUrl: ca4Rule15Source,
+  },
+  ca4Local18: {
+    ruleId: 'CA4_LR_18',
+    label: '4th Cir. Loc. R. 18',
+    sourceUrl: ca4Rule18Source,
+  },
+  ca4Local21: {
+    ruleId: 'CA4_LR_21',
+    label: '4th Cir. Loc. R. 21',
+    sourceUrl: ca4Rule21Source,
   },
   ca4Local25: {
     ruleId: 'CA4_LR_25',
@@ -217,6 +292,27 @@ const replyBriefDeadline: DeadlineEffect = {
   sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
 }
 
+const criminalOpeningBriefDeadline: DeadlineEffect = {
+  targetEventId: 'opening_brief',
+  offsetDays: 35,
+  label: 'Criminal opening brief and appendix due',
+  sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
+}
+
+const criminalAppelleeBriefDeadline: DeadlineEffect = {
+  targetEventId: 'appellee_brief',
+  offsetDays: 21,
+  label: 'Criminal appellee brief due',
+  sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
+}
+
+const criminalReplyBriefDeadline: DeadlineEffect = {
+  targetEventId: 'reply_brief',
+  offsetDays: 10,
+  label: 'Criminal reply brief due',
+  sourceRuleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
+}
+
 const pdfRequirement = (id: string, label: string, maxPages?: number) => ({
   id,
   label,
@@ -274,6 +370,24 @@ const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
     'NOA',
     { feeBehavior: 'required', receiptTemplateId: 'case_opening_noda' },
   ),
+  criminal_notice_of_appeal: ecfEventMetadata(
+    ['Case Opening', 'Notice of Appeal - Criminal'],
+    'case_opening',
+    'CRIM_NOA',
+    { feeBehavior: 'none', receiptTemplateId: 'case_opening_noda' },
+  ),
+  petition_for_review: ecfEventMetadata(
+    ['Case Opening', 'Petition for Review'],
+    'case_opening',
+    'PET_REVIEW',
+    { feeBehavior: 'required', receiptTemplateId: 'case_opening_noda' },
+  ),
+  petition_for_writ_mandamus: ecfEventMetadata(
+    ['Case Opening', 'Petition for Writ of Mandamus/Prohibition'],
+    'case_opening',
+    'WRIT_PETITION',
+    { feeBehavior: 'required', receiptTemplateId: 'case_opening_noda' },
+  ),
   appearance_disclosure: ecfEventMetadata(
     ['Forms, Notices & Filing Fees', 'Appearance of counsel / Disclosure statement'],
     'appearance',
@@ -284,10 +398,78 @@ const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
     'appearance',
     'DOCKET_STMT_CIV',
   ),
+  criminal_docketing_statement: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Docketing statement (criminal)'],
+    'appearance',
+    'DOCKET_STMT_CRIM',
+  ),
+  agency_docketing_statement: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Docketing statement (civil/agency)'],
+    'appearance',
+    'DOCKET_STMT_AGENCY',
+  ),
+  writ_docketing_statement: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Docketing statement'],
+    'appearance',
+    'DOCKET_STMT_WRIT',
+  ),
+  cja_financial_disclosure: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'CJA financial disclosure'],
+    'appearance',
+    'CJA_FIN_DISC',
+    { serviceBehavior: 'manual_required' },
+  ),
   transcript_order_acknowledgment: ecfEventMetadata(
     ['Forms, Notices & Filing Fees', 'Transcript order form'],
     'appearance',
     'TRANSCRIPT_ACK',
+  ),
+  certified_agency_record: ecfEventMetadata(
+    ['Other Filings', 'Certified list / agency record'],
+    'appearance',
+    'AGENCY_RECORD',
+    { partySelectionMode: 'single' },
+  ),
+  motion_to_supplement_record: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'MOTION', 'Supplement record'],
+    'motion',
+    'MOTION_SUPP_RECORD',
+    { requiresReliefText: true, requiresRelatedEntry: true },
+  ),
+  emergency_motion_stay: ecfEventMetadata(
+    ['Motions, Responses & Replies', 'MOTION', 'Emergency stay'],
+    'motion',
+    'EMERGENCY_STAY',
+    { requiresReliefText: true },
+  ),
+  appendix_to_writ_petition: ecfEventMetadata(
+    ['Other Filings', 'Appendix to writ petition'],
+    'appendix',
+    'WRIT_APPENDIX',
+  ),
+  order_inviting_answer: ecfEventMetadata(
+    ['Other Filings', 'Court order inviting answer'],
+    'response',
+    'WRIT_ANSWER_ORDER',
+    { partySelectionMode: 'none' },
+  ),
+  answer_to_writ_petition: ecfEventMetadata(
+    ['Other Filings', 'Answer to writ petition'],
+    'response',
+    'WRIT_ANSWER',
+    { requiresRelatedEntry: true },
+  ),
+  reply_in_support_of_writ: ecfEventMetadata(
+    ['Other Filings', 'Reply in support of writ petition'],
+    'response',
+    'WRIT_REPLY',
+    { requiresRelatedEntry: true },
+  ),
+  writ_disposition: ecfEventMetadata(
+    ['Judgments', 'Writ disposition'],
+    'post_disposition',
+    'WRIT_DISPOSITION',
+    { partySelectionMode: 'none' },
   ),
   motion: ecfEventMetadata(['Motions, Responses & Replies', 'MOTION'], 'motion', 'MOTION', {
     requiresReliefText: true,
@@ -458,6 +640,108 @@ const baseFilingEvents: BaseFilingEvent[] = [
     possibleClerkResponses: ['Case opened', 'Notice docketed with fee issue'],
   },
   {
+    id: 'criminal_notice_of_appeal',
+    label: 'Criminal Notice of Appeal',
+    domain: 'criminal_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('criminal_notice_pdf', 'Criminal notice of appeal PDF', 12),
+        mustContain: ['notice of appeal'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.frap4b],
+    deadlineEffects: [
+      {
+        targetEventId: 'appearance_disclosure',
+        offsetDays: 14,
+        label: 'Appearance and disclosure statement due',
+        sourceRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+      },
+      {
+        targetEventId: 'criminal_docketing_statement',
+        offsetDays: 14,
+        label: 'Criminal docketing statement due',
+        sourceRuleRefs: [ruleRefs.frap3, ruleRefs.ca4Local45],
+      },
+      {
+        targetEventId: 'cja_financial_disclosure',
+        offsetDays: 14,
+        label: 'CJA financial disclosure due when applicable',
+        sourceRuleRefs: [ruleRefs.frap9, ruleRefs.ca4Local9],
+      },
+    ],
+    docketTextTemplate:
+      'Criminal notice of appeal filed by {participant}. Criminal appeal opened.',
+    possibleClerkResponses: ['Criminal appeal opened', 'CJA or custody issue noted'],
+  },
+  {
+    id: 'petition_for_review',
+    label: 'Petition for Review',
+    domain: 'agency_review',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('petition_review_pdf', 'Petition for review PDF', 20),
+        mustContain: ['petition for review'],
+      },
+    ],
+    optionalDocuments: [pdfRequirement('agency_order_pdf', 'Agency order PDF')],
+    validationRuleRefs: [ruleRefs.frap15, ruleRefs.ca4Local15],
+    deadlineEffects: [
+      {
+        targetEventId: 'appearance_disclosure',
+        offsetDays: 14,
+        label: 'Appearance and disclosure statement due',
+        sourceRuleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
+      },
+      {
+        targetEventId: 'agency_docketing_statement',
+        offsetDays: 14,
+        label: 'Agency-review docketing statement due',
+        sourceRuleRefs: [ruleRefs.frap15, ruleRefs.ca4Local15],
+      },
+      {
+        targetEventId: 'certified_agency_record',
+        offsetDays: 40,
+        label: 'Certified agency record due',
+        sourceRuleRefs: [ruleRefs.frap16, ruleRefs.frap17],
+      },
+    ],
+    docketTextTemplate:
+      'Petition for review filed by {participant}. Agency-review proceeding opened.',
+    possibleClerkResponses: ['Agency review opened', 'Agency record order issued'],
+  },
+  {
+    id: 'petition_for_writ_mandamus',
+    label: 'Petition for Writ of Mandamus or Prohibition',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_petition_pdf', 'Writ petition PDF', 30),
+        mustContain: ['petition', 'writ'],
+      },
+    ],
+    optionalDocuments: [pdfRequirement('writ_appendix_pdf', 'Writ appendix PDF')],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [
+      {
+        targetEventId: 'appendix_to_writ_petition',
+        offsetDays: 0,
+        label: 'Appendix or record excerpts due with writ petition',
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      },
+    ],
+    docketTextTemplate:
+      'Petition for writ of mandamus or prohibition filed by {participant}: {title}.',
+    possibleClerkResponses: ['Petition docketed', 'Petition referred to panel'],
+  },
+  {
     id: 'appearance_disclosure',
     label: 'Appearance / Disclosure Statement',
     domain: 'civil_appeal',
@@ -494,6 +778,78 @@ const baseFilingEvents: BaseFilingEvent[] = [
     possibleClerkResponses: ['Docketing statement filed', 'Jurisdictional issue noted'],
   },
   {
+    id: 'criminal_docketing_statement',
+    label: 'Criminal Docketing Statement',
+    domain: 'criminal_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('criminal_docketing_statement_pdf', 'Criminal docketing statement PDF', 20),
+        mustContain: ['docketing statement'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.frap4b, ruleRefs.ca4Local45],
+    deadlineEffects: [],
+    docketTextTemplate: 'Criminal docketing statement filed by {participant}.',
+    possibleClerkResponses: ['Criminal docketing statement filed', 'Custody or CJA issue noted'],
+  },
+  {
+    id: 'agency_docketing_statement',
+    label: 'Agency-Review Docketing Statement',
+    domain: 'agency_review',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('agency_docketing_statement_pdf', 'Agency-review docketing statement PDF', 20),
+        mustContain: ['docketing statement'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap15, ruleRefs.ca4Local15],
+    deadlineEffects: [],
+    docketTextTemplate: 'Agency-review docketing statement filed by {participant}.',
+    possibleClerkResponses: ['Docketing statement filed', 'Agency jurisdiction issue noted'],
+  },
+  {
+    id: 'writ_docketing_statement',
+    label: 'Writ Docketing Statement',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_docketing_statement_pdf', 'Writ docketing statement PDF', 20),
+        mustContain: ['docketing statement'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [],
+    docketTextTemplate: 'Writ docketing statement filed by {participant}.',
+    possibleClerkResponses: ['Docketing statement filed', 'Petition referred for screening'],
+  },
+  {
+    id: 'cja_financial_disclosure',
+    label: 'CJA Financial Disclosure',
+    domain: 'criminal_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('cja_financial_disclosure_pdf', 'CJA financial disclosure PDF', 20),
+        mustContain: ['financial'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap9, ruleRefs.ca4Local9],
+    deadlineEffects: [],
+    docketTextTemplate: 'CJA financial disclosure filed by {participant}.',
+    possibleClerkResponses: ['Filed under clerk review', 'Financial disclosure deficiency noted'],
+  },
+  {
     id: 'transcript_order_acknowledgment',
     label: 'Transcript Order Acknowledgment',
     domain: 'civil_appeal',
@@ -510,6 +866,24 @@ const baseFilingEvents: BaseFilingEvent[] = [
     deadlineEffects: [],
     docketTextTemplate: 'Transcript order acknowledgment filed by {participant}.',
     possibleClerkResponses: ['Transcript order acknowledged', 'Record issue noted'],
+  },
+  {
+    id: 'certified_agency_record',
+    label: 'Certified Agency Record',
+    domain: 'agency_review',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['agency'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('agency_record_pdf', 'Certified agency record PDF', 500),
+        mustContain: ['record'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap16, ruleRefs.frap17],
+    deadlineEffects: [openingBriefDeadline],
+    docketTextTemplate: 'Certified agency record filed by {participant}.',
+    possibleClerkResponses: ['Agency record filed', 'Record deficiency noted'],
   },
   {
     id: 'motion',
@@ -578,6 +952,160 @@ const baseFilingEvents: BaseFilingEvent[] = [
     ],
     docketTextTemplate: 'Motion to stay or for injunction pending appeal filed by {participant}: {title}.',
     possibleClerkResponses: ['Emergency motion referred to panel', 'Response requested'],
+  },
+  {
+    id: 'motion_to_supplement_record',
+    label: 'Motion to Supplement Record',
+    domain: 'agency_review',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'agency'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('supplement_record_motion_pdf', 'Motion to supplement record PDF', 35),
+        mustContain: ['motion', 'record'],
+      },
+    ],
+    optionalDocuments: [pdfRequirement('proposed_record_material_pdf', 'Proposed record material PDF')],
+    validationRuleRefs: [ruleRefs.frap16, ruleRefs.frap17, ruleRefs.frap27],
+    deadlineEffects: [
+      {
+        targetEventId: 'motion_response',
+        offsetDays: 10,
+        label: 'Response to record motion due',
+        sourceRuleRefs: [ruleRefs.frap27],
+      },
+    ],
+    docketTextTemplate: 'Motion to supplement the record filed by {participant}: {title}.',
+    possibleClerkResponses: ['Response requested', 'Motion referred to panel with agency record'],
+  },
+  {
+    id: 'emergency_motion_stay',
+    label: 'Emergency Motion for Stay',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('emergency_stay_motion_pdf', 'Emergency stay motion PDF', 35),
+        mustContain: ['motion', 'stay'],
+      },
+    ],
+    optionalDocuments: [pdfRequirement('challenged_order_pdf', 'Challenged order PDF')],
+    validationRuleRefs: [ruleRefs.frap18, ruleRefs.frap21, ruleRefs.ca4Local18, ruleRefs.ca4Local21],
+    deadlineEffects: [
+      {
+        targetEventId: 'answer_to_writ_petition',
+        offsetDays: 7,
+        label: 'Answer to writ petition due if ordered',
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      },
+    ],
+    docketTextTemplate: 'Emergency motion for stay filed by {participant}: {title}.',
+    possibleClerkResponses: ['Emergency motion referred to panel', 'Answer requested'],
+  },
+  {
+    id: 'appendix_to_writ_petition',
+    label: 'Appendix to Writ Petition',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_appendix_pdf', 'Writ appendix PDF', 300),
+        mustContain: ['appendix'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [],
+    docketTextTemplate: 'Appendix to writ petition filed by {participant}.',
+    possibleClerkResponses: ['Appendix accepted', 'Record excerpts deficiency noted'],
+  },
+  {
+    id: 'order_inviting_answer',
+    label: 'Order Inviting Answer',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['clerk', 'panel'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('answer_order_pdf', 'Order inviting answer PDF', 10),
+        mustContain: ['answer'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [
+      {
+        targetEventId: 'answer_to_writ_petition',
+        offsetDays: 14,
+        label: 'Answer to writ petition due',
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      },
+    ],
+    docketTextTemplate: 'Order inviting answer entered by {participant}.',
+    possibleClerkResponses: ['Answer deadline set', 'Order served on parties'],
+  },
+  {
+    id: 'answer_to_writ_petition',
+    label: 'Answer to Writ Petition',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellee', 'district_court'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_answer_pdf', 'Answer to writ petition PDF', 50),
+        mustContain: ['answer'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [
+      {
+        targetEventId: 'reply_in_support_of_writ',
+        offsetDays: 7,
+        label: 'Reply in support of writ due if permitted',
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      },
+    ],
+    docketTextTemplate: 'Answer to writ petition filed by {participant}.',
+    possibleClerkResponses: ['Answer accepted', 'Petition package referred to panel'],
+  },
+  {
+    id: 'reply_in_support_of_writ',
+    label: 'Reply in Support of Writ Petition',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_reply_pdf', 'Reply in support of writ PDF', 25),
+        mustContain: ['reply'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [],
+    docketTextTemplate: 'Reply in support of writ petition filed by {participant}.',
+    possibleClerkResponses: ['Reply accepted', 'Petition ready for panel disposition'],
+  },
+  {
+    id: 'writ_disposition',
+    label: 'Writ Disposition',
+    domain: 'original_writ',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['panel'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('writ_disposition_pdf', 'Writ disposition PDF', 20),
+        mustContain: ['petition'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [],
+    docketTextTemplate: 'Writ disposition entered by {participant}.',
+    possibleClerkResponses: ['Disposition entered', 'Mandamus petition closed'],
   },
   {
     id: 'opening_brief',
@@ -923,6 +1451,58 @@ const baseFilingEvents: BaseFilingEvent[] = [
 
 export const filingEvents: FilingEvent[] = baseFilingEvents.map(withEcfMetadata)
 
+const commonAppealEventIds = new Set([
+  'appearance_disclosure',
+  'transcript_order_acknowledgment',
+  'opening_brief',
+  'joint_appendix',
+  'appellee_brief',
+  'reply_brief',
+  'motion',
+  'motion_response',
+  'motion_extend_time',
+  'motion_overlength_brief',
+  'motion_to_seal',
+  'sealed_filing_acknowledgment',
+  'corrected_brief',
+  'rule_28j_letter',
+  'petition_rehearing',
+  'mandate_stay_motion',
+  'bill_of_costs',
+])
+
+const commonAgencyEventIds = new Set([
+  'appearance_disclosure',
+  'opening_brief',
+  'joint_appendix',
+  'appellee_brief',
+  'reply_brief',
+  'motion',
+  'motion_response',
+  'motion_extend_time',
+  'motion_overlength_brief',
+  'motion_to_seal',
+  'sealed_filing_acknowledgment',
+  'corrected_brief',
+  'rule_28j_letter',
+  'petition_rehearing',
+  'mandate_stay_motion',
+  'bill_of_costs',
+])
+
+const civilFilingEvents = filingEvents.filter((event) => event.domain === 'civil_appeal')
+const criminalFilingEvents = filingEvents.filter(
+  (event) => event.domain === 'criminal_appeal' || commonAppealEventIds.has(event.id),
+)
+const agencyReviewFilingEvents = filingEvents.filter(
+  (event) => event.domain === 'agency_review' || commonAgencyEventIds.has(event.id),
+)
+const originalWritFilingEvents = filingEvents.filter(
+  (event) =>
+    event.domain === 'original_writ' ||
+    ['appearance_disclosure', 'motion', 'motion_response', 'motion_to_seal', 'sealed_filing_acknowledgment'].includes(event.id),
+)
+
 const frapItems: RuleItem[] = [
   {
     jurisdiction: 'us-federal',
@@ -956,6 +1536,22 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_4_B',
+    topic: 'criminal_notice_deadline',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule4Source,
+    plainText:
+      'Criminal notices of appeal use the criminal appeal timing path, including shorter defendant-notice timing and government-notice timing.',
+    structuredConstraints: [
+      { kind: 'deadline', value: 'criminal notice of appeal deadline' },
+      { kind: 'event_sequence', value: 'opens criminal appeal' },
+    ],
+    simulatorNotes:
+      'The simulator models defendant criminal notices with a shorter training deadline and flags late-notice posture for instructor review.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_8',
     topic: 'stay_pending_appeal',
     effectiveFrom: '2025-12-01',
@@ -972,6 +1568,22 @@ const frapItems: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal',
+    ruleId: 'FRAP_9',
+    topic: 'criminal_release',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule9Source,
+    plainText:
+      'Release or detention review in a criminal case requires the district-court order, reasons, and any transcript or explanation needed for factual challenges.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'release order and reasons' },
+      { kind: 'event_sequence', value: 'prompt criminal release review' },
+    ],
+    simulatorNotes:
+      'Release-related filings can be referred promptly and do not follow ordinary merits briefing cadence.',
+  },
+  {
+    jurisdiction: 'us-federal',
     ruleId: 'FRAP_10',
     topic: 'record_on_appeal',
     effectiveFrom: '2025-12-01',
@@ -983,6 +1595,119 @@ const frapItems: RuleItem[] = [
     ],
     simulatorNotes:
       'Record disputes and appendix issues are modeled as clerk or panel events.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_15',
+    topic: 'agency_petition_review',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule15Source,
+    plainText:
+      'Agency review is commenced by petition for review or enforcement papers that identify the parties, agency, and order under review.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'petition for review' },
+      { kind: 'service', value: 'agency proceeding parties' },
+      { kind: 'fee_or_ifp', value: 'petition filing fee or IFP signal' },
+    ],
+    simulatorNotes:
+      'Agency-review validation checks petition naming, agency order identification, service, and fee or IFP posture.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_16',
+    topic: 'agency_record',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule16Source,
+    plainText:
+      'Agency-review records include the order, findings, report, pleadings, evidence, and other proceedings materials, with correction available for omissions or misstatements.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'agency record or certified list' },
+      { kind: 'event_sequence', value: 'supplemental record correction' },
+    ],
+    simulatorNotes:
+      'Record defects create a supplement-record branch rather than automatically blocking merits briefing.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_17',
+    topic: 'agency_record_filing',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule17Source,
+    plainText:
+      'The agency files the record or a certified list, and record filing triggers the clerk notice and briefing schedule path.',
+    structuredConstraints: [
+      { kind: 'deadline', value: 'agency record due' },
+      { kind: 'event_sequence', value: 'clerk record notice' },
+    ],
+    simulatorNotes:
+      'Filing the certified agency record opens Local Rule 31 briefing in agency-review scenarios.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_18',
+    topic: 'agency_stay_pending_review',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule18Source,
+    plainText:
+      'Stay pending agency review ordinarily requires agency-first relief or a showing that seeking agency relief first was impracticable.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'stay pending review motion' },
+      { kind: 'event_sequence', value: 'agency-first stay signal' },
+    ],
+    simulatorNotes:
+      'The validator warns when agency-review stay papers omit agency-first denial, inaction, or impracticability.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_19',
+    topic: 'agency_partial_enforcement_judgment',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule19Source,
+    plainText:
+      'After an opinion enforcing an agency order in part, proposed conforming judgment practice may be required.',
+    structuredConstraints: [
+      { kind: 'deadline', value: 'proposed agency judgment' },
+      { kind: 'event_sequence', value: 'court settles judgment' },
+    ],
+    simulatorNotes:
+      'FRAP 19 events unlock only after a panel disposition enforcing an agency order in part.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_20',
+    topic: 'agency_rule_applicability',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule20Source,
+    plainText:
+      'Agency-review proceedings use appellate-rule role mappings, including petitioner/applicant as appellant and respondent as appellee.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'agency role mapping' },
+    ],
+    simulatorNotes:
+      'This supports using appellant/appellee role labels in agency-review training while preserving agency-specific filing events.',
+  },
+  {
+    jurisdiction: 'us-federal',
+    ruleId: 'FRAP_21',
+    topic: 'original_writ',
+    effectiveFrom: '2025-12-01',
+    sourceLabel: 'Federal Rules of Appellate Procedure',
+    sourceUrl: ca4Rule21Source,
+    plainText:
+      'Mandamus, prohibition, and other extraordinary writ petitions are filed in the court of appeals with required content, service, and essential record materials.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'original writ petition' },
+      { kind: 'service', value: 'trial-court parties and judge copy' },
+      { kind: 'fee_or_ifp', value: 'writ docket fee or IFP signal' },
+    ],
+    simulatorNotes:
+      'The clerk may submit the petition to the panel, note fee or service defects, or set an answer deadline if the panel invites an answer.',
   },
   {
     jurisdiction: 'us-federal',
@@ -1219,6 +1944,21 @@ const ca4Items: RuleItem[] = [
   },
   {
     jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_9',
+    topic: 'criminal_release_local_handling',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4Rule9Source,
+    plainText:
+      'Fourth Circuit local release practice supports prompt consideration of criminal release appeals and motions on submitted materials.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'prompt criminal release review' },
+    ],
+    simulatorNotes:
+      'Release papers with missing district-court reasons or transcript signals receive a cure warning.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
     ruleId: 'CA4_LR_10',
     topic: 'record_on_appeal',
     effectiveFrom: '2026-03-23',
@@ -1244,6 +1984,54 @@ const ca4Items: RuleItem[] = [
     ],
     simulatorNotes:
       'The opening stage expects transcript order acknowledgment before briefing is scheduled.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_15',
+    topic: 'agency_petitions',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4Rule15Source,
+    plainText:
+      'Fourth Circuit agency-review practice supplements petition-for-review filing, docketing fee, and petition handling.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'agency petition and order' },
+      { kind: 'fee_or_ifp', value: 'agency-review docketing fee' },
+    ],
+    simulatorNotes:
+      'Agency petitions missing party naming, order identification, service, or fee posture are returned with source-backed cure text.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_18',
+    topic: 'agency_stay_pending_review',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4Rule18Source,
+    plainText:
+      'Fourth Circuit local stay procedures supplement stay pending review motion practice.',
+    structuredConstraints: [
+      { kind: 'event_sequence', value: 'agency stay motion and emergency handling' },
+    ],
+    simulatorNotes:
+      'Agency-review stay motions can trigger expedited response deadlines and panel referral.',
+  },
+  {
+    jurisdiction: 'us-federal-ca4',
+    ruleId: 'CA4_LR_21',
+    topic: 'original_writ_local_handling',
+    effectiveFrom: '2026-03-23',
+    sourceLabel: 'Fourth Circuit Local Rules and IOPs',
+    sourceUrl: ca4Rule21Source,
+    plainText:
+      'Fourth Circuit local writ practice supplements FRAP 21 case captions, petition handling, fee, IFP, and prisoner petition requirements.',
+    structuredConstraints: [
+      { kind: 'required_document', value: 'writ petition and essential record appendix' },
+      { kind: 'fee_or_ifp', value: 'writ docket fee or IFP papers' },
+      { kind: 'event_sequence', value: 'panel submission of writ petition' },
+    ],
+    simulatorNotes:
+      'Writ petitions are checked for caption, service, fee or IFP posture, disclosure, and essential order or record attachments.',
   },
   {
     jurisdiction: 'us-federal-ca4',
@@ -1443,6 +2231,42 @@ export const rulePacks: RulePack[] = [
     items: [],
   },
   {
+    id: 'criminal-appeal',
+    moduleId: 'criminal-appeal',
+    label: 'Criminal Appeal Procedure Pack',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'criminal_appeal',
+    version: '0.1.0',
+    sourceUrl: 'internal://criminal-appeal',
+    sourceVersionIds: ['criminal-appeal:0.1.0'],
+    items: [],
+  },
+  {
+    id: 'agency-review',
+    moduleId: 'agency-review',
+    label: 'Agency Review Procedure Pack',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'agency_review',
+    version: '0.1.0',
+    sourceUrl: 'internal://agency-review',
+    sourceVersionIds: ['agency-review:0.1.0'],
+    items: [],
+  },
+  {
+    id: 'original-writ',
+    moduleId: 'original-writ',
+    label: 'Original Writ Procedure Pack',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'original_writ',
+    version: '0.1.0',
+    sourceUrl: 'internal://original-writ',
+    sourceVersionIds: ['original-writ:0.1.0'],
+    items: [],
+  },
+  {
     id: 'frap-2025',
     moduleId: 'frap-2025',
     label: 'Federal Rules of Appellate Procedure',
@@ -1462,7 +2286,7 @@ export const rulePacks: RulePack[] = [
     courtLevel: 'intermediate_appellate',
     procedureDomain: 'civil_appeal',
     version: '2026-03-23',
-    sourceUrl: ca4RulesSource,
+    sourceUrl: ca4RulesAndProceduresSource,
     sourceVersionIds: ['ca4-current:2026-03-23'],
     items: ca4Items,
   },
@@ -1579,7 +2403,75 @@ export const courtPacks: CourtPack[] = [
       'panel',
       'district_court',
     ],
-    filingEvents,
+    filingEvents: civilFilingEvents,
+    aiActors,
+    docketNumberFormat: '26-####',
+  },
+  {
+    id: 'us-federal-ca4-criminal-appeal',
+    moduleId: 'us-federal-ca4-criminal',
+    label: 'U.S. Court of Appeals for the Fourth Circuit - Criminal Appeal',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'criminal_appeal',
+    baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
+    includedRulePackIds: ['procedure-core', 'criminal-appeal', 'frap-2025'],
+    rulePackIds: ['frap-2025', 'ca4-current'],
+    procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
+    participantRoles: [
+      'appellant',
+      'appellee',
+      'amicus',
+      'clerk',
+      'panel',
+      'district_court',
+    ],
+    filingEvents: criminalFilingEvents,
+    aiActors,
+    docketNumberFormat: '26-####',
+  },
+  {
+    id: 'us-federal-ca4-agency-review',
+    moduleId: 'us-federal-ca4-agency-review',
+    label: 'U.S. Court of Appeals for the Fourth Circuit - Agency Review',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'agency_review',
+    baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
+    includedRulePackIds: ['procedure-core', 'agency-review', 'frap-2025'],
+    rulePackIds: ['frap-2025', 'ca4-current'],
+    procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
+    participantRoles: [
+      'appellant',
+      'appellee',
+      'amicus',
+      'agency',
+      'clerk',
+      'panel',
+    ],
+    filingEvents: agencyReviewFilingEvents,
+    aiActors,
+    docketNumberFormat: '26-####',
+  },
+  {
+    id: 'us-federal-ca4-original-writ',
+    moduleId: 'us-federal-ca4-original-writ',
+    label: 'U.S. Court of Appeals for the Fourth Circuit - Original Writ',
+    courtSystem: 'federal',
+    courtLevel: 'intermediate_appellate',
+    procedureDomain: 'original_writ',
+    baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
+    includedRulePackIds: ['procedure-core', 'original-writ', 'frap-2025'],
+    rulePackIds: ['frap-2025', 'ca4-current'],
+    procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
+    participantRoles: [
+      'appellant',
+      'appellee',
+      'clerk',
+      'panel',
+      'district_court',
+    ],
+    filingEvents: originalWritFilingEvents,
     aiActors,
     docketNumberFormat: '26-####',
   },
@@ -1634,4 +2526,9 @@ export function getScenario(scenarioId: string) {
   return scenario
 }
 
-export { openingBriefDeadline }
+export {
+  criminalAppelleeBriefDeadline,
+  criminalOpeningBriefDeadline,
+  criminalReplyBriefDeadline,
+  openingBriefDeadline,
+}

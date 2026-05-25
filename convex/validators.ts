@@ -3,6 +3,8 @@ import { v } from 'convex/values'
 export const participantRoleValidator = v.union(
   v.literal('appellant'),
   v.literal('appellee'),
+  v.literal('petitioner'),
+  v.literal('respondent'),
   v.literal('amicus'),
   v.literal('clerk'),
   v.literal('panel'),
@@ -484,6 +486,12 @@ export const scenarioTrainingMetadataValidator = v.object({
   ),
 })
 
+export const participantValidator = v.object({
+  id: v.string(),
+  displayName: v.string(),
+  role: participantRoleValidator,
+})
+
 export const scenarioValidator = v.object({
   id: v.string(),
   title: v.string(),
@@ -502,13 +510,8 @@ export const scenarioValidator = v.object({
   issues: v.optional(v.array(scenarioIssueValidator)),
   recordExcerpts: v.optional(v.array(scenarioRecordExcerptValidator)),
   training: v.optional(scenarioTrainingMetadataValidator),
+  participants: v.optional(v.array(participantValidator)),
   sourceCaseUrl: v.optional(v.string()),
-})
-
-export const participantValidator = v.object({
-  id: v.string(),
-  displayName: v.string(),
-  role: participantRoleValidator,
 })
 
 export const docketEntryValidator = v.object({
