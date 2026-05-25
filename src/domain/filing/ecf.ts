@@ -24,7 +24,7 @@ import {
 import { ca4SourceVersionIds } from '../rules/ca4-source-profile'
 
 export function defaultFilingMetadata(eventId: string, sealed = false): FilingMetadata {
-  const isCaseOpening = eventId === 'notice_of_appeal'
+  const isCaseOpening = ['notice_of_appeal', 'criminal_notice_of_appeal', 'petition_for_review', 'petition_for_writ_mandamus'].includes(eventId)
   const isBrief = eventId.includes('brief') || eventId === 'corrected_brief'
   const feePaymentStatus = isCaseOpening ? 'pending' : 'not_required'
 
@@ -304,7 +304,9 @@ export function serviceRecipientsForSubmission(
 ) {
   const suppressed = new Set(submission.metadata.serviceListOverrides?.suppressedParticipantIds ?? [])
   const participants = session.participants
-    .filter((participant) => ['appellant', 'appellee', 'amicus'].includes(participant.role))
+    .filter((participant) =>
+      ['appellant', 'appellee', 'petitioner', 'respondent', 'amicus', 'agency'].includes(participant.role),
+    )
     .filter((participant) => !suppressed.has(participant.id))
     .map((participant) => participant.displayName)
   const additional = submission.metadata.serviceListOverrides?.additionalRecipients ?? []
@@ -599,6 +601,23 @@ function latestOpenDeadline(session: CaseSession, eventId: string) {
 function availabilityReasons(session: CaseSession, event: FilingEvent) {
   const reasons: string[] = []
   const status = session.status
+  const courtPack = getCourtPack(session.courtPackId)
+  const openingEventId =
+    courtPack.procedureDomain === 'criminal_appeal'
+      ? 'criminal_notice_of_appeal'
+      : courtPack.procedureDomain === 'agency_review'
+        ? 'petition_for_review'
+        : courtPack.procedureDomain === 'original_writ'
+          ? 'petition_for_writ_mandamus'
+          : 'notice_of_appeal'
+  const docketingEventId =
+    courtPack.procedureDomain === 'criminal_appeal'
+      ? 'criminal_docketing_statement'
+      : courtPack.procedureDomain === 'agency_review'
+        ? 'agency_docketing_statement'
+        : courtPack.procedureDomain === 'original_writ'
+          ? 'writ_docketing_statement'
+          : 'docketing_statement'
 
   if (status === 'closed' && !['petition_rehearing', 'mandate_stay_motion', 'bill_of_costs'].includes(event.id)) {
     reasons.push('Only rehearing, costs, and mandate-stay events are available after judgment.')
@@ -608,19 +627,24 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
     reasons.push('This is a post-disposition event and is unavailable before judgment.')
   }
 
-  if (event.id === 'notice_of_appeal' && hasAcceptedEvent(session, 'notice_of_appeal')) {
-    reasons.push('A notice of appeal has already been docketed.')
+  if (event.id === openingEventId && hasAcceptedEvent(session, openingEventId)) {
+    reasons.push('The opening case-initiating filing has already been docketed.')
   }
 
   if (
-    ['appearance_disclosure', 'docketing_statement', 'transcript_order_acknowledgment'].includes(event.id) &&
-    !hasAcceptedEvent(session, 'notice_of_appeal')
+    ['appearance_disclosure', docketingEventId, 'transcript_order_acknowledgment', 'cja_financial_disclosure', 'certified_agency_record', 'appendix_to_writ_petition'].includes(event.id) &&
+    !hasAcceptedEvent(session, openingEventId)
   ) {
-    reasons.push('The notice of appeal must be filed first.')
+    reasons.push('The case-initiating filing must be filed first.')
   }
 
   if (event.id === 'opening_brief') {
-    if (!hasAcceptedEvent(session, 'docketing_statement') || !hasAcceptedEvent(session, 'transcript_order_acknowledgment')) {
+    const recordReady =
+      courtPack.procedureDomain === 'agency_review'
+        ? hasAcceptedEvent(session, docketingEventId) && hasAcceptedEvent(session, 'certified_agency_record')
+        : hasAcceptedEvent(session, docketingEventId) &&
+          hasAcceptedEvent(session, 'transcript_order_acknowledgment')
+    if (!recordReady) {
       reasons.push('The Fourth Circuit briefing schedule is not issued until record-ordering prerequisites are complete or the clerk determines the record is complete.')
     }
     if (!hasOpenDeadline(session, 'opening_brief')) {
@@ -654,6 +678,18 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
 
   if (event.id === 'response_to_amicus_motion' && !hasOpenDeadline(session, 'response_to_amicus_motion')) {
     reasons.push('No response-to-amicus-motion deadline is currently open.')
+  }
+
+  if (event.id === 'motion_to_supplement_record' && !hasAcceptedEvent(session, 'certified_agency_record')) {
+    reasons.push('The certified agency record should be filed before supplement-record motion practice.')
+  }
+
+  if (event.id === 'answer_to_writ_petition' && !hasOpenDeadline(session, 'answer_to_writ_petition')) {
+    reasons.push('An answer to a writ petition is filed only after the court invites or directs an answer.')
+  }
+
+  if (event.id === 'reply_in_support_of_writ' && !hasAcceptedEvent(session, 'answer_to_writ_petition')) {
+    reasons.push('The writ reply cannot precede an answer.')
   }
 
   if (

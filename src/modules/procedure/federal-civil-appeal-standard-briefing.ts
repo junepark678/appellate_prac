@@ -10,6 +10,12 @@ function activeFiledEventSet(session: CaseSession) {
   )
 }
 
+function hasOpenDeadline(session: CaseSession, targetEventId: string) {
+  return session.deadlines.some(
+    (deadline) => deadline.targetEventId === targetEventId && deadline.status === 'open',
+  )
+}
+
 function eventAvailability(
   eventId: string,
   label: string,
@@ -17,6 +23,50 @@ function eventAvailability(
   reasons: string[] = [],
 ): AvailableFilingEvent {
   return { eventId, label, available, reasons }
+}
+
+function procedureEventIds(session: CaseSession) {
+  const domain = session.scenario.courtPackId.includes('criminal')
+    ? 'criminal_appeal'
+    : session.scenario.courtPackId.includes('agency')
+      ? 'agency_review'
+      : session.scenario.courtPackId.includes('original-writ')
+        ? 'original_writ'
+        : 'civil_appeal'
+
+  if (domain === 'criminal_appeal') {
+    return {
+      opening: ['criminal_notice_of_appeal', 'Criminal Notice of Appeal'] as const,
+      docketing: ['criminal_docketing_statement', 'Criminal Docketing Statement'] as const,
+      record: ['transcript_order_acknowledgment', 'Transcript Order Acknowledgment'] as const,
+      extraOpening: ['cja_financial_disclosure', 'CJA Financial Disclosure'] as const,
+    }
+  }
+
+  if (domain === 'agency_review') {
+    return {
+      opening: ['petition_for_review', 'Petition for Review'] as const,
+      docketing: ['agency_docketing_statement', 'Agency-Review Docketing Statement'] as const,
+      record: ['certified_agency_record', 'Certified Agency Record'] as const,
+      extraOpening: null,
+    }
+  }
+
+  if (domain === 'original_writ') {
+    return {
+      opening: ['petition_for_writ_mandamus', 'Petition for Writ of Mandamus or Prohibition'] as const,
+      docketing: ['writ_docketing_statement', 'Writ Docketing Statement'] as const,
+      record: ['appendix_to_writ_petition', 'Appendix to Writ Petition'] as const,
+      extraOpening: null,
+    }
+  }
+
+  return {
+    opening: ['notice_of_appeal', 'Notice of Appeal'] as const,
+    docketing: ['docketing_statement', 'Docketing Statement'] as const,
+    record: ['transcript_order_acknowledgment', 'Transcript Order Acknowledgment'] as const,
+    extraOpening: null,
+  }
 }
 
 export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
@@ -153,49 +203,65 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
   ],
   availableEvents(session: CaseSession) {
     const filedEvents = activeFiledEventSet(session)
+    const eventIds = procedureEventIds(session)
+    const [openingEventId, openingLabel] = eventIds.opening
+    const [docketingEventId, docketingLabel] = eventIds.docketing
+    const [recordEventId, recordLabel] = eventIds.record
+    const openingFiled = filedEvents.has(openingEventId)
+    const extraOpeningReady =
+      !eventIds.extraOpening || filedEvents.has(eventIds.extraOpening[0])
+    const openingPrerequisitesReady =
+      filedEvents.has('appearance_disclosure') &&
+      filedEvents.has(docketingEventId) &&
+      filedEvents.has(recordEventId) &&
+      extraOpeningReady
 
     return [
       eventAvailability(
-        'notice_of_appeal',
-        'Notice of Appeal',
-        !filedEvents.has('notice_of_appeal'),
-        filedEvents.has('notice_of_appeal') ? ['Notice already filed.'] : [],
+        openingEventId,
+        openingLabel,
+        !openingFiled,
+        openingFiled ? ['Case-initiating filing already filed.'] : [],
       ),
       eventAvailability(
         'appearance_disclosure',
         'Appearance / Disclosure Statement',
-        filedEvents.has('notice_of_appeal') && !filedEvents.has('appearance_disclosure'),
-        filedEvents.has('notice_of_appeal')
+        openingFiled && !filedEvents.has('appearance_disclosure'),
+        openingFiled
           ? []
-          : ['Notice of appeal should be filed first.'],
+          : ['Case-initiating filing should be filed first.'],
       ),
       eventAvailability(
-        'docketing_statement',
-        'Docketing Statement',
-        filedEvents.has('notice_of_appeal') && !filedEvents.has('docketing_statement'),
-        filedEvents.has('notice_of_appeal')
+        docketingEventId,
+        docketingLabel,
+        openingFiled && !filedEvents.has(docketingEventId),
+        openingFiled
           ? []
-          : ['Notice of appeal should be filed first.'],
+          : ['Case-initiating filing should be filed first.'],
       ),
+      ...(eventIds.extraOpening
+        ? [
+            eventAvailability(
+              eventIds.extraOpening[0],
+              eventIds.extraOpening[1],
+              openingFiled && !filedEvents.has(eventIds.extraOpening[0]),
+              openingFiled ? [] : ['Case-initiating filing should be filed first.'],
+            ),
+          ]
+        : []),
       eventAvailability(
-        'transcript_order_acknowledgment',
-        'Transcript Order Acknowledgment',
-        filedEvents.has('notice_of_appeal') &&
-          !filedEvents.has('transcript_order_acknowledgment'),
-        filedEvents.has('notice_of_appeal')
+        recordEventId,
+        recordLabel,
+        openingFiled && !filedEvents.has(recordEventId),
+        openingFiled
           ? []
-          : ['Notice of appeal should be filed first.'],
+          : ['Case-initiating filing should be filed first.'],
       ),
       eventAvailability(
         'opening_brief',
         'Opening Brief',
-        filedEvents.has('appearance_disclosure') &&
-          filedEvents.has('docketing_statement') &&
-          filedEvents.has('transcript_order_acknowledgment') &&
-          !filedEvents.has('opening_brief'),
-        filedEvents.has('appearance_disclosure') &&
-          filedEvents.has('docketing_statement') &&
-          filedEvents.has('transcript_order_acknowledgment')
+        openingPrerequisitesReady && !filedEvents.has('opening_brief'),
+        openingPrerequisitesReady
           ? []
           : ['Opening-stage appearance, docketing, or transcript-order filing remains pending.'],
       ),
@@ -223,6 +289,45 @@ export const federalCivilAppealStandardBriefingProcedure: ProcedureModule = {
         'motion_stay_pending_appeal',
         'Motion to Stay or for Injunction Pending Appeal',
         session.status === 'active',
+      ),
+      eventAvailability(
+        'motion_to_supplement_record',
+        'Motion to Supplement Record',
+        session.status === 'active' && filedEvents.has('certified_agency_record'),
+        filedEvents.has('certified_agency_record')
+          ? []
+          : ['Agency record should be filed first.'],
+      ),
+      eventAvailability(
+        'emergency_motion_stay',
+        'Emergency Motion for Stay',
+        session.status === 'active' && openingFiled,
+        openingFiled ? [] : ['Case-initiating filing should be filed first.'],
+      ),
+      eventAvailability(
+        'appendix_to_writ_petition',
+        'Appendix to Writ Petition',
+        session.status === 'active' && filedEvents.has('petition_for_writ_mandamus'),
+        filedEvents.has('petition_for_writ_mandamus')
+          ? []
+          : ['Writ petition should be filed first.'],
+      ),
+      eventAvailability(
+        'answer_to_writ_petition',
+        'Answer to Writ Petition',
+        session.status === 'active' &&
+          (filedEvents.has('order_inviting_answer') ||
+            hasOpenDeadline(session, 'answer_to_writ_petition')),
+        filedEvents.has('order_inviting_answer') ||
+          hasOpenDeadline(session, 'answer_to_writ_petition')
+          ? []
+          : ['Court order inviting an answer or answer deadline has not been entered.'],
+      ),
+      eventAvailability(
+        'reply_in_support_of_writ',
+        'Reply in Support of Writ Petition',
+        session.status === 'active' && filedEvents.has('answer_to_writ_petition'),
+        filedEvents.has('answer_to_writ_petition') ? [] : ['Answer is not on file.'],
       ),
       eventAvailability(
         'sealed_filing_acknowledgment',

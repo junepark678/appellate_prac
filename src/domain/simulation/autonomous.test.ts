@@ -42,6 +42,32 @@ describe('autonomous simulation safety', () => {
     expect(result.stoppedReason).toBe('learner_required')
   })
 
+
+  it('stops when criminal CJA disclosure is still pending', () => {
+    let session = createInitialSession('synthetic-ca4-criminal-sentencing-waiver')
+    session = fileDraft(session, draft('criminal_notice_of_appeal', ['notice of appeal']))
+    session = fileDraft(session, draft('appearance_disclosure', ['disclosure']))
+    session = fileDraft(session, draft('criminal_docketing_statement', ['docketing statement']))
+
+    const result = advanceAutonomousSimulation(session, { stopOnDeficiency: false })
+
+    expect(result.turns).toHaveLength(0)
+    expect(result.stoppedReason).toBe('learner_required')
+  })
+
+  it('stops for original-writ answer stage after setting one answer deadline', () => {
+    let session = createInitialSession('synthetic-ca4-original-writ-discovery')
+    session = fileDraft(session, draft('petition_for_writ_mandamus', ['writ']))
+    session = fileDraft(session, draft('appearance_disclosure', ['disclosure']))
+    session = fileDraft(session, draft('writ_docketing_statement', ['docketing statement']))
+    session = fileDraft(session, draft('appendix_to_writ_petition', ['record']))
+
+    const result = advanceAutonomousSimulation(session, { stopOnDeficiency: false })
+
+    expect(result.turns).toHaveLength(0)
+    expect(result.stoppedReason).toBe('learner_required')
+  })
+
   it('records deterministic audit hashes on each turn', () => {
     const result = advanceSimulationTurn(readyForBriefingSchedule())
 

@@ -39,6 +39,8 @@ const motionEvents = [
   'motion_overlength_brief',
   'motion_to_seal',
   'motion_stay_pending_appeal',
+  'motion_to_supplement_record',
+  'emergency_motion_stay',
   'mandate_stay_motion',
 ]
 
@@ -85,6 +87,22 @@ function filedEvents(session: CaseSession) {
       .filter((filing) => filing.outcome !== 'rejected')
       .map((filing) => filing.eventId),
   )
+}
+
+function openingEventIdFor(session: CaseSession) {
+  const courtPack = getCourtPack(session.courtPackId)
+  if (courtPack.procedureDomain === 'criminal_appeal') return 'criminal_notice_of_appeal'
+  if (courtPack.procedureDomain === 'agency_review') return 'petition_for_review'
+  if (courtPack.procedureDomain === 'original_writ') return 'petition_for_writ_mandamus'
+  return 'notice_of_appeal'
+}
+
+function docketingEventIdFor(session: CaseSession) {
+  const courtPack = getCourtPack(session.courtPackId)
+  if (courtPack.procedureDomain === 'criminal_appeal') return 'criminal_docketing_statement'
+  if (courtPack.procedureDomain === 'agency_review') return 'agency_docketing_statement'
+  if (courtPack.procedureDomain === 'original_writ') return 'writ_docketing_statement'
+  return 'docketing_statement'
 }
 
 function latestAcceptedFilingText(session: CaseSession, eventId: string) {
@@ -164,15 +182,22 @@ function scenarioHasPitfall(session: CaseSession, needles: string[]) {
 export function sessionJurisdictionIssues(session: CaseSession): ValidationIssue[] {
   const events = filedEvents(session)
   const issues: ValidationIssue[] = []
+  const openingEventId = openingEventIdFor(session)
 
-  if (!events.has('notice_of_appeal')) {
+  if (!events.has(openingEventId)) {
     issues.push(
       validationIssue(
         'error',
-        'notice_of_appeal_missing_jurisdiction',
-        'The case lacks a filed notice of appeal, so merits disposition is unavailable.',
-        [ruleRefs.frap3, ruleRefs.frap4],
-        'File a valid notice of appeal before requesting appellate merits relief.',
+        'opening_filing_missing_jurisdiction',
+        'The case lacks a filed case-initiating appellate paper, so merits disposition is unavailable.',
+        openingEventId === 'petition_for_review'
+          ? [ruleRefs.frap15]
+          : openingEventId === 'petition_for_writ_mandamus'
+            ? [ruleRefs.frap21, ruleRefs.ca4Local21]
+            : openingEventId === 'criminal_notice_of_appeal'
+              ? [ruleRefs.frap3, ruleRefs.frap4b]
+              : [ruleRefs.frap3, ruleRefs.frap4],
+        'File a valid notice, petition for review, or original writ petition before requesting appellate merits relief.',
       ),
     )
   }
@@ -479,11 +504,11 @@ export const filingConstraints: FilingConstraint[] = [
     id: 'related_docket_entry',
     source: 'frap',
     ruleRefs: [ruleRefs.frap25, ruleRefs.frap27],
-    eventIds: ['motion_response', 'response_to_amicus_motion', 'corrected_brief'],
+    eventIds: ['motion_response', 'response_to_amicus_motion', 'corrected_brief', 'motion_to_supplement_record', 'answer_to_writ_petition', 'reply_in_support_of_writ'],
     severity: 'warning',
     evaluate(context) {
       if (
-        !['motion_response', 'response_to_amicus_motion', 'corrected_brief'].includes(
+        !['motion_response', 'response_to_amicus_motion', 'corrected_brief', 'motion_to_supplement_record', 'answer_to_writ_petition', 'reply_in_support_of_writ'].includes(
           context.submission.eventId,
         )
       ) {
@@ -548,7 +573,8 @@ export const filingConstraints: FilingConstraint[] = [
     severity: 'warning',
     evaluate(context) {
       if (context.submission.eventId !== 'opening_brief') return null
-      if (filedEvents(context.session).has('docketing_statement')) return null
+      const docketingEventId = docketingEventIdFor(context.session)
+      if (filedEvents(context.session).has(docketingEventId)) return null
       return validationIssue(
         'warning',
         'opening_brief_before_docketing_statement',
@@ -559,20 +585,29 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
-    id: 'opening_brief_before_transcript_ack',
+    id: 'opening_brief_before_record_ready',
     source: 'ca4-local',
-    ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+    ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11, ruleRefs.frap16, ruleRefs.frap17],
     eventIds: ['opening_brief'],
     severity: 'warning',
     evaluate(context) {
       if (context.submission.eventId !== 'opening_brief') return null
-      if (filedEvents(context.session).has('transcript_order_acknowledgment')) return null
+      const courtPack = getCourtPack(context.session.courtPackId)
+      const requiredRecordEvent =
+        courtPack.procedureDomain === 'agency_review'
+          ? 'certified_agency_record'
+          : 'transcript_order_acknowledgment'
+      if (filedEvents(context.session).has(requiredRecordEvent)) return null
       return validationIssue(
         'warning',
-        'opening_brief_before_transcript_acknowledgment',
-        'Opening brief is being filed before transcript order acknowledgment appears on the docket.',
-        [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
-        'File the transcript order acknowledgment or identify why no transcript is necessary.',
+        'opening_brief_before_record_ready',
+        'Opening brief is being filed before the record-ready filing appears on the docket.',
+        courtPack.procedureDomain === 'agency_review'
+          ? [ruleRefs.frap16, ruleRefs.frap17]
+          : [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+        courtPack.procedureDomain === 'agency_review'
+          ? 'File the certified agency record, certified list, or record-complete cure before merits briefing.'
+          : 'File the transcript order acknowledgment or identify why no transcript is necessary.',
       )
     },
   },
@@ -633,22 +668,112 @@ export const filingConstraints: FilingConstraint[] = [
   {
     id: 'notice_timeliness',
     source: 'frap',
-    ruleRefs: [ruleRefs.frap4, ruleRefs.frap26],
-    eventIds: ['notice_of_appeal'],
+    ruleRefs: [ruleRefs.frap4, ruleRefs.frap4b, ruleRefs.frap26],
+    eventIds: ['notice_of_appeal', 'criminal_notice_of_appeal'],
     severity: 'warning',
     evaluate(context) {
-      if (context.submission.eventId !== 'notice_of_appeal') return null
+      if (!['notice_of_appeal', 'criminal_notice_of_appeal'].includes(context.submission.eventId)) return null
       const deadline = context.session.deadlines.find(
         (candidate) =>
-          candidate.targetEventId === 'notice_of_appeal' && candidate.status === 'open',
+          candidate.targetEventId === context.submission.eventId && candidate.status === 'open',
       )
       if (!deadline || new Date(context.nowIso) <= new Date(deadline.dueDate)) return null
       return validationIssue(
         'warning',
-        'notice_of_appeal_after_open_deadline',
+        `${context.submission.eventId}_after_open_deadline`,
         'The notice of appeal appears after the open simulator notice deadline.',
         deadline.sourceRuleRefs,
         'Confirm timeliness, tolling, or available extension/reopening relief before proceeding.',
+      )
+    },
+  },
+  {
+    id: 'agency_petition_required_signals',
+    source: 'frap',
+    ruleRefs: [ruleRefs.frap15, ruleRefs.ca4Local15],
+    eventIds: ['petition_for_review'],
+    severity: 'warning',
+    evaluate(context) {
+      if (context.submission.eventId !== 'petition_for_review') return null
+      const text = submissionText(context.submission)
+      const missing = [
+        ['agency', 'agency_respondent_missing', 'agency respondent'],
+        ['order', 'agency_order_missing', 'agency order under review'],
+        ['service', 'agency_service_list_missing', 'service list'],
+      ] as const
+      const signal = missing.find(([needle]) => !text.includes(needle))
+      if (!signal) return null
+      return validationIssue(
+        'warning',
+        signal[1],
+        `Petition for review does not show a ${signal[2]} signal.`,
+        [ruleRefs.frap15, ruleRefs.ca4Local15],
+        'Name each petitioner, identify the agency respondent and order under review, and include service information.',
+      )
+    },
+  },
+  {
+    id: 'agency_record_after_petition',
+    source: 'frap',
+    ruleRefs: [ruleRefs.frap16, ruleRefs.frap17],
+    eventIds: ['certified_agency_record'],
+    severity: 'error',
+    evaluate(context) {
+      if (context.submission.eventId !== 'certified_agency_record') return null
+      if (filedEvents(context.session).has('petition_for_review')) return null
+      return validationIssue(
+        'error',
+        'agency_record_before_petition',
+        'An agency record event is not available before a petition for review opens the proceeding.',
+        [ruleRefs.frap16, ruleRefs.frap17],
+        'File the petition for review before lodging the agency record or certified list.',
+      )
+    },
+  },
+  {
+    id: 'agency_stay_agency_first_signal',
+    source: 'frap',
+    ruleRefs: [ruleRefs.frap18, ruleRefs.ca4Local18, ruleRefs.frap27],
+    eventIds: ['emergency_motion_stay'],
+    severity: 'warning',
+    evaluate(context) {
+      if (context.submission.eventId !== 'emergency_motion_stay') return null
+      const courtPack = getCourtPack(context.session.courtPackId)
+      if (courtPack.procedureDomain !== 'agency_review') return null
+      if (filedTextHas(context, ['agency denied stay', 'agency-first', 'impracticable', 'agency did not act'])) return null
+      return validationIssue(
+        'warning',
+        'agency_stay_agency_first_missing',
+        'The stay motion does not show agency-first relief or why agency-first relief was impracticable.',
+        [ruleRefs.frap18, ruleRefs.ca4Local18, ruleRefs.frap27],
+        'State the agency stay request and result, or explain impracticability, and attach supporting record materials.',
+      )
+    },
+  },
+  {
+    id: 'writ_required_sections',
+    source: 'frap',
+    ruleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    eventIds: ['petition_for_writ_mandamus'],
+    severity: 'warning',
+    evaluate(context) {
+      if (context.submission.eventId !== 'petition_for_writ_mandamus') return null
+      const text = submissionText(context.submission)
+      const requiredSignals = [
+        ['in re', 'writ_caption_defect', '"In re" caption'],
+        ['relief', 'writ_relief_missing', 'relief sought'],
+        ['issue', 'writ_issues_missing', 'issues presented'],
+        ['facts', 'writ_facts_missing', 'necessary facts'],
+        ['appendix', 'writ_appendix_missing', 'essential record appendix'],
+      ] as const
+      const missing = requiredSignals.find(([signal]) => !text.includes(signal))
+      if (!missing) return null
+      return validationIssue(
+        'warning',
+        missing[1],
+        `Writ petition does not show a ${missing[2]} signal.`,
+        [ruleRefs.frap21, ruleRefs.ca4Local21],
+        'Use an In re caption, state relief/issues/facts/reasons, attach essential orders or record parts, and show required service.',
       )
     },
   },
@@ -913,7 +1038,12 @@ export const filingConstraints: FilingConstraint[] = [
     evaluate(context) {
       if (context.submission.eventId !== 'opening_brief') return null
       const events = filedEvents(context.session)
-      const missing = ['appearance_disclosure', 'docketing_statement', 'transcript_order_acknowledgment'].filter(
+      const courtPack = getCourtPack(context.session.courtPackId)
+      const requiredRecordEvent =
+        courtPack.procedureDomain === 'agency_review'
+          ? 'certified_agency_record'
+          : 'transcript_order_acknowledgment'
+      const missing = ['appearance_disclosure', docketingEventIdFor(context.session), requiredRecordEvent].filter(
         (eventId) => !events.has(eventId),
       )
       if (!missing.length) return null

@@ -98,13 +98,45 @@ describe('simulation engine', () => {
 
   it('keeps every seed scenario training-ready', () => {
     const courtPackIds = new Set(courtPacks.map((pack) => pack.id))
+    const proceduralStateIds = new Set([
+      'case_opened',
+      'notice_pending',
+      'jurisdiction_review',
+      'appearance_pending',
+      'fee_or_ifp_pending',
+      'record_pending',
+      'docketing_statement_pending',
+      'record_ordering_pending',
+      'briefing_schedule_pending',
+      'opening_brief_pending',
+      'appendix_pending',
+      'appellee_brief_pending',
+      'reply_brief_pending',
+      'motion_pending',
+      'submitted',
+      'panel_deliberation',
+      'judgment_entered',
+      'rehearing_pending',
+      'mandate_pending',
+      'closed',
+      'dismissed',
+    ])
     for (const scenario of scenarios) {
       expect(courtPackIds.has(scenario.courtPackId)).toBe(true)
+      const courtPack = courtPacks.find((pack) => pack.id === scenario.courtPackId)
+      expect(courtPack).toBeTruthy()
       expect(scenario.training).toBeTruthy()
       expect(scenario.issues?.length ?? 0).toBeGreaterThanOrEqual(3)
       expect(scenario.recordExcerpts?.length ?? 0).toBeGreaterThanOrEqual(4)
 
       const issueIds = new Set((scenario.issues ?? []).map((issue) => issue.id))
+      const filingEventIds = new Set(courtPack?.filingEvents.map((event) => event.id) ?? [])
+      for (const eventId of scenario.training?.expectedProceduralPath ?? []) {
+        expect(filingEventIds.has(eventId) || proceduralStateIds.has(eventId)).toBe(true)
+      }
+      for (const participant of scenario.participants ?? []) {
+        expect(courtPack?.participantRoles).toContain(participant.role)
+      }
       for (const amicus of scenario.training?.likelyAmici ?? []) {
         expect(amicus.triggerIssueIds.every((issueId) => issueIds.has(issueId))).toBe(true)
       }
@@ -161,6 +193,29 @@ describe('simulation engine', () => {
     expect(expected.tool === 'issueClerkOrder' ? expected.title : '').toBe(
       'Notice Regarding Case Opening',
     )
+  })
+
+  it('resolves accepted filing docket entries to filing PDFs through filingId', () => {
+    const next = fileDraft(createInitialSession(), {
+      ...draft('notice_of_appeal'),
+      documents: [noticePdf],
+    })
+    const entry = next.docketEntries.find((candidate) => candidate.filingId)
+    const filing = next.filings.find((candidate) => candidate.id === entry?.filingId)
+
+    expect(entry).toBeTruthy()
+    expect(filing?.documents[0]?.fileName).toBe('notice-of-appeal.pdf')
+    expect(filing?.documents[0]?.mimeType).toBe('application/pdf')
+  })
+
+  it('does not create filing-backed docket entries for rejected filings', () => {
+    const rejected = fileDraft(createInitialSession(), {
+      ...draft('notice_of_appeal'),
+      documents: [],
+    })
+
+    expect(rejected.filings).toHaveLength(0)
+    expect(rejected.docketEntries.some((entry) => entry.filingId)).toBe(false)
   })
 
   it('rejects invalid AI counterparty filing events', () => {

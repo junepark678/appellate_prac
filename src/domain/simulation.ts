@@ -2,6 +2,7 @@ import {
   getCourtPack,
   getFilingEvent,
   getScenario,
+  criminalOpeningBriefDeadline,
   openingBriefDeadline,
   ruleRefs,
 } from '../modules/registry'
@@ -59,6 +60,9 @@ function addDays(dateIso: string, days: number) {
 
 function inferredDeadlineTrigger(targetEventId: string) {
   if (targetEventId === 'notice_of_appeal') return 'civil_judgment'
+  if (targetEventId === 'criminal_notice_of_appeal') return 'criminal_judgment'
+  if (targetEventId === 'petition_for_review') return 'agency_order'
+  if (targetEventId === 'petition_for_writ_mandamus') return 'challenged_order'
   if (targetEventId === 'opening_brief') return 'briefing_schedule'
   return undefined
 }
@@ -101,16 +105,20 @@ function createDeadline(
   const sourceBackedRule = triggerEventId
     ? deadlineRuleForTrigger(triggerEventId, targetEventId)
     : undefined
+  const useSourceBackedRule =
+    sourceBackedRule &&
+    sourceBackedRule.offset === offsetDays &&
+    sourceBackedRule.unit === 'calendar_day'
   return {
     id: makeId('deadline', session.deadlines.length),
     label,
-    dueDate: sourceBackedRule
+    dueDate: useSourceBackedRule
       ? calculateDeadlineDueDate(session.simulatedDate, sourceBackedRule)
       : addDays(session.simulatedDate, offsetDays),
     targetEventId,
     sourceEntryId,
     status: 'open',
-    sourceRuleRefs: sourceBackedRule?.ruleRefs ?? sourceRuleRefs,
+    sourceRuleRefs: useSourceBackedRule ? sourceBackedRule.ruleRefs : sourceRuleRefs,
   }
 }
 
@@ -347,6 +355,48 @@ function activeFiledEventSet(session: CaseSession) {
   return new Set(activeFilings(session).map((filing) => filing.eventId))
 }
 
+function procedureEventIds(session: CaseSession) {
+  const courtPack = getCourtPack(session.courtPackId)
+  if (courtPack.procedureDomain === 'criminal_appeal') {
+    return {
+      opening: 'criminal_notice_of_appeal',
+      docketing: 'criminal_docketing_statement',
+      record: 'transcript_order_acknowledgment',
+      extra: 'cja_financial_disclosure',
+      openingDeadline: criminalOpeningBriefDeadline,
+      openingRuleRefs: [ruleRefs.frap3, ruleRefs.frap4b],
+    }
+  }
+  if (courtPack.procedureDomain === 'agency_review') {
+    return {
+      opening: 'petition_for_review',
+      docketing: 'agency_docketing_statement',
+      record: 'certified_agency_record',
+      extra: undefined,
+      openingDeadline: openingBriefDeadline,
+      openingRuleRefs: [ruleRefs.frap15, ruleRefs.ca4Local15],
+    }
+  }
+  if (courtPack.procedureDomain === 'original_writ') {
+    return {
+      opening: 'petition_for_writ_mandamus',
+      docketing: 'writ_docketing_statement',
+      record: 'appendix_to_writ_petition',
+      extra: undefined,
+      openingDeadline: openingBriefDeadline,
+      openingRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+    }
+  }
+  return {
+    opening: 'notice_of_appeal',
+    docketing: 'docketing_statement',
+    record: 'transcript_order_acknowledgment',
+    extra: undefined,
+    openingDeadline: openingBriefDeadline,
+    openingRuleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3],
+  }
+}
+
 function hasOpenDeadline(session: CaseSession, targetEventId: string) {
   return session.deadlines.some(
     (deadline) => deadline.targetEventId === targetEventId && deadline.status === 'open',
@@ -401,17 +451,47 @@ function postProcessAcceptedFiling(session: CaseSession, draft: FilingDraft): Ca
 export function createInitialSession(scenarioId = 'synthetic-employment-retaliation'): CaseSession {
   const scenario = getScenario(scenarioId)
   const courtPack = getCourtPack(scenario.courtPackId)
-  const participants: Participant[] = [
-    { id: 'appellant', displayName: 'Maya Jordan', role: 'appellant' },
-    { id: 'appellee', displayName: 'Meridian Analytics, Inc.', role: 'appellee' },
-    { id: 'clerk', displayName: `${courtPack.label} Clerk`, role: 'clerk' },
-    { id: 'panel', displayName: 'Three-Judge Panel', role: 'panel' },
-    {
-      id: 'district_court',
-      displayName: scenario.lowerTribunal,
-      role: 'district_court',
-    },
-  ]
+  const participants: Participant[] =
+    scenario.participants ??
+    [
+      { id: 'appellant', displayName: 'Maya Jordan', role: 'appellant' },
+      { id: 'appellee', displayName: 'Meridian Analytics, Inc.', role: 'appellee' },
+      { id: 'clerk', displayName: `${courtPack.label} Clerk`, role: 'clerk' },
+      { id: 'panel', displayName: 'Three-Judge Panel', role: 'panel' },
+      {
+        id: 'district_court',
+        displayName: scenario.lowerTribunal,
+        role: 'district_court',
+      },
+    ]
+  const openingEvent =
+    courtPack.procedureDomain === 'criminal_appeal'
+      ? {
+          label: 'Criminal notice of appeal due',
+          targetEventId: 'criminal_notice_of_appeal',
+          offsetDays: 14,
+          ruleRefs: [ruleRefs.frap4b],
+        }
+      : courtPack.procedureDomain === 'agency_review'
+        ? {
+            label: 'Petition for review due',
+            targetEventId: 'petition_for_review',
+            offsetDays: 30,
+            ruleRefs: [ruleRefs.frap15],
+          }
+        : courtPack.procedureDomain === 'original_writ'
+          ? {
+              label: 'Original writ petition due',
+              targetEventId: 'petition_for_writ_mandamus',
+              offsetDays: 0,
+              ruleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+            }
+          : {
+              label: 'Notice of appeal due',
+              targetEventId: 'notice_of_appeal',
+              offsetDays: 30,
+              ruleRefs: [ruleRefs.frap4],
+            }
 
   const session: CaseSession = {
     id: 'case_0001',
@@ -424,7 +504,7 @@ export function createInitialSession(scenarioId = 'synthetic-employment-retaliat
       requireHumanApprovalFor: ['disposeCase', 'enterJudgment'],
       stopOnDeficiency: true,
     },
-    sourceProfileId: 'ca4-civil-appeal-beta-2026',
+    sourceProfileId: `${scenario.courtPackId}-beta-2026`,
     qualityState: 'source_review_pending',
     simulatedDate: simulatorStart,
     participants,
@@ -435,10 +515,14 @@ export function createInitialSession(scenarioId = 'synthetic-employment-retaliat
 
   const openingEntry = createDocketEntry(session, {
     filedAt: session.simulatedDate,
-    actorRole: 'district_court',
-    title: 'Civil Appeal Opened',
-    text: `${scenario.shortCaption}. Appeal docketed from ${scenario.lowerTribunal}. Record transmitted for simulator purposes.`,
-    ruleRefs: [ruleRefs.frap3],
+    actorRole: participants.some((participant) => participant.role === 'district_court')
+      ? 'district_court'
+      : participants.some((participant) => participant.role === 'agency')
+        ? 'agency'
+        : 'clerk',
+    title: `${courtPack.procedureDomain.replaceAll('_', ' ')} opened`,
+    text: `${scenario.shortCaption}. Proceeding docketed from ${scenario.lowerTribunal}. Record transmitted for simulator purposes.`,
+    ruleRefs: openingEvent.ruleRefs,
   })
 
   return {
@@ -447,11 +531,11 @@ export function createInitialSession(scenarioId = 'synthetic-employment-retaliat
     deadlines: [
       createDeadline(
         session,
-        'Notice of appeal due',
-        'notice_of_appeal',
+        openingEvent.label,
+        openingEvent.targetEventId,
         openingEntry.id,
-        30,
-        [ruleRefs.frap4],
+        openingEvent.offsetDays,
+        openingEvent.ruleRefs,
       ),
     ],
   }
@@ -461,6 +545,11 @@ export function inferDocumentSignals(file: File): UploadedDocument {
   const normalizedName = file.name.toLowerCase()
   const extractedSignals = [
     normalizedName.includes('notice') ? 'notice of appeal' : '',
+    normalizedName.includes('petition-review') || normalizedName.includes('petition_for_review') ? 'petition for review' : '',
+    normalizedName.includes('writ') ? 'writ' : '',
+    normalizedName.includes('financial') || normalizedName.includes('cja') ? 'financial' : '',
+    normalizedName.includes('record') ? 'record' : '',
+    normalizedName.includes('answer') ? 'answer' : '',
     normalizedName.includes('disclosure') ? 'disclosure' : '',
     normalizedName.includes('docketing') ? 'docketing statement' : '',
     normalizedName.includes('transcript') ? 'transcript' : '',
@@ -1071,14 +1160,15 @@ export function applyToolCall(
 
 export function nextExpectedToolCall(session: CaseSession): ToolCall {
   const filedEvents = activeFiledEventSet(session)
+  const eventIds = procedureEventIds(session)
 
-  if (!filedEvents.has('notice_of_appeal')) {
+  if (!filedEvents.has(eventIds.opening)) {
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'Notice Regarding Case Opening',
-      text: 'The appeal is opened for training purposes. Appellant must file a notice of appeal and required appearance/disclosure materials before merits briefing proceeds.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.frap4, ruleRefs.ca4Local3, ruleRefs.ca4Local26_1],
+      text: 'The proceeding is opened for training purposes. The initiating party must file the required case-opening paper and appearance/disclosure materials before merits briefing proceeds.',
+      ruleRefs: [...eventIds.openingRuleRefs, ruleRefs.ca4Local26_1],
     }
   }
 
@@ -1092,44 +1182,97 @@ export function nextExpectedToolCall(session: CaseSession): ToolCall {
     }
   }
 
-  if (!filedEvents.has('docketing_statement')) {
+  if (!filedEvents.has(eventIds.docketing)) {
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'Clerk Order Directing Docketing Statement',
       text: 'Appellant must file the docketing statement before merits briefing is scheduled.',
-      ruleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
+      ruleRefs: eventIds.opening === 'petition_for_review'
+        ? [ruleRefs.frap15, ruleRefs.ca4Local15, ruleRefs.ca4Local45]
+        : eventIds.opening === 'petition_for_writ_mandamus'
+          ? [ruleRefs.frap21, ruleRefs.ca4Local21, ruleRefs.ca4Local45]
+          : [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.ca4Local45],
     }
   }
 
-  if (!filedEvents.has('transcript_order_acknowledgment')) {
+  if (eventIds.extra && !filedEvents.has(eventIds.extra)) {
     return {
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
-      title: 'Clerk Order Regarding Transcript Order',
-      text: 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before merits briefing is scheduled.',
-      ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+      title: 'Clerk Order Regarding CJA Financial Disclosure',
+      text: 'Appellant must file the required financial disclosure or CJA-related statement before criminal briefing is scheduled.',
+      ruleRefs: [ruleRefs.frap9, ruleRefs.ca4Local9],
+    }
+  }
+
+  if (!filedEvents.has(eventIds.record)) {
+    return {
+      tool: 'issueClerkOrder',
+      actorId: 'ca4_clerk',
+      title: eventIds.record === 'certified_agency_record'
+        ? 'Clerk Order Regarding Agency Record'
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? 'Clerk Order Regarding Writ Appendix'
+          : 'Clerk Order Regarding Transcript Order',
+      text: eventIds.record === 'certified_agency_record'
+        ? 'The agency record, certified list, or record-complete signal must be filed before merits briefing is scheduled.'
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? 'The writ petition requires essential orders or record excerpts before the petition can be screened for answer or disposition.'
+          : 'Appellant must file a transcript order acknowledgment or confirm that no transcript is necessary before merits briefing is scheduled.',
+      ruleRefs: eventIds.record === 'certified_agency_record'
+        ? [ruleRefs.frap16, ruleRefs.frap17]
+        : eventIds.record === 'appendix_to_writ_petition'
+          ? [ruleRefs.frap21, ruleRefs.ca4Local21]
+          : [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+    }
+  }
+
+  if (session.courtPackId.includes('original-writ')) {
+    if (!filedEvents.has('answer_to_writ_petition')) {
+      return {
+        tool: 'setDeadline',
+        actorId: 'ca4_clerk',
+        label: 'Answer to writ petition due',
+        targetEventId: 'answer_to_writ_petition',
+        offsetDays: 14,
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      }
+    }
+    if (!filedEvents.has('reply_in_support_of_writ')) {
+      return {
+        tool: 'issueClerkOrder',
+        actorId: 'ca4_clerk',
+        title: 'Writ Reply Notice',
+        text: 'The answer to the writ petition has been filed. Petitioner may file any permitted reply before the petition package is submitted to the panel.',
+        ruleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      }
+    }
+    return {
+      tool: 'submitToPanel',
+      actorId: 'ca4_clerk',
+      text: 'The writ petition, appendix, answer, and reply are complete. The petition is submitted to the panel for disposition.',
     }
   }
 
   if (!filedEvents.has('opening_brief')) {
-    if (hasOpenDeadline(session, openingBriefDeadline.targetEventId)) {
+    if (hasOpenDeadline(session, eventIds.openingDeadline.targetEventId)) {
       return {
         tool: 'issueClerkOrder',
         actorId: 'ca4_clerk',
         title: 'Briefing Schedule Pending',
         text: 'The opening brief and appendix deadline is already open. Appellant must file the opening brief rather than request another schedule.',
-        ruleRefs: openingBriefDeadline.sourceRuleRefs,
+        ruleRefs: eventIds.openingDeadline.sourceRuleRefs,
       }
     }
 
     return {
       tool: 'setDeadline',
       actorId: 'ca4_clerk',
-      label: openingBriefDeadline.label,
-      targetEventId: openingBriefDeadline.targetEventId,
-      offsetDays: openingBriefDeadline.offsetDays,
-      sourceRuleRefs: openingBriefDeadline.sourceRuleRefs,
+      label: eventIds.openingDeadline.label,
+      targetEventId: eventIds.openingDeadline.targetEventId,
+      offsetDays: eventIds.openingDeadline.offsetDays,
+      sourceRuleRefs: eventIds.openingDeadline.sourceRuleRefs,
     }
   }
 

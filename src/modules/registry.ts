@@ -6,6 +6,7 @@ import {
   getRuleItemsForCourt as getRawRuleItemsForCourt,
   getRulePacksForCourt as getRawRulePacksForCourt,
   getScenario as getRawScenario,
+  criminalOpeningBriefDeadline,
   openingBriefDeadline,
   ruleRefs,
   rulePacks,
@@ -30,7 +31,7 @@ import type {
 } from './types'
 
 export { courtPacks, filingEvents, rulePacks, scenarios }
-export { openingBriefDeadline, ruleRefs }
+export { criminalOpeningBriefDeadline, openingBriefDeadline, ruleRefs }
 
 export const ruleModules = rulePacks.map(ruleModuleFromPack)
 export const filingEventModules = filingEvents.map(filingEventModuleFromEvent)
@@ -144,7 +145,8 @@ export function getAvailableFilingEvents(session: CaseSession): AvailableFilingE
   if (!procedureModuleId) return []
 
   const procedureModule = procedureModuleById.get(procedureModuleId)
-  return procedureModule?.availableEvents(session) ?? []
+  const courtEventIds = new Set(courtPack.filingEvents.map((event) => event.id))
+  return procedureModule?.availableEvents(session).filter((event) => courtEventIds.has(event.eventId)) ?? []
 }
 
 export function validateModuleRegistry(): string[] {

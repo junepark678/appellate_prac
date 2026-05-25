@@ -24,6 +24,8 @@ export type InstitutionRole = 'learner' | 'instructor' | 'admin'
 export type ParticipantRole =
   | 'appellant'
   | 'appellee'
+  | 'petitioner'
+  | 'respondent'
   | 'amicus'
   | 'clerk'
   | 'panel'
@@ -549,7 +551,61 @@ export type Scenario = {
   issues?: ScenarioIssue[]
   recordExcerpts?: ScenarioRecordExcerpt[]
   training?: ScenarioTrainingMetadata
+  participants?: Participant[]
   sourceCaseUrl?: string
+  trialDocket?: ScenarioTrialDocket
+  documentAssets?: ScenarioDocumentAsset[]
+}
+
+export type ScenarioDocumentAsset = {
+  id: string
+  label: string
+  fileName: string
+  mimeType: 'application/pdf'
+  source: 'synthetic' | 'courtlistener' | 'uploaded'
+  publicUrl?: string
+  sourceUrl?: string
+  storageId?: string
+  sha256?: string
+  sizeBytes: number
+  pageCount: number
+  extractedText?: string
+}
+
+export type ScenarioTrialDocketEntry = {
+  id: string
+  entryNumber: number
+  filedAt: string
+  title: string
+  text: string
+  documentAssetIds: string[]
+}
+
+export type ScenarioTrialDocket = {
+  caption: string
+  court: string
+  docketNumber: string
+  sourceUrl?: string
+  entries: ScenarioTrialDocketEntry[]
+}
+
+export type TrialDocketDocument = ScenarioDocumentAsset
+
+export type TrialDocketEntry = {
+  id: string
+  entryNumber: number
+  filedAt: string
+  title: string
+  text: string
+  documents: TrialDocketDocument[]
+}
+
+export type TrialDocket = {
+  caption: string
+  court: string
+  docketNumber: string
+  sourceUrl?: string
+  entries: TrialDocketEntry[]
 }
 
 export type CaseSession = {
