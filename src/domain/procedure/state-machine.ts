@@ -221,13 +221,23 @@ export function nextProcedureToolCall(session: CaseSession): ToolCall {
   }
 
   if (state === 'motion_pending' && session.courtPackId.includes('original-writ')) {
+    if (!hasOpenDeadline(session, 'answer_to_writ_petition')) {
+      return {
+        tool: 'setDeadline',
+        actorId: 'ca4_clerk',
+        label: 'Answer to writ petition due',
+        targetEventId: 'answer_to_writ_petition',
+        offsetDays: 14,
+        sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      }
+    }
+
     return {
-      tool: 'setDeadline',
+      tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
-      label: 'Answer to writ petition due',
-      targetEventId: 'answer_to_writ_petition',
-      offsetDays: 14,
-      sourceRuleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
+      title: 'Writ Answer Pending',
+      text: 'The answer deadline is already open. Awaiting respondent filing before further writ screening action.',
+      ruleRefs: [ruleRefs.frap21, ruleRefs.ca4Local21],
     }
   }
 
