@@ -78,6 +78,36 @@ export const listPublished = query({
   },
 })
 
+export const listPublishedRecords = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      id: v.id('scenarios'),
+      scenarioKey: v.string(),
+      title: v.string(),
+      courtPackId: v.string(),
+      shortCaption: v.string(),
+      proceduralPosture: v.string(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const persisted = await ctx.db
+      .query('scenarios')
+      .withIndex('by_published', (index) => index.eq('published', true))
+      .collect()
+    return persisted
+      .filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
+      .map((scenario) => ({
+        id: scenario._id,
+        scenarioKey: scenario.scenarioKey,
+        title: scenario.title,
+        courtPackId: scenario.courtPackId,
+        shortCaption: scenario.shortCaption,
+        proceduralPosture: scenario.proceduralPosture,
+      }))
+  },
+})
+
 export const seedPublished = mutation({
   args: {},
   returns: v.object({

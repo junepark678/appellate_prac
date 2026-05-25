@@ -3,6 +3,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
+import { writeAuditLog } from './authz'
 import { fourthCircuitCivilAppealSourceManifest } from '../src/domain/rules/source-manifest'
 import {
   ca4CourtSourceVersions,
@@ -457,5 +458,51 @@ export const listSourceFreshness = query({
         reviewStatus: artifact.reviewStatus,
       })),
     )
+  },
+})
+
+export const promoteCourtPackRelease = mutation({
+  args: {
+    courtPackId: v.string(),
+    simulationEvalSnapshotJson: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const user = await requireAdmin(ctx)
+    const snapshot = JSON.parse(args.simulationEvalSnapshotJson) as {
+      criticalFailureCount?: number
+      validTurnRate?: number
+      hallucinatedSourceRate?: number
+      roleAuthorityFailureRate?: number
+    }
+    if (
+      snapshot.criticalFailureCount !== 0 ||
+      (snapshot.validTurnRate ?? 0) < 0.98 ||
+      (snapshot.hallucinatedSourceRate ?? 1) > 0.01 ||
+      snapshot.roleAuthorityFailureRate !== 0
+    ) {
+      throw new Error('Simulation eval snapshot does not meet production thresholds')
+    }
+    const courtPack = await ctx.db
+      .query('courtPacks')
+      .withIndex('by_pack_id', (index) => index.eq('packId', args.courtPackId))
+      .unique()
+    if (!courtPack) {
+      throw new Error('Court pack not found')
+    }
+    await requireReviewedSources(ctx, courtPack.sourceVersionIds ?? [])
+    await ctx.db.patch(courtPack._id, {
+      releaseStatus: 'production_approved',
+      evalThresholdsJson: args.simulationEvalSnapshotJson,
+      published: true,
+    })
+    await writeAuditLog(ctx, {
+      actorUserId: user._id,
+      action: 'court_pack.promoted_to_production',
+      targetTable: 'courtPacks',
+      targetId: courtPack._id,
+      metadata: { courtPackId: args.courtPackId },
+    })
+    return null
   },
 })
