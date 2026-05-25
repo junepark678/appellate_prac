@@ -64,7 +64,6 @@ import type {
   ActorWorkProduct,
   CaseSession,
   DocumentAnalysis,
-  EcfEventAvailability,
   FilingDraft,
   FilingMetadata,
   ParticipantRole,
@@ -107,45 +106,6 @@ type AdvanceLiveEventAction = (args: {
   rawText: string
 }>
 
-type GenerateActorWorkProductAction = (args: {
-  caseSessionId: Id<'caseSessions'>
-}) => Promise<ActorWorkProduct>
-
-type AdvanceSimulationTurnMutation = (args: {
-  caseSessionId: Id<'caseSessions'>
-}) => Promise<{
-  session: CaseSession
-  toolCall: ToolCall
-}>
-
-type DocumentUploadUrlMutation = (args: {
-  caseSessionId: Id<'caseSessions'>
-}) => Promise<string>
-
-type PersistDocumentAnalysisMutation = (args: {
-  caseSessionId: Id<'caseSessions'>
-  document: UploadedDocument
-  analysis: DocumentAnalysis
-}) => Promise<{
-  document: UploadedDocument
-  analysisId: string
-}>
-
-type AcceptActorWorkProductMutation = (args: {
-  caseSessionId: Id<'caseSessions'>
-  workProductId: string
-}) => Promise<{
-  session: CaseSession
-  workProduct: ActorWorkProduct
-  receipt: import('../domain/types').EcfReceipt | null
-  validationReason?: string
-}>
-
-type RejectActorWorkProductMutation = (args: {
-  caseSessionId: Id<'caseSessions'>
-  workProductId: string
-}) => Promise<ActorWorkProduct>
-
 type SessionSummary = {
   id: string
   scenarioTitle: string
@@ -153,6 +113,14 @@ type SessionSummary = {
   status: CaseSession['status']
   simulatedDate: string
   createdAt: number
+}
+
+function asCaseSessionId(id: string): Id<'caseSessions'> {
+  return id as Id<'caseSessions'>
+}
+
+function asActorWorkProductId(id: string): Id<'actorWorkProducts'> {
+  return id as Id<'actorWorkProducts'>
 }
 
 const enableLiveAi = import.meta.env.VITE_ENABLE_OPENROUTER === 'true'
@@ -192,28 +160,16 @@ function Home() {
   const submitFiling = useMutation(api.caseSessions.submitFiling)
   const submitEcfFiling = useMutation(api.caseSessions.submitEcfFiling)
   const advanceProcedure = useMutation(api.caseSessions.advanceProcedure)
-  const advanceSimulationTurn = useMutation(
-    (api as any).caseSessions.advanceSimulationTurn,
-  ) as AdvanceSimulationTurnMutation
-  const generateDocumentUploadUrl = useMutation(
-    (api as any).caseSessions.generateDocumentUploadUrl,
-  ) as DocumentUploadUrlMutation
-  const persistDocumentAnalysis = useMutation(
-    (api as any).caseSessions.persistDocumentAnalysis,
-  ) as PersistDocumentAnalysisMutation
-  const acceptActorWorkProduct = useMutation(
-    (api as any).caseSessions.acceptActorWorkProduct,
-  ) as AcceptActorWorkProductMutation
-  const rejectActorWorkProduct = useMutation(
-    (api as any).caseSessions.rejectActorWorkProduct,
-  ) as RejectActorWorkProductMutation
+  const advanceSimulationTurn = useMutation(api.caseSessions.advanceSimulationTurn)
+  const generateDocumentUploadUrl = useMutation(api.caseSessions.generateDocumentUploadUrl)
+  const persistDocumentAnalysis = useMutation(api.caseSessions.persistDocumentAnalysis)
+  const acceptActorWorkProduct = useMutation(api.caseSessions.acceptActorWorkProduct)
+  const rejectActorWorkProduct = useMutation(api.caseSessions.rejectActorWorkProduct)
   const importCourtListenerSource = useMutation(
     api.caseSessions.importCourtListenerSource,
   )
   const advanceLive = useAction(api.caseSessions.advanceLiveEvent) as AdvanceLiveEventAction
-  const generateActorWorkProduct = useAction(
-    (api as any).caseSessions.generateActorWorkProduct,
-  ) as GenerateActorWorkProductAction
+  const generateActorWorkProduct = useAction(api.caseSessions.generateActorWorkProduct)
   const searchCourtListener = useAction(
     api.integrations.searchLiveCourtListenerDockets,
   ) as CourtListenerSearchAction
@@ -240,15 +196,15 @@ function Home() {
   const importedTrialDocket = useQuery(
     api.caseSessions.getTrialDocketForCurrentUser,
     canUseConvex && session
-      ? { caseSessionId: session.id as Id<'caseSessions'> }
+      ? { caseSessionId: asCaseSessionId(session.id) }
       : 'skip',
   )
   const ecfEventAvailabilityQuery = useQuery(
-    (api as any).caseSessions.getAvailableEcfEvents,
+    api.caseSessions.getAvailableEcfEvents,
     canUseConvex && session
-      ? { caseSessionId: session.id as Id<'caseSessions'> }
+      ? { caseSessionId: asCaseSessionId(session.id) }
       : 'skip',
-  ) as EcfEventAvailability[] | undefined
+  )
   const activeSession = session ?? null
   const scenarioOptions = publishedScenarios ?? scenarios
   const ruleItems = activeSession ? getRuleItemsForCourt(activeSession.courtPackId) : []
@@ -321,7 +277,7 @@ function Home() {
     setSessionError('')
     try {
       const nextSession = await createCaseSession({ scenarioId })
-      setActiveCaseSessionId(nextSession.id as Id<'caseSessions'>)
+      setActiveCaseSessionId(asCaseSessionId(nextSession.id))
       setTrialDocket(createTrialDocket(nextSession))
       setDraft(createEmptyDraft(nextSession, 'notice_of_appeal'))
       setFilingMetadata(createDefaultMetadata(nextSession, 'notice_of_appeal'))
@@ -334,7 +290,7 @@ function Home() {
   }
 
   function resumeSession(caseSessionId: string) {
-    setActiveCaseSessionId(caseSessionId as Id<'caseSessions'>)
+    setActiveCaseSessionId(asCaseSessionId(caseSessionId))
     setActiveView('docket')
     setSessionError('')
   }
@@ -348,12 +304,12 @@ function Home() {
       const nextSession = submission
         ? (
             await submitEcfFiling({
-              caseSessionId: activeSession.id as Id<'caseSessions'>,
+              caseSessionId: asCaseSessionId(activeSession.id),
               submission,
             })
           ).session
         : await submitFiling({
-            caseSessionId: activeSession.id as Id<'caseSessions'>,
+            caseSessionId: asCaseSessionId(activeSession.id),
             draft,
           })
       setDraft(createEmptyDraft(nextSession, draft.eventId))
@@ -372,7 +328,7 @@ function Home() {
     setSessionError('')
     try {
       const result = await advanceProcedure({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        caseSessionId: asCaseSessionId(activeSession.id),
       })
       const nextSession = result.session
       if (nextSession.status === 'closed') {
@@ -391,7 +347,7 @@ function Home() {
     setSessionError('')
     try {
       const result = await advanceSimulationTurn({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        caseSessionId: asCaseSessionId(activeSession.id),
       })
       if (result.session.status === 'closed') {
         setActiveView('assessment')
@@ -415,7 +371,7 @@ function Home() {
     setAiError('')
     try {
       const result = await advanceLive({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        caseSessionId: asCaseSessionId(activeSession.id),
       })
       if (!result.toolCall) {
         setAiError('The AI service returned text, but no valid procedural event.')
@@ -441,7 +397,7 @@ function Home() {
     setActorError('')
     try {
       await generateActorWorkProduct({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        caseSessionId: asCaseSessionId(activeSession.id),
       })
     } catch (error) {
       setActorError(
@@ -458,8 +414,8 @@ function Home() {
     setActorError('')
     try {
       const result = await acceptActorWorkProduct({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
-        workProductId,
+        caseSessionId: asCaseSessionId(activeSession.id),
+        workProductId: asActorWorkProductId(workProductId),
       })
       if (result.workProduct.status === 'rejected') {
         setActorError(result.validationReason ?? 'Actor work product was rejected.')
@@ -482,8 +438,8 @@ function Home() {
     setActorError('')
     try {
       await rejectActorWorkProduct({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
-        workProductId,
+        caseSessionId: asCaseSessionId(activeSession.id),
+        workProductId: asActorWorkProductId(workProductId),
       })
     } catch (error) {
       setActorError(
@@ -501,7 +457,7 @@ function Home() {
     try {
       const documents = await Promise.all(
         Array.from(files ?? []).map((file) =>
-          analyzeUploadAndPersistDocument(activeSession.id as Id<'caseSessions'>, file),
+          analyzeUploadAndPersistDocument(asCaseSessionId(activeSession.id), file),
         ),
       )
       setDraft((current) => ({ ...current, documents }))
@@ -588,7 +544,7 @@ function Home() {
     setRecapError('')
     try {
       const imported = await importCourtListenerSource({
-        caseSessionId: activeSession.id as Id<'caseSessions'>,
+        caseSessionId: asCaseSessionId(activeSession.id),
         result,
       })
       setTrialDocket(imported.trialDocket)

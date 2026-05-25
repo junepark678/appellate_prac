@@ -1978,14 +1978,14 @@ export const generateActorWorkProduct = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery((api as any).caseSessions.getForCurrentUser, {
+    const session = (await ctx.runQuery(api.caseSessions.getForCurrentUser, {
       caseSessionId: args.caseSessionId,
     })) as CaseSession | null
     if (!session) {
       throw new Error('Case session not found')
     }
 
-    const gate = (await ctx.runQuery((internal as any).caseSessions.getAiGateForCurrentUser, {
+    const gate = (await ctx.runQuery(internal.caseSessions.getAiGateForCurrentUser, {
       nowIso,
       cooldownMs: openRouterCooldownMs,
     })) as { allowed: boolean; reason?: string }
@@ -2011,7 +2011,7 @@ export const generateActorWorkProduct = action({
         model,
       })
       const persisted = (await ctx.runMutation(
-        (internal as any).caseSessions.persistActorWorkProductForCurrentUser,
+        internal.caseSessions.persistActorWorkProductForCurrentUser,
         {
           caseSessionId: args.caseSessionId,
           actorId: product.actorId,
@@ -2023,7 +2023,7 @@ export const generateActorWorkProduct = action({
           createdAt: product.createdAt,
         },
       )) as ActorWorkProduct
-      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
         caseSessionId: args.caseSessionId,
         actorId: product.actorId,
         model,
@@ -2037,7 +2037,7 @@ export const generateActorWorkProduct = action({
       })
       return persisted
     } catch (error) {
-      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
         caseSessionId: args.caseSessionId,
         actorId: 'openrouter',
         model,
@@ -2250,14 +2250,14 @@ export const advanceLiveEvent = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery((api as any).caseSessions.getForCurrentUser, {
+    const session = (await ctx.runQuery(api.caseSessions.getForCurrentUser, {
       caseSessionId: args.caseSessionId,
     })) as CaseSession | null
     if (!session) {
       throw new Error('Case session not found')
     }
 
-    const gate = (await ctx.runQuery((internal as any).caseSessions.getAiGateForCurrentUser, {
+    const gate = (await ctx.runQuery(internal.caseSessions.getAiGateForCurrentUser, {
       nowIso,
       cooldownMs: openRouterCooldownMs,
     })) as { allowed: boolean; reason?: string }
@@ -2281,7 +2281,7 @@ export const advanceLiveEvent = action({
         console.warn('OpenRouter returned an invalid procedural tool call', {
           caseSessionId: args.caseSessionId,
         })
-        await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+        await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
           caseSessionId: args.caseSessionId,
           actorId: 'openrouter',
           model,
@@ -2307,7 +2307,7 @@ export const advanceLiveEvent = action({
           caseSessionId: args.caseSessionId,
           issues: validation.issues,
         })
-        await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+        await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
           caseSessionId: args.caseSessionId,
           actorId: result.toolCall.actorId,
           model,
@@ -2330,7 +2330,7 @@ export const advanceLiveEvent = action({
       }
 
       const nextSession = (await ctx.runMutation(
-        (internal as any).caseSessions.applyLiveToolCallForCurrentUser,
+        internal.caseSessions.applyLiveToolCallForCurrentUser,
         {
           caseSessionId: args.caseSessionId,
           toolCall: result.toolCall,
@@ -2353,7 +2353,7 @@ export const advanceLiveEvent = action({
         caseSessionId: args.caseSessionId,
         error: errorMessage(error),
       })
-      await ctx.runMutation((internal as any).caseSessions.recordAiRunForCurrentUser, {
+      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
         caseSessionId: args.caseSessionId,
         actorId: 'openrouter',
         model,
