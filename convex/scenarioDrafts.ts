@@ -1,9 +1,12 @@
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
+import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 
-async function requireReviewer(ctx: any) {
+type ReadCtx = QueryCtx | MutationCtx
+
+async function requireReviewer(ctx: ReadCtx) {
   const { user } = await requireCurrentUser(ctx)
   if (!['admin', 'instructor'].includes(user.role)) {
     throw new Error('Instructor or admin role required')

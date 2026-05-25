@@ -1,6 +1,7 @@
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
+import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 import { fourthCircuitCivilAppealSourceManifest } from '../src/domain/rules/source-manifest'
 import {
@@ -11,6 +12,8 @@ import {
 import { sourceFreshnessStatuses } from '../src/domain/rules/source-governance'
 import { ca4EcfCatalogEvents } from '../src/domain/filing/ca4-ecf-catalog'
 
+type ReadCtx = QueryCtx | MutationCtx
+
 function simpleHash(value: string) {
   let hash = 0
   for (let index = 0; index < value.length; index += 1) {
@@ -19,7 +22,7 @@ function simpleHash(value: string) {
   return hash.toString(16).padStart(8, '0')
 }
 
-async function requireAdmin(ctx: any) {
+async function requireAdmin(ctx: ReadCtx) {
   const { user } = await requireCurrentUser(ctx)
   if (user.role !== 'admin') {
     throw new Error('Admin role required')
@@ -204,12 +207,12 @@ export const publishSourceSnapshot = mutation({
   },
 })
 
-async function requireReviewedSources(ctx: any, sourceVersionIds: string[]) {
+async function requireReviewedSources(ctx: ReadCtx, sourceVersionIds: string[]) {
   const uniqueIds = [...new Set(sourceVersionIds)]
   for (const sourceVersionId of uniqueIds) {
     const snapshot = await ctx.db
       .query('legalSourceSnapshots')
-      .withIndex('by_source_version', (index: any) =>
+      .withIndex('by_source_version', (index) =>
         index.eq('sourceVersionId', sourceVersionId),
       )
       .order('desc')
@@ -221,7 +224,7 @@ async function requireReviewedSources(ctx: any, sourceVersionIds: string[]) {
     )
     const artifact = await ctx.db
       .query('sourceArtifacts')
-      .withIndex('by_source_version', (index: any) =>
+      .withIndex('by_source_version', (index) =>
         index.eq('sourceVersionId', sourceVersionId),
       )
       .order('desc')

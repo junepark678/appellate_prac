@@ -1,13 +1,17 @@
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
+import type { Id } from './_generated/dataModel'
+import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 
-async function requireInstructor(ctx: any, cohortId: any) {
+type ReadCtx = QueryCtx | MutationCtx
+
+async function requireInstructor(ctx: ReadCtx, cohortId: Id<'cohorts'>) {
   const { user } = await requireCurrentUser(ctx)
   const membership = await ctx.db
     .query('cohortMemberships')
-    .withIndex('by_cohort_user', (index: any) =>
+    .withIndex('by_cohort_user', (index) =>
       index.eq('cohortId', cohortId).eq('userId', user._id),
     )
     .unique()
@@ -71,4 +75,3 @@ export const reviewAssignmentSession = mutation({
     return null
   },
 })
-

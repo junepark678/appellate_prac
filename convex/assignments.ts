@@ -1,17 +1,22 @@
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
+import type { Doc, Id } from './_generated/dataModel'
+import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 
+type ReadCtx = QueryCtx | MutationCtx
+type CohortRole = Doc<'cohortMemberships'>['role']
+
 async function requireCohortRole(
-  ctx: any,
-  cohortId: IdLike,
-  roles: string[],
+  ctx: ReadCtx,
+  cohortId: Id<'cohorts'>,
+  roles: CohortRole[],
 ) {
   const { user } = await requireCurrentUser(ctx)
   const membership = await ctx.db
     .query('cohortMemberships')
-    .withIndex('by_cohort_user', (index: any) =>
+    .withIndex('by_cohort_user', (index) =>
       index.eq('cohortId', cohortId).eq('userId', user._id),
     )
     .unique()
@@ -20,8 +25,6 @@ async function requireCohortRole(
   }
   return { user, membership }
 }
-
-type IdLike = any
 
 export const create = mutation({
   args: {
