@@ -1,4 +1,4 @@
-import { fileDraft } from '../simulation'
+import { fileDraft, filingDateForSession } from '../simulation'
 import { getCourtPack, getFilingEvent, ruleRefs } from '../packs'
 import type {
   CaseSession,
@@ -561,7 +561,7 @@ export type EcfSubmissionResult = {
 export function preflightEcfFiling(
   session: CaseSession,
   submission: FilingSubmission,
-  nowIso = session.simulatedDate,
+  nowIso = filingDateForSession(session),
 ): PreflightCheckResult {
   const completenessIssues = validateEcfWizardCompleteness(session, submission)
   if (completenessIssues.some((issue) => issue.severity === 'error')) {
@@ -731,7 +731,8 @@ export function submitEcfFiling(
   session: CaseSession,
   submission: FilingSubmission,
 ): EcfSubmissionResult {
-  const preflight = preflightEcfFiling(session, submission, session.simulatedDate)
+  const filedAt = filingDateForSession(session)
+  const preflight = preflightEcfFiling(session, submission, filedAt)
   if (!preflight.accepted && validateEcfWizardCompleteness(session, submission).some((issue) => issue.severity === 'error')) {
     return {
       preflight,
@@ -741,7 +742,11 @@ export function submitEcfFiling(
   }
 
   const draft = filingSubmissionToDraft(submission)
-  const filedSession = fileDraft(session, draft)
+  const filedSession = fileDraft(session, draft, {
+    filedAt,
+    validationIssues: preflight.issues,
+    submission,
+  })
   const newestFiling = filedSession.filings.at(-1)
   const nextSession =
     newestFiling && (submission.filerPartyId || submission.partyIds?.length)

@@ -87,7 +87,8 @@ export default defineSchema({
   })
     .index('by_assignment', ['assignmentId'])
     .index('by_user', ['userId'])
-    .index('by_case', ['caseSessionId']),
+    .index('by_case', ['caseSessionId'])
+    .index('by_assignment_case_user', ['assignmentId', 'caseSessionId', 'userId']),
 
   rulePacks: defineTable({
     packId: v.string(),
@@ -391,7 +392,9 @@ export default defineSchema({
     analysisId: v.optional(v.id('documentAnalyses')),
     extractedSignals: v.array(v.string()),
     validationJson: v.optional(v.string()),
-  }).index('by_case', ['caseSessionId']),
+  })
+    .index('by_case', ['caseSessionId'])
+    .index('by_storage', ['storageId']),
 
   caseSessionEvents: defineTable({
     caseSessionId: v.id('caseSessions'),

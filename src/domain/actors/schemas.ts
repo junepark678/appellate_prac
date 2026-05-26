@@ -129,6 +129,28 @@ function isRuleRef(value: unknown): value is RuleRef {
   )
 }
 
+function isOptionalStringArray(value: unknown) {
+  return value === undefined || (Array.isArray(value) && value.every(isString))
+}
+
+function isAttachmentTextArray(value: unknown) {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.every(
+        (attachment) =>
+          typeof attachment === 'object' &&
+          attachment !== null &&
+          isString((attachment as { label?: unknown }).label) &&
+          isString((attachment as { fileName?: unknown }).fileName) &&
+          isString((attachment as { text?: unknown }).text) &&
+          ['main', 'appendix', 'exhibit', 'certificate', 'motion_attachment', 'other'].includes(
+            (attachment as { attachmentType?: string }).attachmentType ?? '',
+          ),
+      ))
+  )
+}
+
 function isCitation(value: unknown): value is ActorCitation {
   const candidate = value as ActorCitation
   return (
@@ -161,20 +183,11 @@ export function isGeneratedFilingDraft(value: unknown): value is GeneratedFiling
     candidate.citations.every(isCitation) &&
     Array.isArray(candidate.ruleRefs) &&
     candidate.ruleRefs.every(isRuleRef) &&
-    (!candidate.recordRefs || candidate.recordRefs.every(isString)) &&
+    isOptionalStringArray(candidate.recordRefs) &&
     (candidate.confidence === undefined ||
       (typeof candidate.confidence === 'number' && Number.isFinite(candidate.confidence))) &&
     (!candidate.roleAuthority || isString(candidate.roleAuthority)) &&
-    (!candidate.attachmentTexts ||
-      candidate.attachmentTexts.every(
-        (attachment) =>
-          isString(attachment.label) &&
-          isString(attachment.fileName) &&
-          isString(attachment.text) &&
-          ['main', 'appendix', 'exhibit', 'certificate', 'motion_attachment', 'other'].includes(
-            attachment.attachmentType,
-          ),
-      ))
+    isAttachmentTextArray(candidate.attachmentTexts)
   )
 }
 
@@ -193,10 +206,10 @@ export function isActorReasoningMemo(value: unknown): value is ActorReasoningMem
     candidate.citations.every(isCitation) &&
     Array.isArray(candidate.ruleRefs) &&
     candidate.ruleRefs.every(isRuleRef) &&
-    (!candidate.proceduralClaims || candidate.proceduralClaims.every(isString)) &&
+    isOptionalStringArray(candidate.proceduralClaims) &&
     (!candidate.requestedDisposition || isString(candidate.requestedDisposition)) &&
     (!candidate.reliefOption || isString(candidate.reliefOption)) &&
-    (!candidate.recordRefs || candidate.recordRefs.every(isString)) &&
+    isOptionalStringArray(candidate.recordRefs) &&
     (!candidate.roleAuthority || isString(candidate.roleAuthority)) &&
     (candidate.confidence === undefined ||
       (typeof candidate.confidence === 'number' && Number.isFinite(candidate.confidence)))

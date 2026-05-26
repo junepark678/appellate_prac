@@ -92,6 +92,11 @@ const defaultScenarioKey = 'synthetic-employment-retaliation'
 const openRouterCooldownMs = 10_000
 const estimatedOpenRouterCostCents = 1
 const seedScenarios = scenarioSeed as Scenario[]
+const maxUploadedPdfBytes = 25 * 1024 * 1024
+const maxExtractedTextChars = 200_000
+const maxDocumentAnalysisJsonChars = 900_000
+const maxDocumentFileNameChars = 200
+const maxDocumentSignals = 80
 
 function createdMonth(isoDate: string) {
   return isoDate.slice(0, 7)
@@ -1189,7 +1194,11 @@ function withRejectedFilingAudit(
 
 function sourceUrlForCourtListenerResult(result: CourtListenerSearchResult) {
   if (result.absolute_url) {
-    return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+    try {
+      return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+    } catch {
+      return 'https://www.courtlistener.com/'
+    }
   }
   if (result.docket_id) {
     return `https://www.courtlistener.com/docket/${result.docket_id}/`
@@ -1290,6 +1299,68 @@ function requireEnv(name: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function assertMaxLength(value: string | undefined, max: number, label: string) {
+  if (value && value.length > max) {
+    throw new Error(`${label} exceeds the simulator storage limit.`)
+  }
+}
+
+async function verifyUploadedPdfDocument(
+  ctx: WriteCtx,
+  document: UploadedDocument,
+  analysis: DocumentAnalysis,
+) {
+  if (!document.storageId) {
+    throw new Error('Uploaded PDF storage is required.')
+  }
+  if (document.mimeType !== 'application/pdf' || analysis.mimeType !== 'application/pdf') {
+    throw new Error('Only PDF uploads can be persisted.')
+  }
+  assertMaxLength(document.fileName, maxDocumentFileNameChars, 'File name')
+  assertMaxLength(analysis.normalizedText, maxExtractedTextChars, 'Extracted PDF text')
+  if (document.extractedSignals.length > maxDocumentSignals) {
+    throw new Error('Document signal count exceeds the simulator storage limit.')
+  }
+  if (typeof analysis.pageCount === 'number' && analysis.pageCount > 500) {
+    throw new Error('PDF page count exceeds the simulator storage limit.')
+  }
+  const storageId = document.storageId as Id<'_storage'>
+  const metadata = await ctx.db.system.get('_storage', storageId)
+  if (!metadata) {
+    throw new Error('Uploaded PDF storage was not found.')
+  }
+  if (metadata.size > maxUploadedPdfBytes) {
+    throw new Error('PDF exceeds the simulator upload size limit.')
+  }
+  if (
+    metadata.contentType &&
+    !metadata.contentType.toLowerCase().startsWith('application/pdf')
+  ) {
+    throw new Error('Uploaded file storage is not a PDF.')
+  }
+  if (document.sizeBytes !== metadata.size || analysis.fileSizeBytes !== metadata.size) {
+    throw new Error('Uploaded PDF metadata does not match stored file metadata.')
+  }
+  if (document.sha256 && document.sha256 !== metadata.sha256) {
+    throw new Error('Uploaded PDF checksum does not match stored file metadata.')
+  }
+  const existingDocument = await ctx.db
+    .query('documents')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .first()
+  if (existingDocument) {
+    throw new Error('Uploaded PDF storage is already associated with a document.')
+  }
+  if (JSON.stringify(analysis).length > maxDocumentAnalysisJsonChars) {
+    throw new Error('PDF analysis exceeds the simulator storage limit.')
+  }
+  return {
+    storageId,
+    sizeBytes: metadata.size,
+    sha256: metadata.sha256,
+  }
 }
 
 export const create = mutation({
@@ -1550,15 +1621,19 @@ export const persistDocumentAnalysis = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const verifiedDocument = await verifyUploadedPdfDocument(
+      ctx,
+      args.document as UploadedDocument,
+      args.analysis as DocumentAnalysis,
+    )
+    const analysisJson = JSON.stringify(args.analysis)
     const documentId = await ctx.db.insert('documents', {
       caseSessionId: args.caseSessionId,
-      ...(args.document.storageId
-        ? { storageId: args.document.storageId as Id<'_storage'> }
-        : {}),
-      ...(args.document.sha256 ? { sha256: args.document.sha256 } : {}),
+      storageId: verifiedDocument.storageId,
+      sha256: verifiedDocument.sha256,
       fileName: args.document.fileName,
       mimeType: args.document.mimeType,
-      sizeBytes: args.document.sizeBytes,
+      sizeBytes: verifiedDocument.sizeBytes,
       ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
       ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
       ...(args.analysis.textExtractionStatus
@@ -1566,7 +1641,7 @@ export const persistDocumentAnalysis = mutation({
         : {}),
       ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
       extractedSignals: args.document.extractedSignals,
-      validationJson: JSON.stringify(args.analysis),
+      validationJson: analysisJson,
     })
     const analysisId = await ctx.db.insert('documentAnalyses', {
       caseSessionId: args.caseSessionId,
@@ -1580,7 +1655,7 @@ export const persistDocumentAnalysis = mutation({
       certificateOfComplianceDetected: args.analysis.certificateOfComplianceDetected,
       sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
       warnings: args.analysis.warnings,
-      analysisJson: JSON.stringify(args.analysis),
+      analysisJson,
       ...(args.analysis.normalizedText
         ? { extractedTextHash: hashText(args.analysis.normalizedText) }
         : {}),
@@ -1601,6 +1676,9 @@ export const persistDocumentAnalysis = mutation({
     const document: UploadedDocument = {
       ...args.document,
       id: documentId,
+      storageId: verifiedDocument.storageId,
+      sha256: verifiedDocument.sha256,
+      sizeBytes: verifiedDocument.sizeBytes,
       ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
       ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
       ...(args.analysis.textExtractionStatus
@@ -1980,6 +2058,113 @@ export const getAiGateForCurrentUser = internalQuery({
   },
 })
 
+export const reserveAiRunForCurrentUser = internalMutation({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+    actorId: v.string(),
+    model: v.string(),
+    promptHash: v.string(),
+    nowIso: v.string(),
+    cooldownMs: v.number(),
+    estimatedCostCents: v.number(),
+  },
+  returns: v.object({
+    allowed: v.boolean(),
+    reason: v.optional(v.string()),
+    aiRunId: v.optional(v.id('aiRuns')),
+    budgetCents: v.number(),
+    spentCents: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const month = createdMonth(args.nowIso)
+    const runs = await ctx.db
+      .query('aiRuns')
+      .withIndex('by_user_month', (index) =>
+        index.eq('userId', user._id).eq('createdMonth', month),
+      )
+      .collect()
+    const spentCents = runs.reduce((sum, run) => sum + run.costCents, 0)
+    if (spentCents + args.estimatedCostCents > user.monthlyAiBudgetCents) {
+      return {
+        allowed: false,
+        reason: 'Live AI budget exhausted.',
+        budgetCents: user.monthlyAiBudgetCents,
+        spentCents,
+      }
+    }
+
+    const latestRun = runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    if (
+      latestRun &&
+      new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
+        args.cooldownMs
+    ) {
+      return {
+        allowed: false,
+        reason: 'Live AI cooldown is still active.',
+        budgetCents: user.monthlyAiBudgetCents,
+        spentCents,
+      }
+    }
+
+    const aiRunId = await ctx.db.insert('aiRuns', {
+      caseSessionId: args.caseSessionId,
+      userId: user._id,
+      actorId: args.actorId,
+      model: args.model,
+      provider: 'openrouter',
+      promptHash: args.promptHash,
+      toolCallJson: '',
+      accepted: false,
+      issues: ['AI request in flight.'],
+      costCents: args.estimatedCostCents,
+      latencyMs: 0,
+      errorClass: 'in_flight',
+      createdMonth: month,
+      createdAt: args.nowIso,
+    })
+    return {
+      allowed: true,
+      aiRunId,
+      budgetCents: user.monthlyAiBudgetCents,
+      spentCents: spentCents + args.estimatedCostCents,
+    }
+  },
+})
+
+export const finalizeAiRunForCurrentUser = internalMutation({
+  args: {
+    aiRunId: v.id('aiRuns'),
+    actorId: v.string(),
+    toolCallJson: v.string(),
+    accepted: v.boolean(),
+    issues: v.array(v.string()),
+    costCents: v.number(),
+    latencyMs: v.number(),
+    errorClass: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const run = await ctx.db.get(args.aiRunId)
+    if (!run || run.userId !== user._id) {
+      throw new Error('AI run reservation not found.')
+    }
+    await ctx.db.patch(args.aiRunId, {
+      actorId: args.actorId,
+      toolCallJson: args.toolCallJson,
+      accepted: args.accepted,
+      issues: args.issues,
+      costCents: args.costCents,
+      latencyMs: args.latencyMs,
+      errorClass: args.errorClass,
+    })
+    return null
+  },
+})
+
 export const recordAiRunForCurrentUser = internalMutation({
   args: {
     caseSessionId: v.id('caseSessions'),
@@ -2027,6 +2212,7 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
     latencyMs: v.number(),
     costCents: v.number(),
     createdAt: v.string(),
+    aiRunId: v.optional(v.id('aiRuns')),
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
@@ -2034,22 +2220,38 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const validation = validateToolCall(session, args.toolCall)
-    await ctx.db.insert('aiRuns', {
-      caseSessionId: args.caseSessionId,
-      userId: user._id,
-      actorId: args.toolCall.actorId,
-      model: args.model,
-      provider: 'openrouter',
-      promptHash: promptHashForSession(session),
-      toolCallJson: args.rawText,
-      accepted: validation.accepted,
-      issues: validation.issues,
-      costCents: args.costCents,
-      latencyMs: args.latencyMs,
-      ...(!validation.accepted ? { errorClass: 'tool_validation_rejected' } : {}),
-      createdMonth: createdMonth(args.createdAt),
-      createdAt: args.createdAt,
-    })
+    if (args.aiRunId) {
+      const run = await ctx.db.get(args.aiRunId)
+      if (!run || run.userId !== user._id) {
+        throw new Error('AI run reservation not found.')
+      }
+      await ctx.db.patch(args.aiRunId, {
+        actorId: args.toolCall.actorId,
+        toolCallJson: args.rawText,
+        accepted: validation.accepted,
+        issues: validation.issues,
+        costCents: args.costCents,
+        latencyMs: args.latencyMs,
+        errorClass: validation.accepted ? undefined : 'tool_validation_rejected',
+      })
+    } else {
+      await ctx.db.insert('aiRuns', {
+        caseSessionId: args.caseSessionId,
+        userId: user._id,
+        actorId: args.toolCall.actorId,
+        model: args.model,
+        provider: 'openrouter',
+        promptHash: promptHashForSession(session),
+        toolCallJson: args.rawText,
+        accepted: validation.accepted,
+        issues: validation.issues,
+        costCents: args.costCents,
+        latencyMs: args.latencyMs,
+        ...(!validation.accepted ? { errorClass: 'tool_validation_rejected' } : {}),
+        createdMonth: createdMonth(args.createdAt),
+        createdAt: args.createdAt,
+      })
+    }
     if (!validation.accepted) {
       console.warn('OpenRouter tool call rejected', {
         caseSessionId: args.caseSessionId,
@@ -2148,15 +2350,21 @@ export const generateActorWorkProduct = action({
       throw new Error('Case session not found')
     }
 
-    const gate = (await ctx.runQuery(internal.caseSessions.getAiGateForCurrentUser, {
+    const model = requireEnv('OPENROUTER_MODEL')
+    const promptHash = promptHashForSession(session)
+    const reservation = (await ctx.runMutation(internal.caseSessions.reserveAiRunForCurrentUser, {
+      caseSessionId: args.caseSessionId,
+      actorId: 'openrouter',
+      model,
+      promptHash,
       nowIso,
       cooldownMs: openRouterCooldownMs,
-    })) as { allowed: boolean; reason?: string }
-    if (!gate.allowed) {
-      throw new Error(gate.reason ?? 'Live AI is temporarily unavailable.')
+      estimatedCostCents: estimatedOpenRouterCostCents,
+    })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
+    if (!reservation.allowed || !reservation.aiRunId) {
+      throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
     }
 
-    const model = requireEnv('OPENROUTER_MODEL')
     const provider = new OpenRouterProvider({
       apiKey: requireEnv('OPENROUTER_API_KEY'),
       model,
@@ -2186,32 +2394,26 @@ export const generateActorWorkProduct = action({
           createdAt: product.createdAt,
         },
       )) as ActorWorkProduct
-      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
-        caseSessionId: args.caseSessionId,
+      await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+        aiRunId: reservation.aiRunId,
         actorId: product.actorId,
-        model,
-        promptHash: promptHashForSession(session),
         toolCallJson: JSON.stringify(product.workProduct),
         accepted: !(product.validationIssues ?? []).some((issue) => issue.severity === 'error'),
         issues: (product.validationIssues ?? []).map((issue) => issue.code ?? issue.message),
         costCents: estimatedOpenRouterCostCents,
         latencyMs: Date.now() - startedAt,
-        createdAt: nowIso,
       })
       return persisted
     } catch (error) {
-      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
-        caseSessionId: args.caseSessionId,
+      await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+        aiRunId: reservation.aiRunId,
         actorId: 'openrouter',
-        model,
-        promptHash: promptHashForSession(session),
         toolCallJson: '',
         accepted: false,
         issues: [errorMessage(error)],
         costCents: 0,
         latencyMs: Date.now() - startedAt,
         errorClass: 'provider_error',
-        createdAt: nowIso,
       })
       throw new Error('Actor work product generation is temporarily unavailable.')
     }
@@ -2239,6 +2441,14 @@ export const acceptActorWorkProduct = mutation({
 
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const product = actorWorkProductFromDoc(productDoc)
+    if (productDoc.status !== 'proposed') {
+      return {
+        session,
+        workProduct: product,
+        receipt: null,
+        validationReason: 'Actor work product has already been reviewed.',
+      }
+    }
     const acceptance = canAcceptActorWorkProduct(session, product)
     if (!acceptance.accepted) {
       await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
@@ -2380,15 +2590,21 @@ export const advanceLiveEvent = action({
       throw new Error('Case session not found')
     }
 
-    const gate = (await ctx.runQuery(internal.caseSessions.getAiGateForCurrentUser, {
+    const model = requireEnv('OPENROUTER_MODEL')
+    const promptHash = promptHashForSession(session)
+    const reservation = (await ctx.runMutation(internal.caseSessions.reserveAiRunForCurrentUser, {
+      caseSessionId: args.caseSessionId,
+      actorId: 'openrouter',
+      model,
+      promptHash,
       nowIso,
       cooldownMs: openRouterCooldownMs,
-    })) as { allowed: boolean; reason?: string }
-    if (!gate.allowed) {
-      throw new Error(gate.reason ?? 'Live AI is temporarily unavailable.')
+      estimatedCostCents: estimatedOpenRouterCostCents,
+    })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
+    if (!reservation.allowed || !reservation.aiRunId) {
+      throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
     }
 
-    const model = requireEnv('OPENROUTER_MODEL')
     const startedAt = Date.now()
 
     try {
@@ -2404,18 +2620,15 @@ export const advanceLiveEvent = action({
         console.warn('OpenRouter returned an invalid procedural tool call', {
           caseSessionId: args.caseSessionId,
         })
-        await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
-          caseSessionId: args.caseSessionId,
+        await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+          aiRunId: reservation.aiRunId,
           actorId: 'openrouter',
-          model,
-          promptHash: promptHashForSession(session),
           toolCallJson: result.rawText,
           accepted: false,
           issues: ['The AI service returned text, but no valid procedural event.'],
           costCents: estimatedOpenRouterCostCents,
           latencyMs,
           errorClass: 'tool_validation_rejected',
-          createdAt: new Date().toISOString(),
         })
         return {
           session,
@@ -2430,11 +2643,9 @@ export const advanceLiveEvent = action({
           caseSessionId: args.caseSessionId,
           issues: validation.issues,
         })
-        await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
-          caseSessionId: args.caseSessionId,
+        await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+          aiRunId: reservation.aiRunId,
           actorId: result.toolCall.actorId,
-          model,
-          promptHash: promptHashForSession(session),
           toolCallJson: result.rawText,
           accepted: false,
           issues: validation.issues.length
@@ -2443,7 +2654,6 @@ export const advanceLiveEvent = action({
           costCents: estimatedOpenRouterCostCents,
           latencyMs,
           errorClass: 'tool_validation_rejected',
-          createdAt: new Date().toISOString(),
         })
         return {
           session,
@@ -2462,6 +2672,7 @@ export const advanceLiveEvent = action({
           latencyMs,
           costCents: estimatedOpenRouterCostCents,
           createdAt: new Date().toISOString(),
+          aiRunId: reservation.aiRunId,
         },
       )) as CaseSession
 
@@ -2476,18 +2687,15 @@ export const advanceLiveEvent = action({
         caseSessionId: args.caseSessionId,
         error: errorMessage(error),
       })
-      await ctx.runMutation(internal.caseSessions.recordAiRunForCurrentUser, {
-        caseSessionId: args.caseSessionId,
+      await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+        aiRunId: reservation.aiRunId,
         actorId: 'openrouter',
-        model,
-        promptHash: promptHashForSession(session),
         toolCallJson: '',
         accepted: false,
         issues: [errorMessage(error)],
         costCents: 0,
         latencyMs,
         errorClass: 'provider_error',
-        createdAt: new Date().toISOString(),
       })
       throw new Error('Live AI is temporarily unavailable.')
     }

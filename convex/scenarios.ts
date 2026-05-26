@@ -1,11 +1,11 @@
 import { v } from 'convex/values'
 
-import { action, internalMutation, mutation, query } from './_generated/server'
+import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
-import { requireCurrentUser } from './authHelpers'
+import { requireAdminUser, requireCurrentUser } from './authHelpers'
 import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -486,7 +486,7 @@ export const seedPublished = mutation({
     updated: v.number(),
   }),
   handler: async (ctx) => {
-    await requireCurrentUser(ctx)
+    await requireAdminUser(ctx)
     let inserted = 0
     let updated = 0
 
@@ -582,6 +582,31 @@ async function sha256Hex(buffer: ArrayBuffer) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+export const requireAdminForAction = internalQuery({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    await requireAdminUser(ctx)
+    return null
+  },
+})
+
+const maxScenarioAssetBytes = 30 * 1024 * 1024
+
+function isAllowedScenarioAssetBaseUrl(baseUrl: URL) {
+  if (!['http:', 'https:'].includes(baseUrl.protocol)) return false
+  if (['localhost', '127.0.0.1', '::1'].includes(baseUrl.hostname)) return true
+
+  const appUrl = process.env.OPENROUTER_APP_URL
+  if (!appUrl) return false
+
+  try {
+    return new URL(appUrl).origin === baseUrl.origin
+  } catch {
+    return false
+  }
+}
+
 export const migrateBundledScenarioPdfAssets = action({
   args: {
     baseUrl: v.string(),
@@ -591,9 +616,13 @@ export const migrateBundledScenarioPdfAssets = action({
     skipped: v.number(),
   }),
   handler: async (ctx, args) => {
+    await ctx.runQuery(internal.scenarios.requireAdminForAction, {})
     let uploaded = 0
     let skipped = 0
-    const baseUrl = args.baseUrl.replace(/\/$/, '')
+    const baseUrl = new URL(args.baseUrl)
+    if (!isAllowedScenarioAssetBaseUrl(baseUrl)) {
+      throw new Error('Scenario asset base URL is not allowed.')
+    }
     for (const scenario of seedScenarios) {
       for (const asset of scenario.documentAssets ?? []) {
         if (asset.storageId) {
@@ -601,12 +630,26 @@ export const migrateBundledScenarioPdfAssets = action({
           continue
         }
         const sourcePath = `/trial-records/${scenario.id}/${asset.fileName}`
-        const response = await fetch(`${baseUrl}${sourcePath}`)
+        const response = await fetch(new URL(sourcePath, baseUrl.origin))
         if (!response.ok) {
           skipped += 1
           continue
         }
+        const contentType = response.headers.get('content-type') ?? ''
+        if (contentType && !contentType.toLowerCase().includes('application/pdf')) {
+          skipped += 1
+          continue
+        }
+        const contentLength = Number(response.headers.get('content-length') ?? '0')
+        if (contentLength > maxScenarioAssetBytes) {
+          skipped += 1
+          continue
+        }
         const buffer = await response.arrayBuffer()
+        if (buffer.byteLength > maxScenarioAssetBytes) {
+          skipped += 1
+          continue
+        }
         const sha256 = await sha256Hex(buffer)
         const blob = new Blob([buffer], { type: 'application/pdf' })
         const storageId = await ctx.storage.store(blob, { sha256 })

@@ -31,6 +31,43 @@ function utcDateOnly(dateIso: string) {
   return dateIso.slice(0, 10)
 }
 
+function nthWeekdayOfMonth(year: number, monthIndex: number, weekday: number, nth: number) {
+  const date = new Date(Date.UTC(year, monthIndex, 1))
+  const offset = (weekday - date.getUTCDay() + 7) % 7
+  date.setUTCDate(1 + offset + (nth - 1) * 7)
+  return utcDateOnly(date.toISOString())
+}
+
+function lastWeekdayOfMonth(year: number, monthIndex: number, weekday: number) {
+  const date = new Date(Date.UTC(year, monthIndex + 1, 0))
+  const offset = (date.getUTCDay() - weekday + 7) % 7
+  date.setUTCDate(date.getUTCDate() - offset)
+  return utcDateOnly(date.toISOString())
+}
+
+function observedFixedHoliday(year: number, monthIndex: number, day: number) {
+  const date = new Date(Date.UTC(year, monthIndex, day))
+  if (date.getUTCDay() === 6) date.setUTCDate(date.getUTCDate() - 1)
+  if (date.getUTCDay() === 0) date.setUTCDate(date.getUTCDate() + 1)
+  return utcDateOnly(date.toISOString())
+}
+
+function federalHolidaysForYear(year: number) {
+  return [
+    observedFixedHoliday(year, 0, 1),
+    nthWeekdayOfMonth(year, 0, 1, 3),
+    nthWeekdayOfMonth(year, 1, 1, 3),
+    lastWeekdayOfMonth(year, 4, 1),
+    observedFixedHoliday(year, 5, 19),
+    observedFixedHoliday(year, 6, 4),
+    nthWeekdayOfMonth(year, 8, 1, 1),
+    nthWeekdayOfMonth(year, 9, 1, 2),
+    observedFixedHoliday(year, 10, 11),
+    nthWeekdayOfMonth(year, 10, 4, 4),
+    observedFixedHoliday(year, 11, 25),
+  ]
+}
+
 function plusDays(dateIso: string, days: number) {
   const date = new Date(dateIso)
   date.setUTCDate(date.getUTCDate() + days)
@@ -43,6 +80,11 @@ function isWeekend(date: Date) {
 }
 
 function isHoliday(date: Date, holidayCalendarId: string) {
+  if (holidayCalendarId.startsWith('us_federal')) {
+    return federalHolidaysForYear(date.getUTCFullYear()).includes(
+      utcDateOnly(date.toISOString()),
+    )
+  }
   const holidays = holidayCalendars[holidayCalendarId]?.holidays ?? []
   return holidays.includes(utcDateOnly(date.toISOString()))
 }

@@ -3,7 +3,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import type { Doc } from './_generated/dataModel'
 import type { MutationCtx } from './_generated/server'
-import { upsertCurrentUserDoc } from './authHelpers'
+import { requireIdentity } from './authHelpers'
 import {
   courtPacks,
   moduleManifests,
@@ -27,6 +27,20 @@ const countValidator = v.object({
 })
 
 const publishedCourtPackIds = new Set(['us-federal-ca4-civil-appeal'])
+const convexCliSeedTokenIdentifier = 'seed:convex-cli'
+
+async function requireSeedPermission(ctx: MutationCtx) {
+  const identity = await requireIdentity(ctx)
+  const user = await ctx.db
+    .query('users')
+    .withIndex('by_auth_subject', (query) =>
+      query.eq('authSubject', identity.tokenIdentifier),
+    )
+    .unique()
+  if (user?.role === 'admin') return
+  if (identity.tokenIdentifier === convexCliSeedTokenIdentifier) return
+  throw new Error('Admin role required')
+}
 
 function emptyCounts(): SeedCounts {
   return { inserted: 0, updated: 0, deleted: 0 }
@@ -573,7 +587,7 @@ export const all = mutation({
     scenarios: countValidator,
   }),
   handler: async (ctx) => {
-    await upsertCurrentUserDoc(ctx)
+    await requireSeedPermission(ctx)
 
     const seededRulePacks = await upsertRulePacks(ctx)
     const seededRuleItems = await upsertRuleItems(ctx)

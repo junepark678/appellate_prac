@@ -127,6 +127,28 @@ function asActorWorkProductId(id: string): Id<'actorWorkProducts'> {
 const enableLiveAi = import.meta.env.VITE_ENABLE_OPENROUTER === 'true'
 const enableCourtListener = import.meta.env.VITE_ENABLE_COURTLISTENER === 'true'
 const enableDebugActorPanel = import.meta.env.VITE_SHOW_DEBUG_ACTOR_PANEL === 'true'
+const utcDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+})
+const utcDateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+})
+
+function formatDateUtc(value: string) {
+  return utcDateFormatter.format(new Date(value))
+}
+
+function formatDateTimeUtc(value: string) {
+  return utcDateTimeFormatter.format(new Date(value))
+}
 
 function Home() {
   const { isSignedIn } = useUser()
@@ -259,12 +281,13 @@ function Home() {
     if (!activeSession) return
     setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
     setFilingMetadata(createDefaultMetadata(activeSession, 'notice_of_appeal'))
-    if (importedTrialDocket) {
-      setTrialDocket(importedTrialDocket)
-      return
-    }
     setTrialDocket(createTrialDocket(activeSession))
-  }, [activeSession?.id, importedTrialDocket])
+  }, [activeSession?.id])
+
+  useEffect(() => {
+    if (!activeSession) return
+    setTrialDocket(importedTrialDocket ?? createTrialDocket(activeSession))
+  }, [activeSession, importedTrialDocket])
 
   useEffect(() => {
     if (!activeSession || selectedView === activeView) return
@@ -465,12 +488,15 @@ function Home() {
         asCaseSessionId(activeSession.id),
         files,
       )
-      setDraft((current) => ({ ...current, documents }))
+      setDraft((current) => ({ ...current, documents: [...current.documents, ...documents] }))
     } catch (error) {
       setDocumentError(
         error instanceof Error ? error.message : 'PDF analysis failed; using filename signals',
       )
-      setDraft((current) => ({ ...current, documents: inferUploadedDocuments(files) }))
+      setDraft((current) => ({
+        ...current,
+        documents: [...current.documents, ...inferUploadedDocuments(files)],
+      }))
     } finally {
       setDocumentPending(false)
     }
@@ -609,6 +635,7 @@ function Home() {
                       session={activeSession}
                       activeToolCall={activeToolCall}
                       activeActorTask={activeActorTask}
+                      busy={sessionPending}
                       aiError={aiError}
                       aiPending={aiPending}
                       actorError={actorError}
@@ -625,6 +652,7 @@ function Home() {
                   {selectedView === 'file' ? (
                     <EcfWizard
                       draft={draft}
+                      busy={sessionPending}
                       documentError={documentError}
                       documentPending={documentPending}
                       eventAvailability={ecfEventAvailability}
@@ -845,7 +873,7 @@ function SessionToolbar({
       >
         {sessions.map((session) => (
           <option key={session.id} value={session.id}>
-            {session.shortCaption} - {new Date(session.simulatedDate).toLocaleDateString()}
+            {session.shortCaption} - {formatDateUtc(session.simulatedDate)}
           </option>
         ))}
       </select>
@@ -895,7 +923,7 @@ function SessionChooser({
               >
                 <span className="font-semibold">{session.shortCaption}</span>
                 <span className="text-xs text-[#68716c]">
-                  {formatLabel(session.status)} - {new Date(session.simulatedDate).toLocaleDateString()}
+                  {formatLabel(session.status)} - {formatDateUtc(session.simulatedDate)}
                 </span>
               </button>
             ))}
@@ -1112,7 +1140,7 @@ function DeadlinePanel({ session }: { session: CaseSession }) {
             <div>
               <div className="font-medium">{deadline.label}</div>
               <div className="text-xs text-[#68716c]">
-                {new Date(deadline.dueDate).toLocaleDateString()}
+                {formatDateUtc(deadline.dueDate)}
               </div>
             </div>
             <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
@@ -1189,6 +1217,7 @@ function DocketView({
   session,
   activeToolCall,
   activeActorTask,
+  busy,
   aiError,
   aiPending,
   actorError,
@@ -1203,6 +1232,7 @@ function DocketView({
   session: CaseSession
   activeToolCall: ToolCall
   activeActorTask: ActorWorkProductTask | null
+  busy: boolean
   aiError: string
   aiPending: boolean
   actorError: string
@@ -1242,7 +1272,7 @@ function DocketView({
           <div className="grid gap-2 sm:grid-cols-2 lg:w-[560px]">
             <button
               className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173f41] disabled:cursor-not-allowed disabled:bg-[#9aa6a2] sm:col-span-2"
-              disabled={session.status === 'closed' || aiPending}
+              disabled={session.status === 'closed' || busy || aiPending}
               onClick={onAdvanceSimulationTurn}
               type="button"
             >
@@ -1251,7 +1281,7 @@ function DocketView({
             </button>
             <button
               className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-[#1d4d4f] px-4 text-sm font-semibold text-[#1d4d4f] hover:bg-white disabled:cursor-not-allowed disabled:border-[#9aa6a2] disabled:text-[#9aa6a2]"
-              disabled={session.status === 'closed' || aiPending || !liveAiEnabled}
+              disabled={session.status === 'closed' || busy || aiPending || !liveAiEnabled}
               onClick={onAdvanceLive}
               type="button"
             >
@@ -1260,7 +1290,7 @@ function DocketView({
             </button>
             <button
               className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-[#8b3f2f] px-4 text-sm font-semibold text-[#8b3f2f] hover:bg-white disabled:cursor-not-allowed disabled:border-[#b9988f] disabled:text-[#b9988f]"
-              disabled={session.status === 'closed' || aiPending}
+              disabled={session.status === 'closed' || busy || aiPending}
               onClick={onAdvanceExpected}
               type="button"
             >
@@ -1314,7 +1344,7 @@ function DocketView({
             >
               <div className="font-mono text-[#68716c]">{entry.entryNumber}</div>
               <div className="text-[#59625d]">
-                {new Date(entry.filedAt).toLocaleDateString()}
+                {formatDateUtc(entry.filedAt)}
               </div>
               <div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1439,7 +1469,7 @@ function SimulationTurnsTimeline({ session }: { session: CaseSession }) {
             <div>
               <div className="font-mono text-[#68716c]">Turn {turn.turnNumber}</div>
               <div className="mt-1 text-xs text-[#68716c]">
-                {new Date(turn.startedAt).toLocaleDateString()}
+                {formatDateUtc(turn.startedAt)}
               </div>
             </div>
             <div>
@@ -1505,7 +1535,7 @@ function ReceiptView({ session }: { session: CaseSession }) {
               <div>
                 <div className="font-mono font-semibold">{receipt.receiptNumber}</div>
                 <div className="mt-1 text-xs text-[#68716c]">
-                  {new Date(receipt.createdAt).toLocaleString()}
+                  {formatDateTimeUtc(receipt.createdAt)}
                 </div>
                 <div className="mt-2 rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
                   {formatLabel(receipt.eventId ?? 'filing')}
@@ -1793,7 +1823,7 @@ function PartiesView({
                 <div>
                   <div className="font-semibold">{formatLabel(filing.eventId)}</div>
                   <div className="mt-1 text-xs text-[#68716c]">
-                    {new Date(filing.filedAt).toLocaleDateString()}
+                    {formatDateUtc(filing.filedAt)}
                   </div>
                 </div>
                 <p className="leading-6 text-[#59625d]">{filing.notes || filing.title}</p>
@@ -1916,7 +1946,7 @@ function WorkProductCard({
       <div>
         <div className="font-semibold">{formatLabel(product.kind)}</div>
         <div className="mt-1 text-xs text-[#68716c]">
-          {formatLabel(product.actorId)} · {new Date(product.createdAt).toLocaleString()}
+          {formatLabel(product.actorId)} · {formatDateTimeUtc(product.createdAt)}
         </div>
         <div className="mt-2 flex flex-wrap gap-2">
           <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
@@ -2466,7 +2496,7 @@ function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
             >
               <div className="font-mono text-[#68716c]">{entry.entryNumber}</div>
               <div className="text-[#59625d]">
-                {new Date(entry.filedAt).toLocaleDateString()}
+                {formatDateUtc(entry.filedAt)}
               </div>
               <div>
                 <div className="font-semibold">{entry.title}</div>
@@ -2574,7 +2604,11 @@ function TrialDocketResult({
 
 function courtListenerDocketUrl(result: CourtListenerSearchResult) {
   if (result.absolute_url) {
-    return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+    try {
+      return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+    } catch {
+      return null
+    }
   }
 
   if (result.docket_id) {

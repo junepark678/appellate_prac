@@ -67,9 +67,11 @@ export function EventSelector({
               className={`grid w-full gap-2 p-3 text-left text-sm ${
                 selected ? 'bg-[#eef6f3]' : 'hover:bg-[#fbfaf7]'
               } ${enabled ? '' : 'opacity-70'}`}
-              disabled={!enabled}
+              aria-disabled={!enabled}
               key={event.eventId}
-              onClick={() => onSelect(event.eventId)}
+              onClick={() => {
+                if (enabled) onSelect(event.eventId)
+              }}
               type="button"
             >
               <div className="flex flex-wrap items-center gap-2">

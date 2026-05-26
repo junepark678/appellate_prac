@@ -87,6 +87,17 @@ const toolSchema = {
   },
 }
 
+const openRouterTimeoutMs = 30_000
+
+function timeoutSignal(ms: number) {
+  if (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) {
+    return AbortSignal.timeout(ms)
+  }
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), ms)
+  return controller.signal
+}
+
 export async function requestProceduralToolCall(
   session: CaseSession,
   config: OpenRouterConfig,
@@ -99,6 +110,7 @@ export async function requestProceduralToolCall(
       ...(config.appUrl ? { 'HTTP-Referer': config.appUrl } : {}),
       ...(config.appTitle ? { 'X-Title': config.appTitle } : {}),
     },
+    signal: timeoutSignal(openRouterTimeoutMs),
     body: JSON.stringify({
       model: config.model,
       messages: [

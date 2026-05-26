@@ -244,6 +244,75 @@ describe('simulation engine', () => {
     expect(next.filings[0]?.outcome).toBe('accepted')
   })
 
+  it('validates timeliness against the filed date recorded on the docket', () => {
+    const initial = createInitialSession()
+    const noticeDeadline = initial.deadlines.find(
+      (deadline) => deadline.targetEventId === 'notice_of_appeal',
+    )
+    const issues = validateFiling(
+      { ...initial, simulatedDate: noticeDeadline?.dueDate ?? initial.simulatedDate },
+      {
+        ...draft('notice_of_appeal'),
+        documents: [noticePdf],
+      },
+    )
+
+    expect(issues.some((issue) => issue.code === 'notice_of_appeal_after_open_deadline')).toBe(
+      true,
+    )
+  })
+
+  it('creates unique IDs for multiple deadlines from one filing', () => {
+    const session = createInitialSession()
+    const next = fileDraft(session, {
+      ...draft('notice_of_appeal'),
+      documents: [noticePdf],
+    })
+    const deadlineIds = next.deadlines.map((deadline) => deadline.id)
+
+    expect(new Set(deadlineIds).size).toBe(deadlineIds.length)
+  })
+
+  it('satisfies only one matching open deadline for a single filing', () => {
+    const base = createInitialSession()
+    const session = {
+      ...base,
+      deadlines: [
+        ...base.deadlines,
+        {
+          id: 'deadline_motion_response_1',
+          label: 'First response due',
+          dueDate: '2026-06-01T09:00:00.000Z',
+          targetEventId: 'motion_response',
+          sourceEntryId: 'dkt_motion_1',
+          status: 'open' as const,
+          sourceRuleRefs: [],
+        },
+        {
+          id: 'deadline_motion_response_2',
+          label: 'Second response due',
+          dueDate: '2026-06-02T09:00:00.000Z',
+          targetEventId: 'motion_response',
+          sourceEntryId: 'dkt_motion_2',
+          status: 'open' as const,
+          sourceRuleRefs: [],
+        },
+      ],
+    }
+    const next = fileDraft(session, {
+      ...draft('motion_response'),
+      documents: [{ ...pdf, fileName: 'response.pdf', extractedSignals: ['response'] }],
+    })
+    const responseDeadlines = next.deadlines.filter(
+      (deadline) => deadline.targetEventId === 'motion_response',
+    )
+
+    expect(responseDeadlines.map((deadline) => deadline.status)).toEqual([
+      'satisfied',
+      'open',
+    ])
+  })
+
   it('dedupes repeated deadline advancement', () => {
     let session = createInitialSession()
     session = fileDraft(session, {

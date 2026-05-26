@@ -30,6 +30,17 @@ function nextOpenDeadline(session: CaseSession) {
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate))[0]
 }
 
+const utcDateFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  year: 'numeric',
+  month: 'numeric',
+  day: 'numeric',
+})
+
+function formatDateUtc(value: string) {
+  return utcDateFormatter.format(new Date(value))
+}
+
 export function submissionPreview(
   draft: FilingDraft,
   metadata: FilingMetadata,
@@ -81,7 +92,7 @@ export function ReceiptPreview({
             label="Next deadline"
             value={
               nextDeadline
-                ? `${nextDeadline.label} (${new Date(nextDeadline.dueDate).toLocaleDateString()})`
+                ? `${nextDeadline.label} (${formatDateUtc(nextDeadline.dueDate)})`
                 : 'None'
             }
           />
@@ -139,4 +150,3 @@ function InfoBlock({ label, value }: { label: string; value: string }) {
     </div>
   )
 }
-

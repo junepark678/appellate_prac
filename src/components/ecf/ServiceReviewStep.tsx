@@ -30,6 +30,7 @@ function validationTone(issue: ValidationIssue) {
 }
 
 export function ServiceReviewStep({
+  busy,
   draft,
   event,
   metadata,
@@ -39,6 +40,7 @@ export function ServiceReviewStep({
   onMetadataChange,
   onSubmit,
 }: {
+  busy: boolean
   draft: FilingDraft
   event: EcfEventAvailability | null
   metadata: FilingMetadata
@@ -134,7 +136,7 @@ export function ServiceReviewStep({
       <div className="flex justify-end">
         <button
           className="flex h-11 items-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173e40] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
-          disabled={errors.length > 0 || documentPending || Boolean(unavailable)}
+          disabled={busy || errors.length > 0 || documentPending || Boolean(unavailable)}
           onClick={onSubmit}
           type="button"
         >
@@ -145,4 +147,3 @@ export function ServiceReviewStep({
     </section>
   )
 }
-
