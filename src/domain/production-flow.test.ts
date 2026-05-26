@@ -226,6 +226,9 @@ describe('production appellate flow', () => {
     expect(calculateDeadlineDueDate('2026-12-02T12:00:00.000Z', holidayRule!)).toBe(
       '2027-01-04T12:00:00.000Z',
     )
+    expect(calculateDeadlineDueDate('2021-12-01T12:00:00.000Z', holidayRule!)).toBe(
+      '2022-01-03T12:00:00.000Z',
+    )
   })
 
   it('exposes source-backed ECF event availability and catalog metadata', () => {

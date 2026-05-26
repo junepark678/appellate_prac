@@ -80,13 +80,16 @@ function isWeekend(date: Date) {
 }
 
 function isHoliday(date: Date, holidayCalendarId: string) {
+  const dateOnly = utcDateOnly(date.toISOString())
   if (holidayCalendarId.startsWith('us_federal')) {
-    return federalHolidaysForYear(date.getUTCFullYear()).includes(
-      utcDateOnly(date.toISOString()),
+    const year = date.getUTCFullYear()
+    // Observed fixed-date holidays can land in an adjacent calendar year.
+    return [year - 1, year, year + 1].some((holidayYear) =>
+      federalHolidaysForYear(holidayYear).includes(dateOnly),
     )
   }
   const holidays = holidayCalendars[holidayCalendarId]?.holidays ?? []
-  return holidays.includes(utcDateOnly(date.toISOString()))
+  return holidays.includes(dateOnly)
 }
 
 function carryForward(date: Date, holidayCalendarId: string) {
