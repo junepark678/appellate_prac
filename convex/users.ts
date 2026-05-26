@@ -3,6 +3,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { requireCurrentUser, upsertCurrentUserDoc } from './authHelpers'
 import { requireAdmin, writeAuditLog } from './authz'
+import { notFound } from './errors'
 
 const userRoleValidator = v.union(
   v.literal('student'),
@@ -96,7 +97,7 @@ export const setRole = mutation({
     const actor = await requireAdmin(ctx)
     const target = await ctx.db.get(args.userId)
     if (!target) {
-      throw new Error('User not found')
+      throw notFound('User', args.userId)
     }
     await ctx.db.patch(args.userId, { role: args.role })
     await writeAuditLog(ctx, {

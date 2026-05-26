@@ -239,6 +239,7 @@ export function sessionJurisdictionIssues(session: CaseSession): ValidationIssue
 
 export const filingConstraints: FilingConstraint[] = [
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for event existence. ECF workflow in ecf.ts validateEcfWizardCompleteness() duplicates this as "ecf_event_unavailable" and should delegate here.
     id: 'event_exists',
     source: 'simulator',
     ruleRefs: [],
@@ -398,6 +399,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for certificate of service. ECF workflow in ecf.ts marks certificateOfService as required in metadata fields and should delegate here.
     id: 'service_certificate',
     source: 'frap',
     ruleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
@@ -407,6 +409,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for certificate of compliance on briefs. ECF workflow in ecf.ts marks certificateOfCompliance as required in metadata fields and should delegate here.
     id: 'brief_compliance_certificate',
     source: 'frap',
     ruleRefs: [ruleRefs.frap32, ruleRefs.ca4Local32],
@@ -446,6 +449,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for sealed filing redaction acknowledgment. ECF workflow in ecf.ts validateEcfWizardCompleteness() duplicates this as "ecf_privacy_acknowledgment_missing" and should delegate here.
     id: 'sealed_redaction_acknowledgment',
     source: 'ca4-local',
     ruleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
@@ -465,6 +469,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for sealed document type. ECF workflow in ecf.ts validateEcfWizardCompleteness() duplicates this as "ecf_sealed_document_type_missing" and should delegate here.
     id: 'sealed_document_type',
     source: 'ca4-local',
     ruleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
@@ -483,6 +488,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for motion relief metadata. ECF workflow in ecf.ts validateEcfWizardCompleteness() duplicates this as "ecf_motion_relief_missing" and should delegate here.
     id: 'motion_relief_metadata',
     source: 'frap',
     ruleRefs: [ruleRefs.frap27, ruleRefs.ca4Local27],
@@ -501,6 +507,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for related docket entry. ECF workflow in ecf.ts validateEcfWizardCompleteness() duplicates this as "ecf_related_docket_entry_missing" and should delegate here.
     id: 'related_docket_entry',
     source: 'frap',
     ruleRefs: [ruleRefs.frap25, ruleRefs.frap27],
@@ -548,6 +555,10 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // NOTE: This constraint's logic is subsumed by local_rule_45_opening_default (below),
+    // which aggregates all three opening-stage defaults into a single warning.
+    // Consider removing this per-requirement check in a future cleanup pass
+    // if the aggregated check is sufficient.
     id: 'opening_brief_before_appearance',
     source: 'frap',
     ruleRefs: [ruleRefs.frap26_1, ruleRefs.ca4Local26_1],
@@ -566,6 +577,10 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for opening brief docketing-statement ordering.
+    // ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
+    // NOTE: This constraint's logic is subsumed by local_rule_45_opening_default (below).
+    // Consider removing this per-requirement check in a future cleanup pass.
     id: 'opening_brief_before_docketing_statement',
     source: 'ca4-local',
     ruleRefs: [ruleRefs.ca4Local3, ruleRefs.ca4Local45],
@@ -585,6 +600,10 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for opening brief record-readiness ordering.
+    // ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
+    // NOTE: This constraint's logic is subsumed by local_rule_45_opening_default (below).
+    // Consider removing this per-requirement check in a future cleanup pass.
     id: 'opening_brief_before_record_ready',
     source: 'ca4-local',
     ruleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11, ruleRefs.frap16, ruleRefs.frap17],
@@ -612,6 +631,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for reply brief ordering. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'reply_after_appellee_brief',
     source: 'frap',
     ruleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
@@ -630,6 +650,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for appellee brief ordering after opening brief. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'appellee_after_opening_brief',
     source: 'frap',
     ruleRefs: [ruleRefs.frap31, ruleRefs.ca4Local31],
@@ -648,6 +669,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for appellee brief ordering after joint appendix. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'appellee_brief_before_appendix',
     source: 'frap',
     ruleRefs: [ruleRefs.frap30, ruleRefs.frap31, ruleRefs.ca4Local30],
@@ -942,6 +964,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for post-closure event availability. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'post_closure_event',
     source: 'frap',
     ruleRefs: [ruleRefs.frap36, ruleRefs.frap39, ruleRefs.frap40, ruleRefs.frap41],
@@ -970,6 +993,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for rehearing post-judgment availability. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'rehearing_after_judgment',
     source: 'frap',
     ruleRefs: [ruleRefs.frap40, ruleRefs.ca4Local40],
@@ -990,6 +1014,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for bill-of-costs post-judgment availability. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'bill_of_costs_after_judgment',
     source: 'frap',
     ruleRefs: [ruleRefs.frap39, ruleRefs.ca4Local39],
@@ -1010,6 +1035,7 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // SINGLE_SOURCE_OF_TRUTH: This constraint is the authoritative check for mandate-stay-motion post-judgment availability. ECF workflow in ecf.ts availabilityReasons() duplicates this and should delegate here.
     id: 'mandate_stay_after_judgment',
     source: 'frap',
     ruleRefs: [ruleRefs.frap41, ruleRefs.ca4Local41],
@@ -1030,6 +1056,9 @@ export const filingConstraints: FilingConstraint[] = [
     },
   },
   {
+    // NOTE: This is an aggregated superset of opening_brief_before_appearance,
+    // opening_brief_before_docketing_statement, and opening_brief_before_record_ready.
+    // If the per-requirement checks above are removed, this becomes the sole check.
     id: 'local_rule_45_opening_default',
     source: 'ca4-local',
     ruleRefs: [ruleRefs.ca4Local45],

@@ -1,3 +1,4 @@
+// TODO: Import from './errors' once error module is integrated
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
@@ -56,6 +57,7 @@ async function requireAssignmentRole(
 ) {
   const assignment = await ctx.db.get(assignmentId)
   if (!assignment || assignment.archivedAt) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Assignment not found')
   }
   const access = await requireCohortRole(ctx, assignment.cohortId, roles)
@@ -95,12 +97,14 @@ async function requireScenarioForAssignment(
   if (args.scenarioId) {
     const scenario = await ctx.db.get(args.scenarioId)
     if (!scenario || !scenario.published) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Scenario not found')
     }
     return scenario
   }
 
   if (!args.scenarioKey) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Scenario not found')
   }
 
@@ -115,22 +119,26 @@ async function requireScenarioForAssignment(
       await ctx.db.patch(existing._id, seedScenarioDoc(bundled))
       const updated = await ctx.db.get(existing._id)
       if (!updated) {
+        // ERROR_CODE: NOT_FOUND
         throw new Error('Scenario not found')
       }
       return updated
     }
     if (!existing.published) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Scenario not found')
     }
     return existing
   }
 
   if (!bundled) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Scenario not found')
   }
   const scenarioId = await ctx.db.insert('scenarios', seedScenarioDoc(bundled))
   const scenario = await ctx.db.get(scenarioId)
   if (!scenario) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Scenario not found')
   }
   return scenario
@@ -571,6 +579,7 @@ export const startSession = mutation({
       'admin',
     ])
     if (!assignment.published) {
+      // ERROR_CODE: VALIDATION_ERROR
       throw new Error('Assignment is not published')
     }
     const existing = await getAssignmentSession(ctx, assignment._id, user._id)
@@ -579,6 +588,7 @@ export const startSession = mutation({
     }
     const scenario = await ctx.db.get(assignment.scenarioId)
     if (!scenario) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Scenario not found')
     }
     const initialSession = createInitialSession(scenario.scenarioKey)
@@ -641,10 +651,12 @@ export const attachSession = mutation({
       'admin',
     ])
     if (!assignment.published) {
+      // ERROR_CODE: VALIDATION_ERROR
       throw new Error('Assignment is not published')
     }
     const caseSession = await ctx.db.get(args.caseSessionId)
     if (!caseSession || caseSession.userId !== user._id) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Case session not found')
     }
     const existing = await getAssignmentSession(ctx, assignment._id, user._id)
@@ -690,9 +702,11 @@ export const submitSession = mutation({
       (candidate) => candidate.caseSessionId === args.caseSessionId,
     )
     if (!assignmentSession) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Assignment session not found')
     }
     if (isSubmittedLockActive(assignmentSession)) {
+      // ERROR_CODE: SESSION_LOCKED
       throw new Error('Assignment session is already submitted')
     }
     const submittedAt = new Date().toISOString()
@@ -717,7 +731,10 @@ export const reopenSession = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const assignmentSession = await ctx.db.get(args.assignmentSessionId)
-    if (!assignmentSession) throw new Error('Assignment session not found')
+    if (!assignmentSession) {
+      // ERROR_CODE: NOT_FOUND
+      throw new Error('Assignment session not found')
+    }
     const { assignment, user, cohort } = await requireAssignmentRole(
       ctx,
       assignmentSession.assignmentId,

@@ -20,7 +20,18 @@
     "release:cloudflare": "bun run release:check --production && bun run typecheck && bun run test && bun run convex:deploy && DEPLOY_TARGET=cloudflare vite build && wrangler deploy",
     "preview": "vite preview",
     "preview:cloudflare": "DEPLOY_TARGET=cloudflare vite dev --port 3000",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "husky",
+    "lint": "lint-staged",
+    "format": "prettier --write 'src/**/*.{ts,tsx}' 'convex/**/*.ts'"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "bun run typecheck"
+    ],
+    "*.{ts,tsx,js,jsx,json,md}": [
+      "prettier --write"
+    ]
   },
   "dependencies": {
     "@clerk/tanstack-react-start": "^1.3.1",
@@ -49,7 +60,10 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "husky": "^9.0.0",
     "jsdom": "^28.1.0",
+    "lint-staged": "^15.0.0",
+    "prettier": "^3.0.0",
     "nitro": "^3.0.260522-beta",
     "typescript": "^6.0.2",
     "vite": "^8.0.0",

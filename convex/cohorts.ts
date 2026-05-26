@@ -1,3 +1,4 @@
+// TODO: Import from './errors' once error module is integrated
 import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
@@ -9,7 +10,7 @@ import {
   requireAdmin,
   requireCohortRole,
   requireInstitutionRole,
-  simpleHash,
+  toDeterministicId,
   writeAuditLog,
 } from './authz'
 
@@ -103,6 +104,7 @@ export const createInstitution = mutation({
       .withIndex('by_slug', (index) => index.eq('slug', args.slug))
       .unique()
     if (existing) {
+      // ERROR_CODE: CONFLICT
       throw new Error('Institution slug already exists')
     }
 
@@ -314,11 +316,13 @@ export const inviteMembers = mutation({
     )
     const canInviteAdmins = user.role === 'admin' || membership?.role === 'admin'
     if (args.invites.some((invite) => invite.role === 'admin') && !canInviteAdmins) {
+      // ERROR_CODE: AUTH_UNAUTHORIZED_ROLE
       throw new Error('Admin role required to invite institution admins')
     }
     if (args.cohortId) {
       const cohort = await ctx.db.get(args.cohortId)
       if (!cohort || cohort.institutionId !== args.institutionId) {
+        // ERROR_CODE: VALIDATION_ERROR
         throw new Error('Cohort does not belong to institution')
       }
       await requireCohortRole(ctx, args.cohortId, ['instructor', 'admin'])
@@ -336,7 +340,7 @@ export const inviteMembers = mutation({
         ...(args.cohortId ? { cohortId: args.cohortId } : {}),
         email,
         role: invite.role,
-        tokenHash: simpleHash(token),
+        tokenHash: toDeterministicId(token),
         expiresAt,
         createdByUserId: user._id,
         createdAt: new Date().toISOString(),
@@ -368,18 +372,22 @@ export const acceptInvite = mutation({
     const user = await upsertCurrentUserDoc(ctx)
     const invite = await ctx.db
       .query('enrollmentInvites')
-      .withIndex('by_token_hash', (index) => index.eq('tokenHash', simpleHash(args.token)))
+      .withIndex('by_token_hash', (index) => index.eq('tokenHash', toDeterministicId(args.token)))
       .unique()
     if (!invite) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Invite not found')
     }
     if (invite.acceptedAt) {
+      // ERROR_CODE: CONFLICT
       throw new Error('Invite already accepted')
     }
     if (invite.expiresAt <= new Date().toISOString()) {
+      // ERROR_CODE: VALIDATION_ERROR
       throw new Error('Invite expired')
     }
     if (identity.email && normalizeEmail(identity.email) !== invite.email) {
+      // ERROR_CODE: AUTH_REQUIRED
       throw new Error('Invite email does not match signed-in user')
     }
 

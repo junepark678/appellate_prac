@@ -1,13 +1,20 @@
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
+import { notFound, unauthorizedRole } from './errors'
 
 export type ReadCtx = QueryCtx | MutationCtx
 export type CohortRole = Doc<'cohortMemberships'>['role']
 export type InstitutionRole = Doc<'institutionMemberships'>['role']
 export type UserRole = Doc<'users'>['role']
 
-export function simpleHash(value: string) {
+/**
+ * NOT cryptographic — NEVER use for security, authentication, or tokens.
+ * Produces a deterministic short id from a string for non-security lookups only.
+ *
+ * Canonical source: src/domain/auth-pure.ts — keep in sync.
+ */
+export function toDeterministicId(value: string) {
   let hash = 0
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0
@@ -15,6 +22,9 @@ export function simpleHash(value: string) {
   return hash.toString(16).padStart(8, '0')
 }
 
+/**
+ * Canonical source: src/domain/auth-pure.ts — keep in sync.
+ */
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase()
 }
@@ -22,7 +32,7 @@ export function normalizeEmail(value: string) {
 export async function requireGlobalRole(ctx: ReadCtx, roles: UserRole[]) {
   const { user } = await requireCurrentUser(ctx)
   if (!roles.includes(user.role)) {
-    throw new Error(`${roles.join(' or ')} role required`)
+    throw unauthorizedRole(roles)
   }
   return user
 }
@@ -77,7 +87,7 @@ export async function requireInstitutionRole(
     return { user, membership: null }
   }
 
-  throw new Error('Institution permission required')
+  throw unauthorizedRole(['institution'])
 }
 
 export async function requireCohortRole(
@@ -88,7 +98,7 @@ export async function requireCohortRole(
   const { user } = await requireCurrentUser(ctx)
   const cohort = await ctx.db.get(cohortId)
   if (!cohort) {
-    throw new Error('Cohort not found')
+    throw notFound('Cohort', cohortId)
   }
   if (user.role === 'admin') {
     return { user, cohort, membership: null }
@@ -104,7 +114,7 @@ export async function requireCohortRole(
     return { user, cohort, membership }
   }
 
-  throw new Error('Cohort permission required')
+  throw unauthorizedRole(['cohort'])
 }
 
 export async function writeAuditLog(

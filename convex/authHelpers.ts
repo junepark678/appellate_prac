@@ -2,6 +2,7 @@ import type { UserIdentity } from 'convex/server'
 
 import type { Doc } from './_generated/dataModel'
 import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server'
+import { authRequired, providerError, userNotInitialized } from './errors'
 
 type AuthenticatedCtx = Pick<ActionCtx | QueryCtx | MutationCtx, 'auth'>
 
@@ -18,7 +19,7 @@ function displayNameFromIdentity(identity: UserIdentity) {
 export async function requireIdentity(ctx: AuthenticatedCtx) {
   const identity = await ctx.auth.getUserIdentity()
   if (!identity) {
-    throw new Error('Authentication required')
+    throw authRequired()
   }
   return identity
 }
@@ -38,7 +39,7 @@ export async function getCurrentUser(ctx: QueryCtx | MutationCtx) {
 export async function requireCurrentUser(ctx: QueryCtx | MutationCtx) {
   const { identity, user } = await getCurrentUser(ctx)
   if (!user) {
-    throw new Error('User profile is not initialized')
+    throw userNotInitialized()
   }
   return { identity, user }
 }
@@ -69,7 +70,7 @@ export async function upsertCurrentUserDoc(ctx: MutationCtx): Promise<Doc<'users
   })
   const user = await ctx.db.get(userId)
   if (!user) {
-    throw new Error('Unable to initialize user profile')
+    throw providerError('convex', 500)
   }
   return user
 }
