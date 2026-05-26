@@ -3,6 +3,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { scenarioValidator } from './validators'
 import { requireCurrentUser } from './authHelpers'
+import type { Id } from './_generated/dataModel'
 import type { Scenario } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -54,6 +55,34 @@ function scenarioFromDoc(scenario: {
   }
 }
 
+function publishedRecordFromDoc(scenario: {
+  _id: Id<'scenarios'>
+  scenarioKey: string
+  title: string
+  courtPackId: string
+  shortCaption: string
+  proceduralPosture: string
+}) {
+  return {
+    id: scenario._id,
+    scenarioKey: scenario.scenarioKey,
+    title: scenario.title,
+    courtPackId: scenario.courtPackId,
+    shortCaption: scenario.shortCaption,
+    proceduralPosture: scenario.proceduralPosture,
+  }
+}
+
+function publishedRecordFromSeed(scenario: Scenario) {
+  return {
+    scenarioKey: scenario.id,
+    title: scenario.title,
+    courtPackId: scenario.courtPackId,
+    shortCaption: scenario.shortCaption,
+    proceduralPosture: scenario.proceduralPosture,
+  }
+}
+
 export const listPublished = query({
   args: {},
   returns: v.array(scenarioValidator),
@@ -82,7 +111,7 @@ export const listPublishedRecords = query({
   args: {},
   returns: v.array(
     v.object({
-      id: v.id('scenarios'),
+      id: v.optional(v.id('scenarios')),
       scenarioKey: v.string(),
       title: v.string(),
       courtPackId: v.string(),
@@ -95,16 +124,24 @@ export const listPublishedRecords = query({
       .query('scenarios')
       .withIndex('by_published', (index) => index.eq('published', true))
       .collect()
-    return persisted
-      .filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
-      .map((scenario) => ({
-        id: scenario._id,
-        scenarioKey: scenario.scenarioKey,
-        title: scenario.title,
-        courtPackId: scenario.courtPackId,
-        shortCaption: scenario.shortCaption,
-        proceduralPosture: scenario.proceduralPosture,
-      }))
+    const persistedRecords = persisted.filter(
+      (scenario) => scenario.scenarioKey !== 'recap-import-placeholder',
+    )
+    const persistedByKey = new Map(
+      persistedRecords.map((scenario) => [scenario.scenarioKey, scenario]),
+    )
+    const seededKeys = new Set(seedScenarios.map((scenario) => scenario.id))
+    const mergedSeeded = seedScenarios.map((scenario) => {
+      const persistedScenario = persistedByKey.get(scenario.id)
+      return persistedScenario
+        ? publishedRecordFromDoc(persistedScenario)
+        : publishedRecordFromSeed(scenario)
+    })
+    const extraPublished = persistedRecords
+      .filter((scenario) => !seededKeys.has(scenario.scenarioKey))
+      .map(publishedRecordFromDoc)
+
+    return [...mergedSeeded, ...extraPublished]
   },
 })
 

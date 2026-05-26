@@ -123,6 +123,7 @@ export default defineSchema({
     reopenedByUserId: v.optional(v.id('users')),
   })
     .index('by_assignment', ['assignmentId'])
+    .index('by_assignment_user', ['assignmentId', 'userId'])
     .index('by_user', ['userId'])
     .index('by_case', ['caseSessionId']),
 
