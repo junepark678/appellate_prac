@@ -6,6 +6,7 @@ import { addPanelVote, assignPanel, deterministicPanelVote } from '../panel/deli
 import { transitionAfterFiling } from '../procedure/state-machine'
 import { createInitialSession, fileDraft } from '../simulation'
 import { generateActorWorkProductWithProvider } from './orchestration'
+import { validateWorkProductPayload } from './schemas'
 import {
   canAcceptActorWorkProduct,
   generatedFilingToSubmission,
@@ -157,6 +158,35 @@ class FakeProvider implements AiProvider {
 }
 
 describe('actor work products', () => {
+  it('returns false instead of throwing for malformed optional array fields', () => {
+    const malformedMemo = {
+      title: 'Malformed memo',
+      summary: 'Summary',
+      reasoning: [],
+      recommendations: [],
+      citations: [],
+      ruleRefs: [],
+      recordRefs: 'not an array',
+    }
+    const malformedDraft = {
+      eventId: 'appellee_brief',
+      participantRole: 'appellee',
+      title: 'Malformed draft',
+      documentFileName: 'brief.pdf',
+      documentText: 'Brief text',
+      certificateOfService: true,
+      certificateOfCompliance: true,
+      sealed: false,
+      notes: '',
+      citations: [],
+      ruleRefs: [],
+      attachmentTexts: 'not an array',
+    }
+
+    expect(validateWorkProductPayload('bench_memo', malformedMemo)).toBe(false)
+    expect(validateWorkProductPayload('counterparty_filing_draft', malformedDraft)).toBe(false)
+  })
+
   it('validates AI work products by actor role and procedure state', () => {
     const session = createInitialSession()
     const product = actorProduct({

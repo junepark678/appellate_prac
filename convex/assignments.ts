@@ -8,6 +8,14 @@ import { requireCurrentUser } from './authHelpers'
 type ReadCtx = QueryCtx | MutationCtx
 type CohortRole = Doc<'cohortMemberships'>['role']
 
+function scenarioVisibility(doc: Doc<'scenarios'>) {
+  return doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template')
+}
+
+function scenarioRevisionStatus(doc: Doc<'scenarios'>) {
+  return doc.revisionStatus ?? (doc.published ? 'published' : 'draft')
+}
+
 async function requireCohortRole(
   ctx: ReadCtx,
   cohortId: Id<'cohorts'>,
@@ -47,6 +55,20 @@ export const create = mutation({
   returns: v.id('assignments'),
   handler: async (ctx, args) => {
     const { user } = await requireCohortRole(ctx, args.cohortId, ['instructor', 'admin'])
+    const scenario = await ctx.db.get(args.scenarioId)
+    if (!scenario) {
+      throw new Error('Scenario not found')
+    }
+    const visibility = scenarioVisibility(scenario)
+    const revisionStatus = scenarioRevisionStatus(scenario)
+    const canAssignPrivateScenario =
+      visibility === 'private' && (scenario.ownerUserId === user._id || user.role === 'admin')
+    const canAssignPublishedTemplate =
+      visibility === 'public_template' && revisionStatus === 'published' && scenario.published
+    if (!canAssignPrivateScenario && !canAssignPublishedTemplate && user.role !== 'admin') {
+      throw new Error('Scenario is not available for assignment')
+    }
+
     let simulationPolicyId
     if (args.autonomyMode) {
       simulationPolicyId = await ctx.db.insert('simulationPolicies', {
@@ -146,6 +168,21 @@ export const attachSession = mutation({
     if (!caseSession || caseSession.userId !== user._id) {
       throw new Error('Case session not found')
     }
+    if (caseSession.scenarioId !== assignment.scenarioId) {
+      throw new Error('Case session scenario does not match assignment')
+    }
+    const existing = await ctx.db
+      .query('assignmentSessions')
+      .withIndex('by_assignment_case_user', (index) =>
+        index
+          .eq('assignmentId', args.assignmentId)
+          .eq('caseSessionId', args.caseSessionId)
+          .eq('userId', user._id),
+      )
+      .unique()
+    if (existing) {
+      return args.caseSessionId
+    }
     const policy = assignment.simulationPolicyId
       ? await ctx.db.get(assignment.simulationPolicyId)
       : null
@@ -175,14 +212,22 @@ export const submitSession = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const assignmentSession = await ctx.db
+    const assignmentSessions = await ctx.db
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .unique()
-    if (!assignmentSession || assignmentSession.userId !== user._id) {
+      .collect()
+    const ownedAssignmentSessions = assignmentSessions.filter(
+      (assignmentSession) => assignmentSession.userId === user._id,
+    )
+    if (!ownedAssignmentSessions.length) {
       throw new Error('Assignment session not found')
     }
-    await ctx.db.patch(assignmentSession._id, { submittedAt: new Date().toISOString() })
+    const submittedAt = new Date().toISOString()
+    await Promise.all(
+      ownedAssignmentSessions.map((assignmentSession) =>
+        ctx.db.patch(assignmentSession._id, { submittedAt }),
+      ),
+    )
     return null
   },
 })

@@ -1,5 +1,16 @@
 import type { AiProvider, StructuredAiRequest, StructuredAiResult } from '../types'
 
+const openRouterTimeoutMs = 30_000
+
+function timeoutSignal(ms: number) {
+  if (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) {
+    return AbortSignal.timeout(ms)
+  }
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), ms)
+  return controller.signal
+}
+
 export class OpenRouterProvider implements AiProvider {
   id = 'openrouter'
 
@@ -23,6 +34,7 @@ export class OpenRouterProvider implements AiProvider {
         ...(this.config.appUrl ? { 'HTTP-Referer': this.config.appUrl } : {}),
         ...(this.config.appTitle ? { 'X-Title': this.config.appTitle } : {}),
       },
+      signal: timeoutSignal(openRouterTimeoutMs),
       body: JSON.stringify({
         model: request.model ?? this.config.model,
         messages: request.messages,

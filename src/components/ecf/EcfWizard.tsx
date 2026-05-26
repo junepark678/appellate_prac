@@ -47,6 +47,7 @@ function appendixSignalIssue(issue: ValidationIssue) {
 }
 
 export function EcfWizard({
+  busy,
   documentError,
   documentPending,
   draft,
@@ -61,6 +62,7 @@ export function EcfWizard({
   onReset,
   onSubmit,
 }: {
+  busy: boolean
   documentError: string
   documentPending: boolean
   draft: FilingDraft
@@ -167,6 +169,7 @@ export function EcfWizard({
             onMetadataChange={onMetadataChange}
             onSubmit={onSubmit}
             session={session}
+            busy={busy}
             validationIssues={validationIssues}
           />
         ) : null}

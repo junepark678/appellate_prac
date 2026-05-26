@@ -52,6 +52,21 @@ export type CourtListenerAttorney = {
 }
 
 const courtListenerBase = 'https://www.courtlistener.com/api/rest/v4'
+const courtListenerTimeoutMs = 12_000
+const maxCourtListenerPages = 5
+
+function timeoutSignal(ms: number) {
+  if (typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal) {
+    return AbortSignal.timeout(ms)
+  }
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), ms)
+  return controller.signal
+}
+
+function authorizationHeaders(token?: string) {
+  return token ? { Authorization: `Token ${token}` } : undefined
+}
 
 export async function searchCourtListenerDockets(
   query: string,
@@ -63,7 +78,8 @@ export async function searchCourtListenerDockets(
   url.searchParams.set('order_by', 'score desc')
 
   const response = await fetch(url, {
-    headers: token ? { Authorization: `Token ${token}` } : undefined,
+    headers: authorizationHeaders(token),
+    signal: timeoutSignal(courtListenerTimeoutMs),
   })
 
   if (!response.ok) {
@@ -98,22 +114,16 @@ export async function getRecapDocumentsForDocketEntry(
   const url = new URL(`${courtListenerBase}/recap-documents/`)
   url.searchParams.set('docket_entry', String(docketEntryId))
   url.searchParams.set('fields', 'id,description,document_number,is_available,is_sealed,page_count,absolute_url')
-
-  const response = await fetch(url, {
-    headers: token ? { Authorization: `Token ${token}` } : undefined,
-  })
-
-  if (!response.ok) {
-    throw new Error(`RECAP document lookup failed: ${response.status}`)
-  }
-
-  const payload = (await response.json()) as { results?: RecapDocumentSummary[] }
-  return payload.results ?? []
+  return fetchCourtListenerPaginated<RecapDocumentSummary>(
+    `/recap-documents/?${url.searchParams.toString()}`,
+    token,
+  )
 }
 
 async function fetchCourtListener<T>(path: string, token?: string): Promise<T> {
   const response = await fetch(`${courtListenerBase}${path}`, {
-    headers: token ? { Authorization: `Token ${token}` } : undefined,
+    headers: authorizationHeaders(token),
+    signal: timeoutSignal(courtListenerTimeoutMs),
   })
 
   if (!response.ok) {
@@ -121,6 +131,45 @@ async function fetchCourtListener<T>(path: string, token?: string): Promise<T> {
   }
 
   return response.json() as Promise<T>
+}
+
+async function fetchCourtListenerUrl<T>(url: string, token?: string): Promise<T> {
+  const parsed = new URL(url)
+  if (parsed.origin !== new URL(courtListenerBase).origin) {
+    throw new Error('CourtListener pagination returned an unexpected origin')
+  }
+  const response = await fetch(parsed, {
+    headers: authorizationHeaders(token),
+    signal: timeoutSignal(courtListenerTimeoutMs),
+  })
+
+  if (!response.ok) {
+    throw new Error(`CourtListener request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<T>
+}
+
+async function fetchCourtListenerPaginated<T>(
+  path: string,
+  token?: string,
+): Promise<T[]> {
+  const results: T[] = []
+  let nextUrl: string | undefined = `${courtListenerBase}${path}`
+  let pages = 0
+
+  while (nextUrl && pages < maxCourtListenerPages) {
+    const payload: { results?: T[]; next?: string | null } =
+      await fetchCourtListenerUrl<{ results?: T[]; next?: string | null }>(
+        nextUrl,
+        token,
+      )
+    results.push(...(payload.results ?? []))
+    nextUrl = payload.next ?? undefined
+    pages += 1
+  }
+
+  return results
 }
 
 export async function getCourtListenerDocket(
@@ -134,31 +183,25 @@ export async function getCourtListenerDocketEntries(
   docketId: number,
   token?: string,
 ): Promise<CourtListenerDocketEntry[]> {
-  const payload = await fetchCourtListener<{ results?: CourtListenerDocketEntry[] }>(
+  return fetchCourtListenerPaginated<CourtListenerDocketEntry>(
     `/docket-entries/?docket=${docketId}`,
     token,
   )
-  return payload.results ?? []
 }
 
 export async function getCourtListenerParties(
   docketId: number,
   token?: string,
 ): Promise<CourtListenerParty[]> {
-  const payload = await fetchCourtListener<{ results?: CourtListenerParty[] }>(
-    `/parties/?docket=${docketId}`,
-    token,
-  )
-  return payload.results ?? []
+  return fetchCourtListenerPaginated<CourtListenerParty>(`/parties/?docket=${docketId}`, token)
 }
 
 export async function getCourtListenerAttorneys(
   docketId: number,
   token?: string,
 ): Promise<CourtListenerAttorney[]> {
-  const payload = await fetchCourtListener<{ results?: CourtListenerAttorney[] }>(
+  return fetchCourtListenerPaginated<CourtListenerAttorney>(
     `/attorneys/?docket=${docketId}`,
     token,
   )
-  return payload.results ?? []
 }

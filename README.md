@@ -40,8 +40,15 @@ bunx convex run seed:status
 ## Deploy
 
 Both deployment targets use Convex as the source of truth for authenticated beta
-state. Set `CONVEX_DEPLOY_KEY` in the host environment so release scripts can run
-`convex deploy` before the web build.
+state. Deploy Convex from an explicit release job with:
+
+```bash
+bun run deploy:backend
+```
+
+Keep `CONVEX_DEPLOY_KEY` in the backend release environment rather than web-host
+preview builds. Production release checks also require `SIMULATION_EVAL_SNAPSHOT_JSON`
+with the latest simulation-eval result.
 
 ### Vercel
 

@@ -29,10 +29,16 @@ export async function analyzeUploadAndPersistDocuments(
   caseSessionId: Id<'caseSessions'>,
   files: FileList | null,
 ): Promise<UploadedDocument[]> {
-  return Promise.all(
-    Array.from(files ?? []).map((file) =>
+  const selectedFiles = Array.from(files ?? [])
+  const results = await Promise.allSettled(
+    selectedFiles.map((file) =>
       analyzeUploadAndPersistDocument(workflow, caseSessionId, file),
     ),
+  )
+  return results.map((result, index) =>
+    result.status === 'fulfilled'
+      ? result.value
+      : inferDocumentSignals(selectedFiles[index] as File),
   )
 }
 

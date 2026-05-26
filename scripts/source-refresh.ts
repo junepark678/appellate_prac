@@ -7,22 +7,58 @@ function sha256(value: string) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`
 }
 
+const maxSourceBytes = 5 * 1024 * 1024
+const sourceFetchTimeoutMs = 15_000
+
 const refreshed = []
 
 for (const source of ca4CourtSourceVersions) {
-  const response = await fetch(source.sourceUrl)
-  const rawText = await response.text()
-  const contentHash = sha256(normalizeSourceText(rawText))
-  refreshed.push({
-    sourceVersionId: source.sourceVersionId,
-    label: source.label,
-    sourceUrl: source.sourceUrl,
-    status: response.status,
-    fetchedHash: contentHash,
-    bundledHash: source.contentHash,
-    changed: contentHash !== source.contentHash,
-    bytes: rawText.length,
-  })
+  try {
+    const response = await fetch(source.sourceUrl, {
+      signal: AbortSignal.timeout(sourceFetchTimeoutMs),
+    })
+    const contentLength = Number(response.headers.get('content-length') ?? '0')
+    if (!response.ok || contentLength > maxSourceBytes) {
+      refreshed.push({
+        sourceVersionId: source.sourceVersionId,
+        label: source.label,
+        sourceUrl: source.sourceUrl,
+        status: response.status,
+        error: contentLength > maxSourceBytes ? 'response too large' : response.statusText,
+      })
+      continue
+    }
+    const rawText = await response.text()
+    if (rawText.length > maxSourceBytes) {
+      refreshed.push({
+        sourceVersionId: source.sourceVersionId,
+        label: source.label,
+        sourceUrl: source.sourceUrl,
+        status: response.status,
+        error: 'response too large',
+      })
+      continue
+    }
+    const contentHash = sha256(normalizeSourceText(rawText))
+    refreshed.push({
+      sourceVersionId: source.sourceVersionId,
+      label: source.label,
+      sourceUrl: source.sourceUrl,
+      status: response.status,
+      fetchedHash: contentHash,
+      bundledHash: source.contentHash,
+      changed: contentHash !== source.contentHash,
+      bytes: rawText.length,
+    })
+  } catch (error) {
+    refreshed.push({
+      sourceVersionId: source.sourceVersionId,
+      label: source.label,
+      sourceUrl: source.sourceUrl,
+      status: 0,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }
 
 console.log(JSON.stringify(refreshed, null, 2))

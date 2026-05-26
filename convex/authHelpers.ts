@@ -43,6 +43,14 @@ export async function requireCurrentUser(ctx: QueryCtx | MutationCtx) {
   return { identity, user }
 }
 
+export async function requireAdminUser(ctx: QueryCtx | MutationCtx) {
+  const result = await requireCurrentUser(ctx)
+  if (result.user.role !== 'admin') {
+    throw new Error('Admin role required')
+  }
+  return result
+}
+
 export async function upsertCurrentUserDoc(ctx: MutationCtx): Promise<Doc<'users'>> {
   const identity = await requireIdentity(ctx)
   const existing = await ctx.db

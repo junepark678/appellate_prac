@@ -98,6 +98,68 @@ export const recordIntegrationEventForCurrentUser = internalMutation({
   },
 })
 
+export const reserveIntegrationEventForCurrentUser = internalMutation({
+  args: {
+    provider: providerValidator,
+    action: v.string(),
+    cooldownMs: v.number(),
+    nowIso: v.string(),
+  },
+  returns: v.object({
+    allowed: v.boolean(),
+    retryAfterMs: v.optional(v.number()),
+    eventId: v.optional(v.id('integrationEvents')),
+  }),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const events = await ctx.db
+      .query('integrationEvents')
+      .withIndex('by_user_provider', (index) =>
+        index.eq('userId', user._id).eq('provider', args.provider),
+      )
+      .collect()
+    const latest = events.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    if (latest) {
+      const elapsedMs =
+        new Date(args.nowIso).getTime() - new Date(latest.createdAt).getTime()
+      if (elapsedMs < args.cooldownMs) {
+        return { allowed: false, retryAfterMs: args.cooldownMs - elapsedMs }
+      }
+    }
+
+    const eventId = await ctx.db.insert('integrationEvents', {
+      userId: user._id,
+      provider: args.provider,
+      action: args.action,
+      accepted: false,
+      errorClass: 'in_flight',
+      createdAt: args.nowIso,
+    })
+    return { allowed: true, eventId }
+  },
+})
+
+export const finalizeIntegrationEventForCurrentUser = internalMutation({
+  args: {
+    eventId: v.id('integrationEvents'),
+    accepted: v.boolean(),
+    errorClass: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const event = await ctx.db.get(args.eventId)
+    if (!event || event.userId !== user._id) {
+      throw new Error('Integration event reservation not found.')
+    }
+    await ctx.db.patch(args.eventId, {
+      accepted: args.accepted,
+      errorClass: args.errorClass,
+    })
+    return null
+  },
+})
+
 export const requestLiveProceduralToolCall = action({
   args: {
     caseSessionId: v.id('caseSessions'),
@@ -121,38 +183,34 @@ export const searchLiveCourtListenerDockets = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const cooldown = await ctx.runQuery(
-      internal.integrations.getIntegrationCooldownForCurrentUser,
+    const query = args.query.trim()
+    if (!query) return []
+    const reservation = await ctx.runMutation(
+      internal.integrations.reserveIntegrationEventForCurrentUser,
       {
         provider: 'courtlistener',
+        action: 'searchLiveCourtListenerDockets',
         cooldownMs: courtListenerCooldownMs,
         nowIso,
       },
     )
-    if (!cooldown.allowed) {
+    if (!reservation.allowed || !reservation.eventId) {
       throw new Error('CourtListener cooldown is still active.')
     }
 
-    const query = args.query.trim()
-    if (!query) return []
-
     try {
       const results = await searchCourtListenerDockets(query, requireEnv('COURTLISTENER_TOKEN'))
-      await ctx.runMutation(internal.integrations.recordIntegrationEventForCurrentUser, {
-        provider: 'courtlistener',
-        action: 'searchLiveCourtListenerDockets',
+      await ctx.runMutation(internal.integrations.finalizeIntegrationEventForCurrentUser, {
+        eventId: reservation.eventId,
         accepted: true,
-        createdAt: new Date().toISOString(),
       })
       return results
     } catch (error) {
       console.error('CourtListener integration action failed', { error: errorMessage(error) })
-      await ctx.runMutation(internal.integrations.recordIntegrationEventForCurrentUser, {
-        provider: 'courtlistener',
-        action: 'searchLiveCourtListenerDockets',
+      await ctx.runMutation(internal.integrations.finalizeIntegrationEventForCurrentUser, {
+        eventId: reservation.eventId,
         accepted: false,
         errorClass: 'provider_error',
-        createdAt: new Date().toISOString(),
       })
       throw error
     }

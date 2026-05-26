@@ -35,6 +35,7 @@ import type {
   FilingEvent,
   FilingDraft,
   FilingRecord,
+  FilingSubmission,
   Scenario,
   ParticipantRole,
   Participant,
@@ -57,6 +58,10 @@ function addDays(dateIso: string, days: number) {
   const date = new Date(dateIso)
   date.setUTCDate(date.getUTCDate() + days)
   return date.toISOString()
+}
+
+export function filingDateForSession(session: CaseSession) {
+  return addDays(session.simulatedDate, 1)
 }
 
 function inferredDeadlineTrigger(targetEventId: string) {
@@ -102,6 +107,7 @@ function createDeadline(
   offsetDays: number,
   sourceRuleRefs: RuleRef[],
   triggerEventId = inferredDeadlineTrigger(targetEventId),
+  idSequence = session.deadlines.length,
 ): Deadline {
   const sourceBackedRule = triggerEventId
     ? deadlineRuleForTrigger(triggerEventId, targetEventId)
@@ -111,7 +117,7 @@ function createDeadline(
     sourceBackedRule.offset === offsetDays &&
     sourceBackedRule.unit === 'calendar_day'
   return {
-    id: makeId('deadline', session.deadlines.length),
+    id: makeId('deadline', idSequence),
     label,
     dueDate: useSourceBackedRule
       ? calculateDeadlineDueDate(session.simulatedDate, sourceBackedRule)
@@ -610,6 +616,7 @@ function draftToSubmission(draft: FilingDraft) {
 export function validateFiling(
   session: CaseSession,
   draft: FilingDraft,
+  filedAt = filingDateForSession(session),
 ): ValidationIssue[] {
   const submission = draftToSubmission(draft)
   if (!submission) {
@@ -627,15 +634,43 @@ export function validateFiling(
     ]
   }
 
-  return preflightFilingSubmission(session, submission, session.simulatedDate).issues
+  return preflightFilingSubmission(session, submission, filedAt).issues
 }
 
-export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession {
+type FileDraftOptions = {
+  filedAt?: string
+  validationIssues?: ValidationIssue[]
+  submission?: FilingSubmission
+}
+
+function deadlineIdsSatisfiedByFiling(
+  session: CaseSession,
+  draft: FilingDraft,
+  submission?: FilingSubmission,
+) {
+  const openDeadlines = session.deadlines
+    .filter((deadline) => deadline.targetEventId === draft.eventId && deadline.status === 'open')
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+  const relatedEntryId = submission?.metadata.relatedDocketEntryId
+  if (relatedEntryId) {
+    const relatedDeadline = openDeadlines.find(
+      (deadline) => deadline.sourceEntryId === relatedEntryId,
+    )
+    if (relatedDeadline) return new Set([relatedDeadline.id])
+  }
+  return new Set(openDeadlines[0] ? [openDeadlines[0].id] : [])
+}
+
+export function fileDraft(
+  session: CaseSession,
+  draft: FilingDraft,
+  options: FileDraftOptions = {},
+): CaseSession {
   const event = getFilingEvent(session.courtPackId, draft.eventId)
-  const validationIssues = validateFiling(session, draft)
+  const filedAt = options.filedAt ?? filingDateForSession(session)
+  const validationIssues = options.validationIssues ?? validateFiling(session, draft, filedAt)
   const hasErrors = validationIssues.some((issue) => issue.severity === 'error')
   const hasWarnings = validationIssues.some((issue) => issue.severity === 'warning')
-  const filedAt = addDays(session.simulatedDate, 1)
   const filingId = makeId('filing', session.filings.length)
   const filing: FilingRecord = {
     ...draft,
@@ -647,6 +682,7 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
         ? 'accepted_with_deficiency'
         : 'accepted',
     validationIssues,
+    ...(options.submission ? { submissionJson: JSON.stringify(options.submission) } : {}),
   }
 
   if (hasErrors) {
@@ -678,20 +714,21 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
     ruleRefs: event?.validationRuleRefs ?? [],
   })
 
+  const satisfiedDeadlineIds = deadlineIdsSatisfiedByFiling(session, draft, options.submission)
   const updatedSession: CaseSession = {
     ...session,
     simulatedDate: filedAt,
     filings: [...session.filings, filing],
     docketEntries: [...session.docketEntries, filingEntry],
     deadlines: session.deadlines.map((deadline) =>
-      deadline.targetEventId === draft.eventId
+      satisfiedDeadlineIds.has(deadline.id)
         ? { ...deadline, status: 'satisfied' }
         : deadline,
     ),
   }
 
   const newDeadlines =
-    event?.deadlineEffects.map((effect) =>
+    event?.deadlineEffects.map((effect, index) =>
       createDeadline(
         updatedSession,
         effect.label,
@@ -700,6 +737,7 @@ export function fileDraft(session: CaseSession, draft: FilingDraft): CaseSession
         effect.offsetDays,
         effect.sourceRuleRefs,
         draft.eventId,
+        updatedSession.deadlines.length + index,
       ),
     ) ?? []
   const updatedSessionWithDeadlines = {
