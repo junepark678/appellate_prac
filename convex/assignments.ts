@@ -576,31 +576,35 @@ export const submitSession = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const assignmentSession = await ctx.db
+    const assignmentSessions = await ctx.db
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .unique()
-    if (!assignmentSession || assignmentSession.userId !== user._id) {
+      .collect()
+    const matchingSessions = assignmentSessions.filter((assignmentSession) => assignmentSession.userId === user._id)
+    if (!matchingSessions.length) {
       throw new Error('Assignment session not found')
     }
-    if (isSubmittedLockActive(assignmentSession)) {
+    if (matchingSessions.every((assignmentSession) => isSubmittedLockActive(assignmentSession))) {
       throw new Error('Assignment session is already submitted')
     }
-    const assignment = await ctx.db.get(assignmentSession.assignmentId)
-    if (!assignment) {
-      throw new Error('Assignment not found')
+    const submittedAt = new Date().toISOString()
+    for (const assignmentSession of matchingSessions) {
+      const assignment = await ctx.db.get(assignmentSession.assignmentId)
+      if (!assignment) {
+        throw new Error('Assignment not found')
+      }
+      const cohort = await ctx.db.get(assignment.cohortId)
+      await ctx.db.patch(assignmentSession._id, { submittedAt })
+      await writeAuditLog(ctx, {
+        actorUserId: user._id,
+        ...(cohort ? { institutionId: cohort.institutionId } : {}),
+        cohortId: assignment.cohortId,
+        caseSessionId: args.caseSessionId,
+        action: 'assignment_session.submitted',
+        targetTable: 'assignmentSessions',
+        targetId: assignmentSession._id,
+      })
     }
-    const cohort = await ctx.db.get(assignment.cohortId)
-    await ctx.db.patch(assignmentSession._id, { submittedAt: new Date().toISOString() })
-    await writeAuditLog(ctx, {
-      actorUserId: user._id,
-      ...(cohort ? { institutionId: cohort.institutionId } : {}),
-      cohortId: assignment.cohortId,
-      caseSessionId: args.caseSessionId,
-      action: 'assignment_session.submitted',
-      targetTable: 'assignmentSessions',
-      targetId: assignmentSession._id,
-    })
     return null
   },
 })

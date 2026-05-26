@@ -296,15 +296,17 @@ async function requireAuthorizedSessionDoc(
 }
 
 async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseSessions'>) {
-  const assignmentSession = await ctx.db
+  const assignmentSessions = await ctx.db
     .query('assignmentSessions')
     .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .unique()
-  if (
-    assignmentSession?.submittedAt &&
-    (!assignmentSession.reopenedAt ||
-      assignmentSession.reopenedAt <= assignmentSession.submittedAt)
-  ) {
+    .collect()
+  const isLocked = assignmentSessions.some(
+    (assignmentSession) =>
+      assignmentSession.submittedAt &&
+      (!assignmentSession.reopenedAt ||
+        assignmentSession.reopenedAt <= assignmentSession.submittedAt),
+  )
+  if (isLocked) {
     throw new Error('Submitted assignment sessions are locked until reopened by an instructor')
   }
 }
