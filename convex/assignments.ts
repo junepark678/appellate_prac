@@ -73,6 +73,17 @@ function statusForAssignmentSession(session: Doc<'assignmentSessions'> | null) {
   return 'in_progress' as const
 }
 
+function canViewUnpublishedAssignment(
+  user: Doc<'users'>,
+  membership: Doc<'cohortMemberships'> | null,
+) {
+  return (
+    user.role === 'admin' ||
+    membership?.role === 'instructor' ||
+    membership?.role === 'admin'
+  )
+}
+
 async function insertInitialSessionState(
   ctx: MutationCtx,
   caseSessionId: Id<'caseSessions'>,
@@ -445,12 +456,12 @@ export const get = query({
     v.null(),
   ),
   handler: async (ctx, args) => {
-    const { assignment, user } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'learner',
-      'instructor',
-      'admin',
-    ])
-    if (!assignment.published && user.role === 'student') return null
+    const { assignment, user, membership } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ['learner', 'instructor', 'admin'],
+    )
+    if (!assignment.published && !canViewUnpublishedAssignment(user, membership)) return null
     const scenario = await ctx.db.get(assignment.scenarioId)
     const session = await getAssignmentSession(ctx, assignment._id, user._id)
     return {

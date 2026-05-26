@@ -21,18 +21,28 @@ const institutionRoleValidator = v.union(
 
 const cohortRoleValidator = institutionRoleValidator
 
-async function upsertInstitutionMembership(
+type InstitutionRole = 'learner' | 'instructor' | 'admin'
+
+async function findInstitutionMembership(
   ctx: MutationCtx,
   institutionId: Id<'institutions'>,
   userId: Id<'users'>,
-  role: 'learner' | 'instructor' | 'admin',
 ) {
-  const existing = await ctx.db
+  return ctx.db
     .query('institutionMemberships')
     .withIndex('by_institution_user', (index) =>
       index.eq('institutionId', institutionId).eq('userId', userId),
     )
     .unique()
+}
+
+async function upsertInstitutionMembership(
+  ctx: MutationCtx,
+  institutionId: Id<'institutions'>,
+  userId: Id<'users'>,
+  role: InstitutionRole,
+) {
+  const existing = await findInstitutionMembership(ctx, institutionId, userId)
   if (existing) {
     await ctx.db.patch(existing._id, { role, status: 'active' })
     return existing._id
@@ -41,6 +51,22 @@ async function upsertInstitutionMembership(
     institutionId,
     userId,
     role,
+    status: 'active',
+    createdAt: new Date().toISOString(),
+  })
+}
+
+async function insertInstitutionLearnerMembershipIfMissing(
+  ctx: MutationCtx,
+  institutionId: Id<'institutions'>,
+  userId: Id<'users'>,
+) {
+  const existing = await findInstitutionMembership(ctx, institutionId, userId)
+  if (existing) return existing._id
+  return ctx.db.insert('institutionMemberships', {
+    institutionId,
+    userId,
+    role: 'learner',
     status: 'active',
     createdAt: new Date().toISOString(),
   })
@@ -226,7 +252,11 @@ export const addMember = mutation({
         role: args.role,
       })
     }
-    await upsertInstitutionMembership(ctx, cohort.institutionId, args.userId, args.role)
+    await insertInstitutionLearnerMembershipIfMissing(
+      ctx,
+      cohort.institutionId,
+      args.userId,
+    )
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
@@ -260,10 +290,15 @@ export const inviteMembers = mutation({
     }),
   ),
   handler: async (ctx, args) => {
-    const { user } = await requireInstitutionRole(ctx, args.institutionId, [
-      'instructor',
-      'admin',
-    ])
+    const { user, membership } = await requireInstitutionRole(
+      ctx,
+      args.institutionId,
+      ['instructor', 'admin'],
+    )
+    const canInviteAdmins = user.role === 'admin' || membership?.role === 'admin'
+    if (args.invites.some((invite) => invite.role === 'admin') && !canInviteAdmins) {
+      throw new Error('Admin role required to invite institution admins')
+    }
     if (args.cohortId) {
       const cohort = await ctx.db.get(args.cohortId)
       if (!cohort || cohort.institutionId !== args.institutionId) {
