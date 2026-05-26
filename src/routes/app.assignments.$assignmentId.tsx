@@ -71,7 +71,10 @@ function AssignmentDetail() {
                 className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={() =>
                   assignment.caseSessionId
-                    ? void submitSession({ caseSessionId: assignment.caseSessionId })
+                    ? void submitSession({
+                        assignmentId: assignment.id as Id<'assignments'>,
+                        caseSessionId: assignment.caseSessionId,
+                      })
                     : undefined
                 }
               >

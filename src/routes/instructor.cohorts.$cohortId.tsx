@@ -21,8 +21,9 @@ function CohortDetail() {
   const inviteMembers = useMutation(api.cohorts.inviteMembers)
   const cohorts = useQuery(api.cohorts.listMine, {})
   const cohort = cohorts?.find((candidate) => candidate.id === cohortId)
+  const activeAssignments = assignments?.filter((assignment) => !assignment.archivedAt)
   const [title, setTitle] = useState('')
-  const [scenarioId, setScenarioId] = useState('')
+  const [scenarioKey, setScenarioKey] = useState('')
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteToken, setInviteToken] = useState('')
 
@@ -40,24 +41,24 @@ function CohortDetail() {
             />
             <select
               className="rounded border border-slate-300 px-3 py-2"
-              value={scenarioId}
-              onChange={(event) => setScenarioId(event.target.value)}
+              value={scenarioKey}
+              onChange={(event) => setScenarioKey(event.target.value)}
               aria-label="Scenario"
             >
               <option value="">Scenario</option>
               {scenarios?.map((scenario) => (
-                <option key={scenario.id} value={scenario.id}>
+                <option key={scenario.scenarioKey} value={scenario.scenarioKey}>
                   {scenario.title}
                 </option>
               ))}
             </select>
             <button
               className="inline-flex items-center justify-center gap-2 rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-              disabled={!title || !scenarioId}
+              disabled={!title || !scenarioKey}
               onClick={() =>
                 void createAssignment({
                   cohortId: cohortId as Id<'cohorts'>,
-                  scenarioId: scenarioId as Id<'scenarios'>,
+                  scenarioKey,
                   title,
                   published: false,
                   autonomyMode: 'paused',
@@ -102,8 +103,8 @@ function CohortDetail() {
         </div>
       </section>
       <div className="grid gap-3">
-        {assignments?.length === 0 ? <EmptyState>No assignments yet.</EmptyState> : null}
-        {assignments?.map((assignment) => (
+        {activeAssignments?.length === 0 ? <EmptyState>No assignments yet.</EmptyState> : null}
+        {activeAssignments?.map((assignment) => (
           <Link
             key={assignment.id}
             to="/instructor/assignments/$assignmentId"

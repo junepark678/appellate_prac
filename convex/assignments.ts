@@ -7,6 +7,8 @@ import { requireCurrentUser } from './authHelpers'
 import { requireCohortRole, writeAuditLog } from './authz'
 import { createInitialSession } from '../src/domain/simulation'
 import { inferProcedureState } from '../src/domain/procedure/state-machine'
+import type { Scenario } from '../src/domain/types'
+import scenarioSeed from '../src/domain/scenarios.seed.json'
 
 type ReadCtx = QueryCtx | MutationCtx
 type CohortRole = Doc<'cohortMemberships'>['role']
@@ -31,6 +33,33 @@ const assignmentStatusValidator = v.union(
   v.literal('submitted'),
   v.literal('reviewed'),
 )
+const seedScenarios = scenarioSeed as Scenario[]
+
+function seedScenarioDoc(scenario: Scenario) {
+  return {
+    scenarioKey: scenario.id,
+    title: scenario.title,
+    source: scenario.source,
+    courtPackId: scenario.courtPackId,
+    shortCaption: scenario.shortCaption,
+    lowerTribunal: scenario.lowerTribunal,
+    natureOfSuit: scenario.natureOfSuit,
+    proceduralPosture: scenario.proceduralPosture,
+    issuesPresented: scenario.issuesPresented,
+    meritsRecord: scenario.meritsRecord,
+    ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
+    ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
+    ...(scenario.documentAssets
+      ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
+      : {}),
+    ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
+    visibility: 'public_template' as const,
+    scenarioFamilyKey: scenario.id,
+    revision: 1,
+    revisionStatus: 'published' as const,
+    published: true,
+  }
+}
 
 async function requireAssignmentRole(
   ctx: ReadCtx,
@@ -50,11 +79,70 @@ async function getAssignmentSession(
   assignmentId: Id<'assignments'>,
   userId: Id<'users'>,
 ) {
+  const sessions = await listAssignmentSessionsForUser(ctx, assignmentId, userId)
+  return sessions[0] ?? null
+}
+
+async function listAssignmentSessionsForUser(
+  ctx: ReadCtx,
+  assignmentId: Id<'assignments'>,
+  userId: Id<'users'>,
+) {
   const sessions = await ctx.db
     .query('assignmentSessions')
-    .withIndex('by_assignment', (index) => index.eq('assignmentId', assignmentId))
+    .withIndex('by_assignment_user', (index) =>
+      index.eq('assignmentId', assignmentId).eq('userId', userId),
+    )
     .collect()
-  return sessions.find((session) => session.userId === userId) ?? null
+  return sessions.sort((a, b) => a._creationTime - b._creationTime)
+}
+
+async function requireScenarioForAssignment(
+  ctx: MutationCtx,
+  args: {
+    scenarioId?: Id<'scenarios'>
+    scenarioKey?: string
+  },
+) {
+  if (args.scenarioId) {
+    const scenario = await ctx.db.get(args.scenarioId)
+    if (!scenario) {
+      throw new Error('Scenario not found')
+    }
+    return scenario
+  }
+
+  if (!args.scenarioKey) {
+    throw new Error('Scenario not found')
+  }
+
+  const scenarioKey = args.scenarioKey
+  const existing = await ctx.db
+    .query('scenarios')
+    .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+    .unique()
+  const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
+  if (existing) {
+    if (bundled) {
+      await ctx.db.patch(existing._id, seedScenarioDoc(bundled))
+      const updated = await ctx.db.get(existing._id)
+      if (!updated) {
+        throw new Error('Scenario not found')
+      }
+      return updated
+    }
+    return existing
+  }
+
+  if (!bundled) {
+    throw new Error('Scenario not found')
+  }
+  const scenarioId = await ctx.db.insert('scenarios', seedScenarioDoc(bundled))
+  const scenario = await ctx.db.get(scenarioId)
+  if (!scenario) {
+    throw new Error('Scenario not found')
+  }
+  return scenario
 }
 
 function isSubmittedLockActive(
@@ -143,7 +231,8 @@ async function insertInitialSessionState(
 export const create = mutation({
   args: {
     cohortId: v.id('cohorts'),
-    scenarioId: v.id('scenarios'),
+    scenarioId: v.optional(v.id('scenarios')),
+    scenarioKey: v.optional(v.string()),
     title: v.string(),
     dueAt: v.optional(v.string()),
     rubricId: v.optional(v.string()),
@@ -163,10 +252,7 @@ export const create = mutation({
       'instructor',
       'admin',
     ])
-    const scenario = await ctx.db.get(args.scenarioId)
-    if (!scenario) {
-      throw new Error('Scenario not found')
-    }
+    const scenario = await requireScenarioForAssignment(ctx, args)
     const visibility = scenarioVisibility(scenario)
     const revisionStatus = scenarioRevisionStatus(scenario)
     const canAssignPrivateScenario =
@@ -198,7 +284,7 @@ export const create = mutation({
     const now = new Date().toISOString()
     const assignmentId = await ctx.db.insert('assignments', {
       cohortId: args.cohortId,
-      scenarioId: args.scenarioId,
+      scenarioId: scenario._id,
       title: args.title,
       ...(args.dueAt ? { dueAt: args.dueAt } : {}),
       ...(args.rubricId ? { rubricId: args.rubricId } : {}),
@@ -620,42 +706,41 @@ export const attachSession = mutation({
 
 export const submitSession = mutation({
   args: {
+    assignmentId: v.id('assignments'),
     caseSessionId: v.id('caseSessions'),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
-    const assignmentSessions = await ctx.db
-      .query('assignmentSessions')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .collect()
-    const matchingSessions = assignmentSessions.filter(
-      (assignmentSession) => assignmentSession.userId === user._id,
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ['learner', 'instructor', 'admin'],
     )
-    if (!matchingSessions.length) {
+    const assignmentSessions = await listAssignmentSessionsForUser(
+      ctx,
+      assignment._id,
+      user._id,
+    )
+    const assignmentSession = assignmentSessions.find(
+      (candidate) => candidate.caseSessionId === args.caseSessionId,
+    )
+    if (!assignmentSession) {
       throw new Error('Assignment session not found')
     }
-    if (matchingSessions.every((assignmentSession) => isSubmittedLockActive(assignmentSession))) {
+    if (isSubmittedLockActive(assignmentSession)) {
       throw new Error('Assignment session is already submitted')
     }
     const submittedAt = new Date().toISOString()
-    for (const assignmentSession of matchingSessions) {
-      const assignment = await ctx.db.get(assignmentSession.assignmentId)
-      if (!assignment) {
-        throw new Error('Assignment not found')
-      }
-      const cohort = await ctx.db.get(assignment.cohortId)
-      await ctx.db.patch(assignmentSession._id, { submittedAt })
-      await writeAuditLog(ctx, {
-        actorUserId: user._id,
-        ...(cohort ? { institutionId: cohort.institutionId } : {}),
-        cohortId: assignment.cohortId,
-        caseSessionId: args.caseSessionId,
-        action: 'assignment_session.submitted',
-        targetTable: 'assignmentSessions',
-        targetId: assignmentSession._id,
-      })
-    }
+    await ctx.db.patch(assignmentSession._id, { submittedAt })
+    await writeAuditLog(ctx, {
+      actorUserId: user._id,
+      institutionId: cohort.institutionId,
+      cohortId: assignment.cohortId,
+      caseSessionId: args.caseSessionId,
+      action: 'assignment_session.submitted',
+      targetTable: 'assignmentSessions',
+      targetId: assignmentSession._id,
+    })
     return null
   },
 })

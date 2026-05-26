@@ -23,6 +23,16 @@ const cohortRoleValidator = institutionRoleValidator
 
 type InstitutionRole = 'learner' | 'instructor' | 'admin'
 
+const roleRank: Record<InstitutionRole, number> = {
+  learner: 0,
+  instructor: 1,
+  admin: 2,
+}
+
+function higherRole(current: InstitutionRole, next: InstitutionRole) {
+  return roleRank[current] >= roleRank[next] ? current : next
+}
+
 async function findInstitutionMembership(
   ctx: MutationCtx,
   institutionId: Id<'institutions'>,
@@ -41,19 +51,26 @@ async function upsertInstitutionMembership(
   institutionId: Id<'institutions'>,
   userId: Id<'users'>,
   role: InstitutionRole,
+  options: { preserveHigherRole?: boolean } = {},
 ) {
   const existing = await findInstitutionMembership(ctx, institutionId, userId)
   if (existing) {
-    await ctx.db.patch(existing._id, { role, status: 'active' })
-    return existing._id
+    const nextRole = options.preserveHigherRole ? higherRole(existing.role, role) : role
+    await ctx.db.patch(existing._id, {
+      role: nextRole,
+      status: 'active',
+      expiresAt: undefined,
+    })
+    return { id: existing._id, role: nextRole }
   }
-  return ctx.db.insert('institutionMemberships', {
+  const id = await ctx.db.insert('institutionMemberships', {
     institutionId,
     userId,
     role,
     status: 'active',
     createdAt: new Date().toISOString(),
   })
+  return { id, role }
 }
 
 async function insertInstitutionLearnerMembershipIfMissing(
@@ -366,7 +383,13 @@ export const acceptInvite = mutation({
       throw new Error('Invite email does not match signed-in user')
     }
 
-    await upsertInstitutionMembership(ctx, invite.institutionId, user._id, invite.role)
+    const institutionMembership = await upsertInstitutionMembership(
+      ctx,
+      invite.institutionId,
+      user._id,
+      invite.role,
+      { preserveHigherRole: true },
+    )
     const inviteCohortId = invite.cohortId
     if (inviteCohortId) {
       const existing = await ctx.db
@@ -376,7 +399,9 @@ export const acceptInvite = mutation({
         )
         .unique()
       if (existing) {
-        await ctx.db.patch(existing._id, { role: invite.role })
+        await ctx.db.patch(existing._id, {
+          role: higherRole(existing.role, invite.role),
+        })
       } else {
         await ctx.db.insert('cohortMemberships', {
           cohortId: inviteCohortId,
@@ -394,12 +419,12 @@ export const acceptInvite = mutation({
       action: 'enrollment_invite.accepted',
       targetTable: 'enrollmentInvites',
       targetId: invite._id,
-      metadata: { role: invite.role },
+      metadata: { inviteRole: invite.role, role: institutionMembership.role },
     })
     return {
       institutionId: invite.institutionId,
       ...(inviteCohortId ? { cohortId: inviteCohortId } : {}),
-      role: invite.role,
+      role: institutionMembership.role,
     }
   },
 })
