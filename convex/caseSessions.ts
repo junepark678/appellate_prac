@@ -56,6 +56,11 @@ import type {
 } from '../src/domain/types'
 import { createTrialDocket } from '../src/domain/trial-docket'
 import {
+  aiSpentCents,
+  billableAiRuns,
+  isStaleAiReservation,
+} from '../src/domain/ai-budget'
+import {
   getAvailableEcfEventDefinitions,
   preflightEcfFiling,
   submitEcfFiling as submitEcfFilingDomain,
@@ -100,6 +105,26 @@ const maxDocumentSignals = 80
 
 function createdMonth(isoDate: string) {
   return isoDate.slice(0, 7)
+}
+
+async function expireStaleAiReservations(
+  ctx: WriteCtx,
+  runs: Doc<'aiRuns'>[],
+  nowIso: string,
+) {
+  await Promise.all(
+    runs
+      .filter((run) => isStaleAiReservation(run, nowIso))
+      .map((run) =>
+        ctx.db.patch(run._id, {
+          costCents: 0,
+          errorClass: 'reservation_expired',
+          issues: run.issues.includes('AI reservation expired before completion.')
+            ? run.issues
+            : [...run.issues, 'AI reservation expired before completion.'],
+        }),
+      ),
+  )
 }
 
 function makeRecordId(prefix: string, count: number) {
@@ -2026,7 +2051,7 @@ export const getAiGateForCurrentUser = internalQuery({
         index.eq('userId', user._id).eq('createdMonth', month),
       )
       .collect()
-    const spentCents = runs.reduce((sum, run) => sum + run.costCents, 0)
+    const spentCents = aiSpentCents(runs, args.nowIso)
     if (spentCents >= user.monthlyAiBudgetCents) {
       return {
         allowed: false,
@@ -2036,7 +2061,9 @@ export const getAiGateForCurrentUser = internalQuery({
       }
     }
 
-    const latestRun = runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    const latestRun = billableAiRuns(runs, args.nowIso).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    )[0]
     if (
       latestRun &&
       new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
@@ -2085,7 +2112,9 @@ export const reserveAiRunForCurrentUser = internalMutation({
         index.eq('userId', user._id).eq('createdMonth', month),
       )
       .collect()
-    const spentCents = runs.reduce((sum, run) => sum + run.costCents, 0)
+    await expireStaleAiReservations(ctx, runs, args.nowIso)
+
+    const spentCents = aiSpentCents(runs, args.nowIso)
     if (spentCents + args.estimatedCostCents > user.monthlyAiBudgetCents) {
       return {
         allowed: false,
@@ -2095,7 +2124,9 @@ export const reserveAiRunForCurrentUser = internalMutation({
       }
     }
 
-    const latestRun = runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    const latestRun = billableAiRuns(runs, args.nowIso).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    )[0]
     if (
       latestRun &&
       new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
