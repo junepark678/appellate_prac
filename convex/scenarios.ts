@@ -593,6 +593,15 @@ export const requireAdminForAction = internalQuery({
 
 const maxScenarioAssetBytes = 30 * 1024 * 1024
 
+function scenarioAssetFetchUrl(baseUrl: URL, scenarioId: string, fileName: string) {
+  const url = new URL(baseUrl.href)
+  const basePath = url.pathname.replace(/\/$/, '')
+  url.pathname = `${basePath}/trial-records/${scenarioId}/${fileName}`
+  url.search = ''
+  url.hash = ''
+  return url
+}
+
 function isAllowedScenarioAssetBaseUrl(baseUrl: URL) {
   if (!['http:', 'https:'].includes(baseUrl.protocol)) return false
   if (['localhost', '127.0.0.1', '::1'].includes(baseUrl.hostname)) return true
@@ -629,8 +638,7 @@ export const migrateBundledScenarioPdfAssets = action({
           skipped += 1
           continue
         }
-        const sourcePath = `/trial-records/${scenario.id}/${asset.fileName}`
-        const response = await fetch(new URL(sourcePath, baseUrl.origin))
+        const response = await fetch(scenarioAssetFetchUrl(baseUrl, scenario.id, asset.fileName))
         if (!response.ok) {
           skipped += 1
           continue
