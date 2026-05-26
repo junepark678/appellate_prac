@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { Outlet, createFileRoute, Link, useRouterState } from '@tanstack/react-router'
 import { useMutation, useQuery } from 'convex/react'
 import { Plus } from 'lucide-react'
 import { useState } from 'react'
@@ -10,11 +10,16 @@ import { AppFrame, EmptyState } from '../components/AppFrame'
 export const Route = createFileRoute('/instructor')({ component: InstructorHome })
 
 function InstructorHome() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
   const cohorts = useQuery(api.cohorts.listMine, {})
   const institutions = useQuery(api.cohorts.listInstitutions, {})
   const createCohort = useMutation(api.cohorts.createCohort)
   const [title, setTitle] = useState('')
   const [institutionId, setInstitutionId] = useState('')
+
+  if (pathname !== '/instructor') {
+    return <Outlet />
+  }
 
   return (
     <AppFrame title="Instructor Dashboard">

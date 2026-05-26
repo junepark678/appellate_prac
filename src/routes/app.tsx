@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { Outlet, createFileRoute, Link, useRouterState } from '@tanstack/react-router'
 import { useMutation, useQuery } from 'convex/react'
 import { CheckCircle2, Circle, FileText } from 'lucide-react'
 
@@ -8,10 +8,15 @@ import { AppFrame, EmptyState } from '../components/AppFrame'
 export const Route = createFileRoute('/app')({ component: LearnerHome })
 
 function LearnerHome() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
   const assignments = useQuery(api.assignments.listMine, {})
   const policies = useQuery(api.policies.listCurrent, {})
   const acceptPolicy = useMutation(api.policies.accept)
   const pendingPolicies = policies?.filter((policy) => !policy.acceptedAt) ?? []
+
+  if (pathname !== '/app') {
+    return <Outlet />
+  }
 
   return (
     <AppFrame title="Assignments">

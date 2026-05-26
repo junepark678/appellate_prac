@@ -104,8 +104,7 @@ export async function requireCohortRole(
     return { user, cohort, membership }
   }
 
-  await requireInstitutionRole(ctx, cohort.institutionId, roles)
-  return { user, cohort, membership: null }
+  throw new Error('Cohort permission required')
 }
 
 export async function writeAuditLog(

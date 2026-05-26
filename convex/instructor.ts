@@ -107,12 +107,29 @@ export const getSessionReplay = query({
     }),
   ),
   handler: async (ctx, args) => {
-    const assignmentSession = await ctx.db
+    const assignmentSessions = await ctx.db
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .unique()
-    if (!assignmentSession) throw new Error('Assignment session not found')
-    await requireAssignmentInstructor(ctx, assignmentSession.assignmentId)
+      .collect()
+    if (!assignmentSessions.length) throw new Error('Assignment session not found')
+
+    let permissionError: Error | null = null
+    let hasAccess = false
+    for (const assignmentSession of assignmentSessions) {
+      try {
+        await requireAssignmentInstructor(ctx, assignmentSession.assignmentId)
+        hasAccess = true
+        break
+      } catch (error) {
+        if (error instanceof Error) {
+          permissionError = error
+        }
+      }
+    }
+    if (!hasAccess) {
+      throw permissionError ?? new Error('Assignment session not found')
+    }
+
     const events = await ctx.db
       .query('caseSessionEvents')
       .withIndex('by_case_sequence', (index) => index.eq('caseSessionId', args.caseSessionId))

@@ -618,17 +618,17 @@ export const submitSession = mutation({
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
       .collect()
-    const ownedAssignmentSessions = assignmentSessions.filter(
+    const matchingSessions = assignmentSessions.filter(
       (assignmentSession) => assignmentSession.userId === user._id,
     )
-    if (!ownedAssignmentSessions.length) {
+    if (!matchingSessions.length) {
       throw new Error('Assignment session not found')
     }
-    const submittedAt = new Date().toISOString()
-    if (ownedAssignmentSessions.every((assignmentSession) => isSubmittedLockActive(assignmentSession))) {
+    if (matchingSessions.every((assignmentSession) => isSubmittedLockActive(assignmentSession))) {
       throw new Error('Assignment session is already submitted')
     }
-    for (const assignmentSession of ownedAssignmentSessions) {
+    const submittedAt = new Date().toISOString()
+    for (const assignmentSession of matchingSessions) {
       const assignment = await ctx.db.get(assignmentSession.assignmentId)
       if (!assignment) {
         throw new Error('Assignment not found')
