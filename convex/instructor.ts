@@ -4,6 +4,7 @@ import { mutation, query } from './_generated/server'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCohortRole, writeAuditLog } from './authz'
+import { notFound } from './errors'
 
 type ReadCtx = QueryCtx | MutationCtx
 type ReviewStatus = 'in_progress' | 'submitted' | 'reviewed'
@@ -27,7 +28,7 @@ async function requireAssignmentInstructor(
   assignmentId: Id<'assignments'>,
 ) {
   const assignment = await ctx.db.get(assignmentId)
-  if (!assignment) throw new Error('Assignment not found')
+  if (!assignment) throw notFound('Assignment', assignmentId)
   const access = await requireCohortRole(ctx, assignment.cohortId, ['instructor', 'admin'])
   return { assignment, ...access }
 }
@@ -111,7 +112,7 @@ export const getSessionReplay = query({
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
       .collect()
-    if (!assignmentSessions.length) throw new Error('Assignment session not found')
+    if (!assignmentSessions.length) throw notFound('Assignment session', args.caseSessionId)
 
     let permissionError: Error | null = null
     let hasAccess = false
@@ -127,7 +128,7 @@ export const getSessionReplay = query({
       }
     }
     if (!hasAccess) {
-      throw permissionError ?? new Error('Assignment session not found')
+      throw permissionError ?? notFound('Assignment session', args.caseSessionId)
     }
 
     const events = await ctx.db
@@ -153,7 +154,7 @@ export const reviewAssignmentSession = mutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     const assignmentSession = await ctx.db.get(args.assignmentSessionId)
-    if (!assignmentSession) throw new Error('Assignment session not found')
+    if (!assignmentSession) throw notFound('Assignment session', args.assignmentSessionId)
     const { assignment, user, cohort } = await requireAssignmentInstructor(
       ctx,
       assignmentSession.assignmentId,

@@ -2,6 +2,7 @@ import { v } from 'convex/values'
 
 import { mutation, query } from './_generated/server'
 import { requireAdmin, writeAuditLog } from './authz'
+import { notFound } from './errors'
 
 export const grantSupportAccess = mutation({
   args: {
@@ -41,7 +42,7 @@ export const revokeSupportAccess = mutation({
   handler: async (ctx, args) => {
     const user = await requireAdmin(ctx)
     const grant = await ctx.db.get(args.grantId)
-    if (!grant) throw new Error('Support access grant not found')
+    if (!grant) throw notFound('Support access grant', args.grantId)
     await ctx.db.patch(args.grantId, { revokedAt: new Date().toISOString() })
     await writeAuditLog(ctx, {
       actorUserId: user._id,

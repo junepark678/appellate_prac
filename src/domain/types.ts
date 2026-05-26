@@ -17,8 +17,10 @@ export type ProcedureDomain =
   | 'original_writ'
   | 'post_judgment'
 
+/** @deprecated This type is reserved for future use. Remove if no longer planned. */
 export type UserRole = 'student' | 'admin' | 'instructor'
 
+/** @deprecated This type is reserved for future use. Remove if no longer planned. */
 export type InstitutionRole = 'learner' | 'instructor' | 'admin'
 
 export type ParticipantRole =
@@ -186,6 +188,7 @@ export type DocumentAnalysis = {
   sealedOrRedactionWarning: boolean
   privacySealWarnings?: string[]
   textExtractionStatus?: DocumentTextExtractionStatus
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   extractionConfidence?: number
   warnings: string[]
 }
@@ -207,6 +210,7 @@ export type LegalRealismLabel =
   | 'premature_filing'
   | 'improper_sealed_treatment'
 
+/** @deprecated This type is reserved for future use. Remove if no longer planned. */
 export type ActorRunAudit = {
   actorRunId: string
   caseSessionId: string
@@ -371,7 +375,9 @@ export type FilerProfile = {
   representedPartyIds: string[]
   serviceRecipients: ServiceRecipient[]
   feeState: FilingFeeState
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   nextGenAccountLinked: boolean
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   pacerExemption?: boolean
   warnings: string[]
 }
@@ -443,6 +449,7 @@ export type FilingEvent = {
   validationRuleRefs: RuleRef[]
   deadlineEffects: DeadlineEffect[]
   docketTextTemplate: string
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   possibleClerkResponses: string[]
 }
 
@@ -547,9 +554,12 @@ export type FilingAttachment = {
 export type FilingMetadata = {
   filingAttorneyName?: string
   representedPartyId?: string
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   representedPartyIds?: string[]
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   selectedReliefs?: string[]
   feePaymentStatus?: 'not_required' | 'paid' | 'deferred' | 'waived' | 'pending'
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   feeTransactionStub?: {
     transactionId: string
     amountCents: number
@@ -558,6 +568,7 @@ export type FilingMetadata = {
   reliefRequested?: string
   serviceMethod: 'cm_ecf' | 'mail' | 'email' | 'hand_delivery' | 'none'
   relatedDocketEntryId?: string
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   relatedDocketEntryIds?: string[]
   serviceRecipientIds?: string[]
   consentStatus?: 'all_parties_consent' | 'partial_consent' | 'no_consent' | 'unknown'
@@ -570,7 +581,9 @@ export type FilingMetadata = {
     warnings: string[]
   }
   publicRedactedVersionIncluded?: boolean
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   redactedPublicVersionDocumentId?: string
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   paperCopyRequirement?: {
     required: boolean
     copies: number
@@ -585,6 +598,7 @@ export type FilingMetadata = {
   filerProfile?: FilerProfile
   feeState?: FilingFeeState
   serviceRecipients?: ServiceRecipient[]
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   feeWaiverRequested?: boolean
   emergency: boolean
   sealed: boolean
@@ -783,8 +797,10 @@ export type CaseSession = {
   procedureState?: ProcedureState
   autonomyMode: AutonomyMode
   turnPolicy: TurnPolicy
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   sourceProfileId?: string
   qualityState: QualityState
+  /** @deprecated This field is reserved for future use. Remove if no longer planned. */
   legalTrainingDisclaimerAcceptedAt?: string
   simulatedDate: string
   participants: Participant[]
@@ -1074,6 +1090,7 @@ export type StateTransitionResult = {
   deadlineEffects: DeadlineEffectResult[]
 }
 
+/** @deprecated This type is reserved for future use. Remove if no longer planned. */
 export type PanelJudgeVote = {
   actorModuleId: string
   vote: string
@@ -1083,6 +1100,7 @@ export type PanelJudgeVote = {
   createdAt: string
 }
 
+/** @deprecated This type is reserved for future use. Remove if no longer planned. */
 export type PanelDisposition = {
   disposition: string
   reliefOption: string

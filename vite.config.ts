@@ -1,3 +1,6 @@
+// Bundle analysis: Run `npx vite-bundle-visualizer` or add
+// `import { visualizer } from 'rollup-plugin-visualizer'` to plugins
+// with `visualizer({ open: true, gzipSize: true })` for analysis.
 import { defineConfig } from 'vite'
 import { devtools } from '@tanstack/devtools-vite'
 import { cloudflare } from '@cloudflare/vite-plugin'
@@ -29,22 +32,23 @@ const frameworkPlugins =
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
   build: {
+    modulePreload: { polyfill: false },
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes('/node_modules/')) return undefined
-          if (id.includes('/@clerk/')) return 'vendor-auth'
-          if (id.includes('/convex/')) return 'vendor-convex'
-          if (id.includes('/lucide-react/')) return 'vendor-icons'
-          if (id.includes('/@tanstack/')) return 'vendor-router'
-          if (
-            id.includes('node_modules/react') ||
-            id.includes('node_modules/react-dom') ||
-            id.includes('node_modules/scheduler')
-          ) {
-            return 'vendor-react'
-          }
-          return 'vendor'
+          // Group by top-level package name for better caching
+          const match = id.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)/)
+          if (!match) return 'vendor'
+          const [, packageName] = match
+          // Separate known large packages for parallel loading
+          if (packageName === 'react' || packageName === 'react-dom' || packageName === 'scheduler') return 'vendor-react'
+          if (packageName.startsWith('@clerk/')) return 'vendor-auth'
+          if (packageName === 'convex') return 'vendor-convex'
+          if (packageName === 'lucide-react') return 'vendor-icons'
+          if (packageName.startsWith('@tanstack/')) return 'vendor-router'
+          // Group all other node_modules by top-level package for optimal caching
+          return `vendor-${packageName.replace(/[@/]/g, '_')}`
         },
       },
     },

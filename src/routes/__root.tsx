@@ -19,6 +19,8 @@ const AppDevtools = import.meta.env.DEV
     )
   : null
 
+import { RouteErrorBoundary } from '../components/RouteErrorBoundary'
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
@@ -40,6 +42,7 @@ export const Route = createRootRoute({
       },
     ],
   }),
+  errorComponent: RouteErrorBoundary,
   shellComponent: RootDocument,
 })
 

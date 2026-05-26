@@ -3,6 +3,7 @@ import { v } from 'convex/values'
 import { mutation, query } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 import { requireAdmin, writeAuditLog } from './authz'
+import { notFound } from './errors'
 
 const policyKeyValidator = v.union(
   v.literal('terms'),
@@ -158,7 +159,7 @@ export const accept = mutation({
       )
       .unique()
     if (!policy?.published) {
-      throw new Error('Published policy version not found')
+      throw notFound('Published policy version', `${args.policyKey}@${args.version}`)
     }
     const existing = await ctx.db
       .query('policyAcceptances')

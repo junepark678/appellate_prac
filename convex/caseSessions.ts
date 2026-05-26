@@ -1,3 +1,4 @@
+// TODO: Import from './errors' once error module is integrated
 import { v } from 'convex/values'
 
 import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
@@ -96,12 +97,26 @@ type SimulationTurnPayload = {
 const defaultScenarioKey = 'synthetic-employment-retaliation'
 const openRouterCooldownMs = 10_000
 const estimatedOpenRouterCostCents = 1
+const AI_CALL_TIMEOUT_MS = 30_000
 const seedScenarios = scenarioSeed as Scenario[]
 const maxUploadedPdfBytes = 25 * 1024 * 1024
 const maxExtractedTextChars = 200_000
 const maxDocumentAnalysisJsonChars = 900_000
 const maxDocumentFileNameChars = 200
 const maxDocumentSignals = 80
+
+// TODO: Wrap in withTimeout() from ai-resilience once module is integrated
+function withAiTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`${label} timed out after ${AI_CALL_TIMEOUT_MS}ms`)),
+        AI_CALL_TIMEOUT_MS,
+      ),
+    ),
+  ])
+}
 
 function createdMonth(isoDate: string) {
   return isoDate.slice(0, 7)
@@ -149,6 +164,7 @@ function parseJsonField<T>(json: string, label: string): T {
   try {
     return JSON.parse(json) as T
   } catch {
+    // ERROR_CODE: VALIDATION_ERROR
     throw new Error(`Invalid persisted JSON for ${label}.`)
   }
 }
@@ -245,6 +261,7 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<
   const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
   if (!bundled) {
     if (existing) return existing
+    // ERROR_CODE: NOT_FOUND
     throw new Error(`Unknown scenario: ${scenarioKey}`)
   }
 
@@ -356,6 +373,7 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<
   }
   const scenario = await ctx.db.get(scenarioId)
   if (!scenario) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Unable to seed scenario')
   }
   return scenario
@@ -368,6 +386,7 @@ async function requireAuthorizedSessionDoc(
 ) {
   const caseSession = await ctx.db.get(caseSessionId)
   if (!caseSession || caseSession.userId !== userId) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Case session not found')
   }
   return caseSession
@@ -385,6 +404,7 @@ async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseS
         assignmentSession.reopenedAt <= assignmentSession.submittedAt),
   )
   if (isLocked) {
+    // ERROR_CODE: SESSION_LOCKED
     throw new Error('Submitted assignment sessions are locked until reopened by an instructor')
   }
 }
@@ -533,6 +553,7 @@ async function assembleCaseSession(
 ): Promise<CaseSession> {
   const scenarioDoc = await ctx.db.get(caseSession.scenarioId)
   if (!scenarioDoc) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Scenario not found for case session')
   }
 
@@ -1146,6 +1167,7 @@ async function replaceSessionState(
 
   const updated = await ctx.db.get(caseSessionId)
   if (!updated) {
+    // ERROR_CODE: NOT_FOUND
     throw new Error('Case session was removed while saving state')
   }
   return assembleCaseSession(ctx, updated)
@@ -1333,6 +1355,7 @@ function promptHashForSession(session: CaseSession) {
 function requireEnv(name: string) {
   const value = process.env[name]
   if (!value) {
+    // ERROR_CODE: PROVIDER_ERROR
     throw new Error('Live AI is temporarily unavailable.')
   }
   return value
@@ -1539,7 +1562,10 @@ export const acceptLegalTrainingDisclaimer = mutation({
       user._id,
     )
     const updated = await ctx.db.get(caseSessionDoc._id)
-    if (!updated) throw new Error('Case session not found')
+    if (!updated) {
+      // ERROR_CODE: NOT_FOUND
+      throw new Error('Case session not found')
+    }
     return assembleCaseSession(ctx, updated)
   },
 })
@@ -2406,6 +2432,7 @@ export const generateActorWorkProduct = action({
       caseSessionId: args.caseSessionId,
     })) as CaseSession | null
     if (!session) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Case session not found')
     }
 
@@ -2421,6 +2448,7 @@ export const generateActorWorkProduct = action({
       estimatedCostCents: estimatedOpenRouterCostCents,
     })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
     if (!reservation.allowed || !reservation.aiRunId) {
+      // ERROR_CODE: RATE_LIMITED
       throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
     }
 
@@ -2433,13 +2461,17 @@ export const generateActorWorkProduct = action({
     const startedAt = Date.now()
 
     try {
-      const product = await generateActorWorkProductWithProvider({
-        session,
-        provider,
-        kind: args.kind,
-        nowIso,
-        model,
-      })
+      // TODO: Wrap in withTimeout() from ai-resilience once module is integrated
+      const product = await withAiTimeout(
+        generateActorWorkProductWithProvider({
+          session,
+          provider,
+          kind: args.kind,
+          nowIso,
+          model,
+        }),
+        'generateActorWorkProduct',
+      )
       const persisted = (await ctx.runMutation(
         internal.caseSessions.persistActorWorkProductForCurrentUser,
         {
@@ -2464,6 +2496,7 @@ export const generateActorWorkProduct = action({
       })
       return persisted
     } catch (error) {
+      const isTimeout = errorMessage(error).includes('timed out')
       await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
         aiRunId: reservation.aiRunId,
         actorId: 'openrouter',
@@ -2472,8 +2505,15 @@ export const generateActorWorkProduct = action({
         issues: [errorMessage(error)],
         costCents: 0,
         latencyMs: Date.now() - startedAt,
-        errorClass: 'provider_error',
+        errorClass: isTimeout ? 'timeout' : 'provider_error',
       })
+      if (isTimeout) {
+        // ERROR_CODE: PROVIDER_TIMEOUT
+        throw new Error(
+          `Actor work product generation timed out after ${AI_CALL_TIMEOUT_MS}ms. Please retry.`,
+        )
+      }
+      // ERROR_CODE: PROVIDER_ERROR
       throw new Error('Actor work product generation is temporarily unavailable.')
     }
   },
@@ -2496,6 +2536,7 @@ export const acceptActorWorkProduct = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Actor work product not found')
     }
 
@@ -2608,6 +2649,7 @@ export const rejectActorWorkProduct = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Actor work product not found')
     }
 
@@ -2648,6 +2690,7 @@ export const advanceLiveEvent = action({
       caseSessionId: args.caseSessionId,
     })) as CaseSession | null
     if (!session) {
+      // ERROR_CODE: NOT_FOUND
       throw new Error('Case session not found')
     }
 
@@ -2663,18 +2706,23 @@ export const advanceLiveEvent = action({
       estimatedCostCents: estimatedOpenRouterCostCents,
     })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
     if (!reservation.allowed || !reservation.aiRunId) {
+      // ERROR_CODE: RATE_LIMITED
       throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
     }
 
     const startedAt = Date.now()
 
     try {
-      const result = await requestProceduralToolCall(session, {
-        apiKey: requireEnv('OPENROUTER_API_KEY'),
-        model,
-        appUrl: process.env.OPENROUTER_APP_URL,
-        appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
-      })
+      // TODO: Wrap in withTimeout() from ai-resilience once module is integrated
+      const result = await withAiTimeout(
+        requestProceduralToolCall(session, {
+          apiKey: requireEnv('OPENROUTER_API_KEY'),
+          model,
+          appUrl: process.env.OPENROUTER_APP_URL,
+          appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
+        }),
+        'advanceLiveEvent',
+      )
       const latencyMs = Date.now() - startedAt
 
       if (!result.toolCall) {
@@ -2744,9 +2792,11 @@ export const advanceLiveEvent = action({
       }
     } catch (error) {
       const latencyMs = Date.now() - startedAt
+      const isTimeout = errorMessage(error).includes('timed out')
       console.error('OpenRouter action failed', {
         caseSessionId: args.caseSessionId,
         error: errorMessage(error),
+        isTimeout,
       })
       await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
         aiRunId: reservation.aiRunId,
@@ -2756,8 +2806,16 @@ export const advanceLiveEvent = action({
         issues: [errorMessage(error)],
         costCents: 0,
         latencyMs,
-        errorClass: 'provider_error',
+        errorClass: isTimeout ? 'timeout' : 'provider_error',
       })
+      if (isTimeout) {
+        return {
+          session,
+          toolCall: null,
+          rawText: `AI provider call timed out after ${AI_CALL_TIMEOUT_MS}ms. The session is unchanged — please retry.`,
+        }
+      }
+      // ERROR_CODE: PROVIDER_ERROR
       throw new Error('Live AI is temporarily unavailable.')
     }
   },

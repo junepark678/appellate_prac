@@ -183,12 +183,14 @@ export function ecfEventDefinitionFromFilingEvent(event: FilingEvent): EcfEventD
         required: feeBehavior !== 'none',
         options: ['not_required', 'paid', 'deferred', 'waived', 'pending'],
       },
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "service_certificate". Prefer the constraint catalog as the single source of truth.
       {
         key: 'certificateOfService',
         label: 'Certificate of service',
         inputType: 'checkbox',
         required: true,
       },
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "brief_compliance_certificate". Prefer the constraint catalog as the single source of truth.
       {
         key: 'certificateOfCompliance',
         label: 'Certificate of compliance',
@@ -412,6 +414,7 @@ export function validateEcfWizardCompleteness(
   submission: FilingSubmission,
 ): ValidationIssue[] {
   const event = getFilingEvent(session.courtPackId, submission.eventId)
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "event_exists". Prefer the constraint catalog as the single source of truth.
   if (!event) {
     return [
       ecfCompletenessIssue(
@@ -450,6 +453,7 @@ export function validateEcfWizardCompleteness(
     )
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "motion_relief_metadata". Prefer the constraint catalog as the single source of truth.
   if (
     definition.requiresReliefText &&
     !submission.metadata.reliefRequested?.trim()
@@ -483,6 +487,7 @@ export function validateEcfWizardCompleteness(
     )
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "related_docket_entry". Prefer the constraint catalog as the single source of truth.
   if (definition.requiresRelatedEntry) {
     const relatedId = submission.metadata.relatedDocketEntryId
     const relatedEntry = relatedId
@@ -517,6 +522,7 @@ export function validateEcfWizardCompleteness(
 
   const sealedByEvent = definition.category === 'sealed' || submission.metadata.sealed
   if (sealedByEvent) {
+    // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "sealed_document_type". Prefer the constraint catalog as the single source of truth.
     if (!submission.metadata.sealedDocumentType?.trim()) {
       issues.push(
         ecfCompletenessIssue(
@@ -526,6 +532,7 @@ export function validateEcfWizardCompleteness(
         ),
       )
     }
+    // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "sealed_redaction_acknowledgment". Prefer the constraint catalog as the single source of truth.
     if (!submission.metadata.privacyAcknowledged && !submission.metadata.redactionAcknowledged) {
       issues.push(
         ecfCompletenessIssue(
@@ -619,10 +626,12 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
           ? 'writ_docketing_statement'
           : 'docketing_statement'
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "post_closure_event". Prefer the constraint catalog as the single source of truth.
   if (status === 'closed' && !['petition_rehearing', 'mandate_stay_motion', 'bill_of_costs'].includes(event.id)) {
     reasons.push('Only rehearing, costs, and mandate-stay events are available after judgment.')
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint IDs "rehearing_after_judgment", "bill_of_costs_after_judgment", "mandate_stay_after_judgment". Prefer the constraint catalog as the single source of truth.
   if (status !== 'closed' && ['petition_rehearing', 'mandate_stay_motion', 'bill_of_costs'].includes(event.id)) {
     reasons.push('This is a post-disposition event and is unavailable before judgment.')
   }
@@ -638,6 +647,7 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
     reasons.push('The case-initiating filing must be filed first.')
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint IDs "opening_brief_before_docketing_statement" and "opening_brief_before_record_ready". Prefer the constraint catalog as the single source of truth.
   if (event.id === 'opening_brief') {
     const recordReady =
       courtPack.procedureDomain === 'agency_review'
@@ -656,6 +666,7 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
     reasons.push('The joint appendix belongs with the formal briefing schedule.')
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint IDs "appellee_after_opening_brief" and "appellee_brief_before_appendix". Prefer the constraint catalog as the single source of truth.
   if (event.id === 'appellee_brief') {
     if (!hasAcceptedEvent(session, 'opening_brief')) {
       reasons.push('The appellee brief cannot precede the opening brief.')
@@ -668,6 +679,7 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
     }
   }
 
+  // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "reply_after_appellee_brief". Prefer the constraint catalog as the single source of truth.
   if (event.id === 'reply_brief' && !hasAcceptedEvent(session, 'appellee_brief')) {
     reasons.push('The reply brief cannot precede the appellee brief.')
   }
