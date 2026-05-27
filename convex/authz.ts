@@ -8,6 +8,12 @@ export type CohortRole = Doc<'cohortMemberships'>['role']
 export type InstitutionRole = Doc<'institutionMemberships'>['role']
 export type UserRole = Doc<'users'>['role']
 
+const institutionRoleRank: Record<InstitutionRole, number> = {
+  learner: 0,
+  instructor: 1,
+  admin: 2,
+}
+
 /**
  * NOT cryptographic — NEVER use for security, authentication, or tokens.
  * Produces a deterministic short id from a string for non-security lookups only.
@@ -27,6 +33,13 @@ export function toDeterministicId(value: string) {
  */
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase()
+}
+
+export function isActiveInstitutionMembership(
+  membership: Pick<Doc<'institutionMemberships'>, 'status' | 'expiresAt'>,
+  now = new Date().toISOString(),
+) {
+  return membership.status === 'active' && (!membership.expiresAt || membership.expiresAt > now)
 }
 
 export async function requireGlobalRole(ctx: ReadCtx, roles: UserRole[]) {
@@ -63,27 +76,37 @@ export async function requireInstitutionRole(
   ctx: ReadCtx,
   institutionId: Id<'institutions'>,
   roles: InstitutionRole[],
+  options: { allowSupportGrant?: boolean } = {},
 ) {
   const { user } = await requireCurrentUser(ctx)
   if (user.role === 'admin') {
     return { user, membership: null }
   }
 
-  const membership = await ctx.db
+  const memberships = await ctx.db
     .query('institutionMemberships')
     .withIndex('by_institution_user', (index) =>
       index.eq('institutionId', institutionId).eq('userId', user._id),
     )
-    .unique()
-  if (
-    membership?.status === 'active' &&
-    roles.includes(membership.role) &&
-    (!membership.expiresAt || membership.expiresAt > new Date().toISOString())
-  ) {
+    .collect()
+  const now = new Date().toISOString()
+  const membership = memberships
+    .filter((candidate) => isActiveInstitutionMembership(candidate, now))
+    .filter((candidate) => roles.includes(candidate.role))
+    .sort(
+      (a, b) =>
+        institutionRoleRank[b.role] - institutionRoleRank[a.role] ||
+        a._creationTime - b._creationTime,
+    )[0]
+  if (membership) {
     return { user, membership }
   }
 
-  if (user.role === 'instructor' && await hasActiveSupportGrant(ctx, institutionId, user._id)) {
+  if (
+    options.allowSupportGrant &&
+    user.role === 'instructor' &&
+    (await hasActiveSupportGrant(ctx, institutionId, user._id))
+  ) {
     return { user, membership: null }
   }
 

@@ -681,7 +681,22 @@ export const attachSession = mutation({
     }
     const existing = await getAssignmentSession(ctx, assignment._id, user._id)
     if (existing) {
+      if (existing.caseSessionId !== args.caseSessionId) {
+        // ERROR_CODE: VALIDATION_ERROR
+        throw new Error('Assignment already has a different case session')
+      }
       return existing.caseSessionId
+    }
+    const linkedAssignmentSessions = await ctx.db
+      .query('assignmentSessions')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
+      .collect()
+    const linkedToAnotherAssignment = linkedAssignmentSessions.some(
+      (assignmentSession) => assignmentSession.assignmentId !== args.assignmentId,
+    )
+    if (linkedToAnotherAssignment) {
+      // ERROR_CODE: VALIDATION_ERROR
+      throw new Error('Case session is already attached to another assignment')
     }
     const policy = assignment.simulationPolicyId
       ? await ctx.db.get(assignment.simulationPolicyId)
