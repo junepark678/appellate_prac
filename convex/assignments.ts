@@ -6,6 +6,7 @@ import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 import { requireCohortRole, writeAuditLog } from './authz'
+import { appendCaseSessionEvent } from './caseSessionEventLog'
 import { createInitialSession } from '../src/domain/simulation'
 import { inferProcedureState } from '../src/domain/procedure/state-machine'
 import type { Scenario } from '../src/domain/types'
@@ -218,12 +219,9 @@ async function insertInitialSessionState(
       sourceRuleRefs: deadline.sourceRuleRefs,
     })
   }
-  await ctx.db.insert('caseSessionEvents', {
-    caseSessionId,
-    sequence: 1,
-    eventType: 'assignment_session_started',
-    payloadJson: JSON.stringify({ scenarioKey, procedureState }),
-    createdAt: new Date().toISOString(),
+  await appendCaseSessionEvent(ctx, caseSessionId, 'assignment_session_started', {
+    scenarioKey,
+    procedureState,
   })
 }
 
@@ -605,6 +603,7 @@ export const startSession = mutation({
         : {}),
       qualityState: initialSession.qualityState,
       simulatedDate: initialSession.simulatedDate,
+      nextEventSequence: 1,
     })
     await insertInitialSessionState(ctx, caseSessionId, scenario.scenarioKey)
     if (assignment.simulationPolicyId) {
