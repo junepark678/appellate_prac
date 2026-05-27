@@ -2,10 +2,11 @@
 import { v } from 'convex/values'
 
 import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
-import { api, internal } from './_generated/api'
+import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { getCurrentUser, requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
+import { appendCaseSessionEvent } from './caseSessionEventLog'
 import {
   actorWorkProductKindValidator,
   actorWorkProductValidator,
@@ -1173,27 +1174,6 @@ async function replaceSessionState(
   return assembleCaseSession(ctx, updated)
 }
 
-async function appendCaseSessionEvent(
-  ctx: WriteCtx,
-  caseSessionId: Id<'caseSessions'>,
-  eventType: string,
-  payload: Record<string, unknown>,
-  actorUserId?: Id<'users'>,
-) {
-  const existingEvents = await ctx.db
-    .query('caseSessionEvents')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
-  await ctx.db.insert('caseSessionEvents', {
-    caseSessionId,
-    sequence: existingEvents.length + 1,
-    eventType,
-    payloadJson: JSON.stringify(payload),
-    createdAt: new Date().toISOString(),
-    ...(actorUserId ? { actorUserId } : {}),
-  })
-}
-
 async function persistTurnAudit(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
@@ -1489,6 +1469,7 @@ export const create = mutation({
         : {}),
       qualityState: initialSession.qualityState,
       simulatedDate: initialSession.simulatedDate,
+      nextEventSequence: 1,
     })
 
     const session = await replaceSessionState(ctx, caseSessionId, {
@@ -1524,6 +1505,19 @@ export const getForCurrentUser = query({
       .collect()
     const latest = sessions.sort((a, b) => b._creationTime - a._creationTime)[0]
     return latest ? assembleCaseSession(ctx, latest) : null
+  },
+})
+
+export const getWritableForCurrentUser = internalQuery({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: caseSessionValidator,
+  handler: async (ctx, args) => {
+    const { user } = await requireCurrentUser(ctx)
+    const caseSession = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
+    return assembleCaseSession(ctx, caseSession)
   },
 })
 
@@ -2428,13 +2422,9 @@ export const generateActorWorkProduct = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery(api.caseSessions.getForCurrentUser, {
+    const session = (await ctx.runQuery(internal.caseSessions.getWritableForCurrentUser, {
       caseSessionId: args.caseSessionId,
-    })) as CaseSession | null
-    if (!session) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Case session not found')
-    }
+    })) as CaseSession
 
     const model = requireEnv('OPENROUTER_MODEL')
     const promptHash = promptHashForSession(session)
@@ -2686,13 +2676,9 @@ export const advanceLiveEvent = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery(api.caseSessions.getForCurrentUser, {
+    const session = (await ctx.runQuery(internal.caseSessions.getWritableForCurrentUser, {
       caseSessionId: args.caseSessionId,
-    })) as CaseSession | null
-    if (!session) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Case session not found')
-    }
+    })) as CaseSession
 
     const model = requireEnv('OPENROUTER_MODEL')
     const promptHash = promptHashForSession(session)

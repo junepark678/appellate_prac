@@ -4,6 +4,7 @@ import { mutation, query } from './_generated/server'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCohortRole, writeAuditLog } from './authz'
+import { appendCaseSessionEvent } from './caseSessionEventLog'
 import { notFound } from './errors'
 
 type ReadCtx = QueryCtx | MutationCtx
@@ -165,25 +166,16 @@ export const reviewAssignmentSession = mutation({
       reviewedAt: new Date().toISOString(),
       reviewerUserId: user._id,
     })
-    await ctx.db.insert('caseSessionEvents', {
-      caseSessionId: assignmentSession.caseSessionId,
-      sequence:
-        (
-          await ctx.db
-            .query('caseSessionEvents')
-            .withIndex('by_case', (index) =>
-              index.eq('caseSessionId', assignmentSession.caseSessionId),
-            )
-            .collect()
-        ).length + 1,
-      eventType: 'instructor_review_submitted',
-      payloadJson: JSON.stringify({
+    await appendCaseSessionEvent(
+      ctx,
+      assignmentSession.caseSessionId,
+      'instructor_review_submitted',
+      {
         assignmentSessionId: args.assignmentSessionId,
         score: args.score ?? null,
-      }),
-      createdAt: new Date().toISOString(),
-      actorUserId: user._id,
-    })
+      },
+      user._id,
+    )
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,

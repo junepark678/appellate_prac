@@ -62,53 +62,6 @@ export function observeWebVitals(onMetric: OnMetricCallback): () => void {
 
   let prevValues: Partial<Record<MetricName, number>> = {}
 
-  const observer = new PerformanceObserver((list) => {
-    for (const entry of list.getEntries()) {
-      const metricName = ENTRY_TYPE_MAP[entry.entryType]
-      if (!metricName) continue
-
-      let value: number
-      switch (entry.entryType) {
-        case 'largest-contentful-paint':
-          value = entry.startTime
-          break
-        case 'first-input':
-          value = (entry as PerformanceEventTiming).processingStart - entry.startTime
-          break
-        case 'layout-shift':
-          if ((entry as LayoutShift).hadRecentInput) continue
-          value = (entry as LayoutShift).value
-          break
-        case 'event': {
-          const evt = entry as PerformanceEventTiming
-          if (!evt.interactionId) continue
-          value = evt.duration
-          break
-        }
-        case 'navigation':
-          value = (entry as PerformanceNavigationTiming).responseStart
-          break
-        default:
-          continue
-      }
-
-      const prev = prevValues[metricName] ?? 0
-      const delta = value - prev
-      prevValues[metricName] = value
-
-      const navigationType = (entry as PerformanceNavigationTiming & { navigationType?: string }).navigationType
-
-      onMetric({
-        name: metricName,
-        value,
-        rating: getRating(metricName, value),
-        delta,
-        navigationType,
-        timestamp: Date.now(),
-      })
-    }
-  })
-
   const handleEntries = (list: PerformanceObserverEntryList) => {
     for (const entry of list.getEntries()) {
       const metricName = ENTRY_TYPE_MAP[entry.entryType]
@@ -156,17 +109,26 @@ export function observeWebVitals(onMetric: OnMetricCallback): () => void {
     }
   }
 
+  const observers: PerformanceObserver[] = []
+
   try {
-    observer.observe({ type: supportedTypes[0], buffered: true })
-    for (let i = 1; i < supportedTypes.length; i++) {
+    for (let i = 0; i < supportedTypes.length; i++) {
       const obs = new PerformanceObserver(handleEntries)
+      observers.push(obs)
       obs.observe({ type: supportedTypes[i], buffered: true })
     }
   } catch {
+    for (const obs of observers) {
+      obs.disconnect()
+    }
     return () => {}
   }
 
-  return () => observer.disconnect()
+  return () => {
+    for (const obs of observers) {
+      obs.disconnect()
+    }
+  }
 }
 
 export function reportMetric(metric: PerformanceMetric): void {

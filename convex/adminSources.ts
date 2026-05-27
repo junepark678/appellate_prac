@@ -108,10 +108,15 @@ export const upsertSourceArtifact = mutation({
   handler: async (ctx, args) => {
     await requireAdmin(ctx)
     const contentHash = args.contentHash ?? simpleHash(args.rawText)
-    const existing = await ctx.db
+    const sourceArtifacts = await ctx.db
       .query('sourceArtifacts')
-      .withIndex('by_hash', (index) => index.eq('contentHash', contentHash))
-      .unique()
+      .withIndex('by_source_version', (index) =>
+        index.eq('sourceVersionId', args.sourceVersionId),
+      )
+      .collect()
+    const existing = sourceArtifacts
+      .filter((artifact) => artifact.url === args.url && artifact.contentHash === contentHash)
+      .sort((a, b) => b._creationTime - a._creationTime)[0]
     const doc = {
       sourceVersionId: args.sourceVersionId,
       label: args.label,

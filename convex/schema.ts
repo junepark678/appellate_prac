@@ -398,6 +398,7 @@ export default defineSchema({
     qualityState: v.optional(qualityStateValidator),
     legalTrainingDisclaimerAcceptedAt: v.optional(v.string()),
     simulatedDate: v.string(),
+    nextEventSequence: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
     .index('by_scenario', ['scenarioId']),
