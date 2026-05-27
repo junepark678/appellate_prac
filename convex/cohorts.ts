@@ -7,6 +7,7 @@ import type { MutationCtx } from './_generated/server'
 import { requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
 import {
   normalizeEmail,
+  isActiveInstitutionMembership,
   requireAdmin,
   requireCohortRole,
   requireInstitutionRole,
@@ -30,11 +31,76 @@ const roleRank: Record<InstitutionRole, number> = {
   admin: 2,
 }
 
+const inviteTokenHashPrefix = 'sha256:'
+
 function higherRole(current: InstitutionRole, next: InstitutionRole) {
   return roleRank[current] >= roleRank[next] ? current : next
 }
 
-async function findInstitutionMembership(
+function highestRole(roles: InstitutionRole[]) {
+  return roles.reduce<InstitutionRole>((highest, role) => higherRole(highest, role), 'learner')
+}
+
+function generateInviteToken() {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+}
+
+async function hashInviteToken(token: string) {
+  return `${inviteTokenHashPrefix}${await sha256Hex(token)}`
+}
+
+function legacyInviteTokenHash(token: string) {
+  return toDeterministicId(token)
+}
+
+async function findInviteByToken(ctx: MutationCtx, token: string) {
+  const tokenHash = await hashInviteToken(token)
+  const invites = await ctx.db
+    .query('enrollmentInvites')
+    .withIndex('by_token_hash', (index) => index.eq('tokenHash', tokenHash))
+    .collect()
+  if (invites.length > 1) {
+    // ERROR_CODE: CONFLICT
+    throw new Error('Invite token is ambiguous; request a new invite')
+  }
+  if (invites[0]) return invites[0]
+
+  const legacyHash = legacyInviteTokenHash(token)
+  const legacyInvites = await ctx.db
+    .query('enrollmentInvites')
+    .withIndex('by_token_hash', (index) => index.eq('tokenHash', legacyHash))
+    .collect()
+  if (legacyInvites.length > 1) {
+    // ERROR_CODE: CONFLICT
+    throw new Error('Invite token is ambiguous; request a new invite')
+  }
+  return legacyInvites[0] ?? null
+}
+
+async function createUniqueInviteTokenHash(ctx: MutationCtx) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const token = generateInviteToken()
+    const tokenHash = await hashInviteToken(token)
+    const collisions = await ctx.db
+      .query('enrollmentInvites')
+      .withIndex('by_token_hash', (index) => index.eq('tokenHash', tokenHash))
+      .collect()
+    if (collisions.length === 0) return { token, tokenHash }
+  }
+  // ERROR_CODE: CONFLICT
+  throw new Error('Unable to generate a unique invite token')
+}
+
+async function findInstitutionMemberships(
   ctx: MutationCtx,
   institutionId: Id<'institutions'>,
   userId: Id<'users'>,
@@ -44,7 +110,7 @@ async function findInstitutionMembership(
     .withIndex('by_institution_user', (index) =>
       index.eq('institutionId', institutionId).eq('userId', userId),
     )
-    .unique()
+    .collect()
 }
 
 async function upsertInstitutionMembership(
@@ -54,14 +120,34 @@ async function upsertInstitutionMembership(
   role: InstitutionRole,
   options: { preserveHigherRole?: boolean } = {},
 ) {
-  const existing = await findInstitutionMembership(ctx, institutionId, userId)
+  const now = new Date().toISOString()
+  const existingMemberships = (
+    await findInstitutionMemberships(ctx, institutionId, userId)
+  ).sort((a, b) => a._creationTime - b._creationTime)
+  const activeMemberships = existingMemberships.filter((membership) =>
+    isActiveInstitutionMembership(membership, now),
+  )
+  const existing = activeMemberships[0] ?? existingMemberships[0]
   if (existing) {
-    const nextRole = options.preserveHigherRole ? higherRole(existing.role, role) : role
+    const activeExistingRole = activeMemberships.length
+      ? highestRole(activeMemberships.map((membership) => membership.role))
+      : role
+    const nextRole = options.preserveHigherRole ? higherRole(activeExistingRole, role) : role
     await ctx.db.patch(existing._id, {
       role: nextRole,
       status: 'active',
       expiresAt: undefined,
     })
+    await Promise.all(
+      existingMemberships
+        .filter((membership) => membership._id !== existing._id)
+        .map((membership) =>
+          ctx.db.patch(membership._id, {
+            status: 'suspended',
+            expiresAt: now,
+          }),
+        ),
+    )
     return { id: existing._id, role: nextRole }
   }
   const id = await ctx.db.insert('institutionMemberships', {
@@ -79,15 +165,10 @@ async function insertInstitutionLearnerMembershipIfMissing(
   institutionId: Id<'institutions'>,
   userId: Id<'users'>,
 ) {
-  const existing = await findInstitutionMembership(ctx, institutionId, userId)
-  if (existing) return existing._id
-  return ctx.db.insert('institutionMemberships', {
-    institutionId,
-    userId,
-    role: 'learner',
-    status: 'active',
-    createdAt: new Date().toISOString(),
+  const membership = await upsertInstitutionMembership(ctx, institutionId, userId, 'learner', {
+    preserveHigherRole: true,
   })
+  return membership.id
 }
 
 export const createInstitution = mutation({
@@ -161,10 +242,16 @@ export const listInstitutions = query({
       .query('institutionMemberships')
       .withIndex('by_user', (index) => index.eq('userId', user._id))
       .collect()
+    const now = new Date().toISOString()
+    const activeInstitutionIds = Array.from(
+      new Set(
+        memberships
+          .filter((membership) => isActiveInstitutionMembership(membership, now))
+          .map((membership) => membership.institutionId),
+      ),
+    )
     const institutions = await Promise.all(
-      memberships
-        .filter((membership) => membership.status === 'active')
-        .map((membership) => ctx.db.get(membership.institutionId)),
+      activeInstitutionIds.map((institutionId) => ctx.db.get(institutionId)),
     )
     return institutions
       .filter((institution) => institution !== null)
@@ -334,13 +421,13 @@ export const inviteMembers = mutation({
     const created = []
     for (const invite of args.invites) {
       const email = normalizeEmail(invite.email)
-      const token = `${email}:${crypto.randomUUID()}`
+      const { token, tokenHash } = await createUniqueInviteTokenHash(ctx)
       await ctx.db.insert('enrollmentInvites', {
         institutionId: args.institutionId,
         ...(args.cohortId ? { cohortId: args.cohortId } : {}),
         email,
         role: invite.role,
-        tokenHash: toDeterministicId(token),
+        tokenHash,
         expiresAt,
         createdByUserId: user._id,
         createdAt: new Date().toISOString(),
@@ -370,10 +457,7 @@ export const acceptInvite = mutation({
   handler: async (ctx, args) => {
     const identity = await requireIdentity(ctx)
     const user = await upsertCurrentUserDoc(ctx)
-    const invite = await ctx.db
-      .query('enrollmentInvites')
-      .withIndex('by_token_hash', (index) => index.eq('tokenHash', toDeterministicId(args.token)))
-      .unique()
+    const invite = await findInviteByToken(ctx, args.token)
     if (!invite) {
       // ERROR_CODE: NOT_FOUND
       throw new Error('Invite not found')
