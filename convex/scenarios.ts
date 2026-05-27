@@ -593,7 +593,7 @@ export const requireAdminForAction = internalQuery({
 
 const maxScenarioAssetBytes = 30 * 1024 * 1024
 
-function scenarioAssetFetchUrl(baseUrl: URL, scenarioId: string, fileName: string) {
+export function scenarioAssetFetchUrl(baseUrl: URL, scenarioId: string, fileName: string) {
   const url = new URL(baseUrl.href)
   const basePath = url.pathname.replace(/\/$/, '')
   url.pathname = `${basePath}/trial-records/${scenarioId}/${fileName}`
