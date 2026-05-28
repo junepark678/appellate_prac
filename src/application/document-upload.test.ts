@@ -58,6 +58,30 @@ describe('analyzeUploadAndPersistDocuments', () => {
       ),
     ).rejects.toThrow('Unable to store PDF in Convex storage.')
   })
+
+  it('rejects when a selected document cannot be persisted', async () => {
+    const openingBrief = new File(['opening brief'], 'opening-brief.pdf', {
+      type: 'application/pdf',
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ storageId: 'storage_success' })),
+    )
+
+    await expect(
+      analyzeUploadAndPersistDocuments(
+        {
+          generateDocumentUploadUrl: async () => 'https://uploads.example.test',
+          persistDocumentAnalysis: async () => {
+            throw new Error('Document persistence failed')
+          },
+        },
+        'case_session_123' as Id<'caseSessions'>,
+        fileList(openingBrief),
+      ),
+    ).rejects.toThrow('Document persistence failed')
+  })
 })
 
 function fileList(...files: File[]): FileList {

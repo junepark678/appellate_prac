@@ -7,7 +7,7 @@ import type { MutationCtx, QueryCtx } from './_generated/server'
 import { requireCurrentUser } from './authHelpers'
 import { requireCohortRole, writeAuditLog } from './authz'
 import { appendCaseSessionEvent } from './caseSessionEventLog'
-import { createInitialSession } from '../src/domain/simulation'
+import { createInitialSession, createInitialSessionForScenario } from '../src/domain/simulation'
 import { inferProcedureState } from '../src/domain/procedure/state-machine'
 import type { Scenario } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
@@ -61,6 +61,56 @@ function seedScenarioDoc(scenario: Scenario) {
     revisionStatus: 'published' as const,
     published: true,
   }
+}
+
+function parseOptionalJsonField<T>(json: string | undefined, label: string): T | undefined {
+  if (!json) return undefined
+  try {
+    return JSON.parse(json) as T
+  } catch {
+    throw new Error(`Invalid persisted JSON for ${label}.`)
+  }
+}
+
+function scenarioModelFromDoc(doc: Doc<'scenarios'>): Scenario {
+  const training = parseOptionalJsonField<Scenario['training']>(
+    doc.trainingJson,
+    `scenario ${doc._id} training`,
+  )
+  const trialDocket = parseOptionalJsonField<Scenario['trialDocket']>(
+    doc.trialDocketJson,
+    `scenario ${doc._id} trial docket`,
+  )
+
+  return {
+    id: doc.scenarioKey,
+    visibility: scenarioVisibility(doc),
+    ...(doc.ownerUserId ? { ownerUserId: doc.ownerUserId } : {}),
+    scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
+    revision: doc.revision ?? 1,
+    revisionStatus: scenarioRevisionStatus(doc),
+    ...(doc.createdFromScenarioId ? { createdFromScenarioId: doc.createdFromScenarioId } : {}),
+    ...(doc.supersededByScenarioId ? { supersededByScenarioId: doc.supersededByScenarioId } : {}),
+    title: doc.title,
+    source: doc.source,
+    courtPackId: doc.courtPackId,
+    shortCaption: doc.shortCaption,
+    lowerTribunal: doc.lowerTribunal,
+    natureOfSuit: doc.natureOfSuit,
+    proceduralPosture: doc.proceduralPosture,
+    issuesPresented: doc.issuesPresented,
+    meritsRecord: doc.meritsRecord,
+    ...(training ? { training } : {}),
+    ...(trialDocket ? { trialDocket } : {}),
+    ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
+  }
+}
+
+function createInitialSessionForScenarioDoc(doc: Doc<'scenarios'>) {
+  const bundledScenario = seedScenarios.some((scenario) => scenario.id === doc.scenarioKey)
+  return bundledScenario
+    ? createInitialSession(doc.scenarioKey)
+    : createInitialSessionForScenario(scenarioModelFromDoc(doc))
 }
 
 async function requireAssignmentRole(
@@ -182,9 +232,8 @@ function canViewUnpublishedAssignment(
 async function insertInitialSessionState(
   ctx: MutationCtx,
   caseSessionId: Id<'caseSessions'>,
-  scenarioKey: string,
+  initialSession: ReturnType<typeof createInitialSession>,
 ) {
-  const initialSession = createInitialSession(scenarioKey)
   const procedureState = inferProcedureState(initialSession)
   await ctx.db.patch(caseSessionId, {
     status: initialSession.status,
@@ -227,7 +276,7 @@ async function insertInitialSessionState(
     })
   }
   await appendCaseSessionEvent(ctx, caseSessionId, 'assignment_session_started', {
-    scenarioKey,
+    scenarioKey: initialSession.scenario.id,
     procedureState,
   })
 }
@@ -606,7 +655,7 @@ export const startSession = mutation({
       // ERROR_CODE: NOT_FOUND
       throw new Error('Scenario not found')
     }
-    const initialSession = createInitialSession(scenario.scenarioKey)
+    const initialSession = createInitialSessionForScenarioDoc(scenario)
     const caseSessionId = await ctx.db.insert('caseSessions', {
       scenarioId: assignment.scenarioId,
       userId: user._id,
@@ -622,7 +671,7 @@ export const startSession = mutation({
       simulatedDate: initialSession.simulatedDate,
       nextEventSequence: 1,
     })
-    await insertInitialSessionState(ctx, caseSessionId, scenario.scenarioKey)
+    await insertInitialSessionState(ctx, caseSessionId, initialSession)
     if (assignment.simulationPolicyId) {
       const policy = await ctx.db.get(assignment.simulationPolicyId)
       if (policy) {

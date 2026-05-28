@@ -55,16 +55,12 @@ async function analyzeUploadAndPersistDocument(
   ])
   const document = documentFromAnalysis(base, analysis, storageId, sha256)
 
-  try {
-    const persisted = await workflow.persistDocumentAnalysis({
-      caseSessionId,
-      document,
-      analysis,
-    })
-    return persisted.document
-  } catch {
-    return document
-  }
+  const persisted = await workflow.persistDocumentAnalysis({
+    caseSessionId,
+    document,
+    analysis,
+  })
+  return persisted.document
 }
 
 async function uploadToConvexStorage(
