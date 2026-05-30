@@ -3,6 +3,8 @@ import { useMemo, useState } from 'react'
 
 import type { EcfEventAvailability, ParticipantRole } from '../../domain/types'
 
+const priorityEventNames = ['Opening Brief', 'Joint Appendix', 'Reply Brief']
+
 function formatLabel(value: string) {
   return value
     .replaceAll('_', ' ')
@@ -42,6 +44,17 @@ export function EventSelector({
         .includes(normalized),
     )
   }, [events, query])
+  const priorityEvents = useMemo(
+    () =>
+      priorityEventNames
+        .map((name) => events.find((event) => event.displayName === name))
+        .filter((event): event is EcfEventAvailability => Boolean(event)),
+    [events],
+  )
+
+  function canSelect(event: EcfEventAvailability) {
+    return event.available && event.eligibleRoles.includes(learnerRole)
+  }
 
   return (
     <section className="space-y-3">
@@ -57,10 +70,37 @@ export function EventSelector({
           />
         </div>
       </label>
+      {priorityEvents.length ? (
+        <section className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#68716c]">
+            Briefing Events
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {priorityEvents.map((event) => {
+              const enabled = canSelect(event)
+              return (
+                <button
+                  className={`h-10 rounded-md border px-3 text-sm font-semibold ${
+                    event.eventId === selectedEventId
+                      ? 'border-[#1d4d4f] bg-[#eef6f3] text-[#173e40]'
+                      : 'border-[#d8d1c4] bg-white text-[#3e4843] hover:bg-[#fbfaf7]'
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
+                  disabled={!enabled}
+                  key={event.eventId}
+                  onClick={() => onSelect(event.eventId)}
+                  type="button"
+                >
+                  {event.displayName}
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
       <div className="max-h-[520px] divide-y divide-[#e2dbcf] overflow-auto rounded-lg border border-[#e2dbcf] bg-white">
         {filteredEvents.map((event) => {
           const roleAllowed = event.eligibleRoles.includes(learnerRole)
-          const enabled = event.available && roleAllowed
+          const enabled = canSelect(event)
           const selected = event.eventId === selectedEventId
           return (
             <button

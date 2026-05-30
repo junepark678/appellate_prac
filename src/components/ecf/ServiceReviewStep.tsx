@@ -54,6 +54,7 @@ export function ServiceReviewStep({
   const recipients = submission ? serviceRecipientsForSubmission(session, submission) : []
   const errors = validationIssues.filter((issue) => issue.severity === 'error')
   const unavailable = event && (!event.available || !event.eligibleRoles.includes(draft.participantRole))
+  const submitDisabled = busy || errors.length > 0 || documentPending || Boolean(unavailable)
 
   return (
     <section className="space-y-4">
@@ -102,6 +103,27 @@ export function ServiceReviewStep({
         </section>
       </div>
 
+      <div className="sticky top-2 z-10 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#d8d1c4] bg-white/95 p-3 shadow-sm backdrop-blur">
+        <div className="text-sm font-medium text-[#3e4843]">
+          {errors.length
+            ? `${errors.length} filing error${errors.length === 1 ? '' : 's'} must be cured before submission.`
+            : documentPending
+              ? 'Document analysis is still running.'
+              : unavailable
+                ? 'This event is not available to the selected filer.'
+                : 'Ready for final ECF submission.'}
+        </div>
+        <button
+          className="flex h-11 items-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173e40] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
+          disabled={submitDisabled}
+          onClick={onSubmit}
+          type="button"
+        >
+          <FileCheck2 className="h-4 w-4" aria-hidden="true" />
+          Submit ECF Filing
+        </button>
+      </div>
+
       <ReceiptPreview
         draft={draft}
         event={event}
@@ -133,10 +155,10 @@ export function ServiceReviewStep({
         </div>
       ) : null}
 
-      <div className="flex justify-end">
+      <div className="sticky bottom-0 z-10 flex justify-end border-t border-[#e2dbcf] bg-[#fbfaf7]/95 py-3 backdrop-blur">
         <button
           className="flex h-11 items-center gap-2 rounded-md bg-[#1d4d4f] px-4 text-sm font-semibold text-white hover:bg-[#173e40] disabled:cursor-not-allowed disabled:bg-[#9aa6a2]"
-          disabled={busy || errors.length > 0 || documentPending || Boolean(unavailable)}
+          disabled={submitDisabled}
           onClick={onSubmit}
           type="button"
         >

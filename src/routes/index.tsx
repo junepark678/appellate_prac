@@ -35,10 +35,7 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 
 import { EcfWizard } from '../components/ecf/EcfWizard'
-import {
-  analyzeUploadAndPersistDocuments,
-  inferUploadedDocuments,
-} from '../application/document-upload'
+import { analyzeUploadAndPersistDocuments } from '../application/document-upload'
 import {
   getCourtPack,
   getRuleItemsForCourt,
@@ -491,12 +488,10 @@ function Home() {
       setDraft((current) => ({ ...current, documents: [...current.documents, ...documents] }))
     } catch (error) {
       setDocumentError(
-        error instanceof Error ? error.message : 'PDF analysis failed; using filename signals',
+        error instanceof Error
+          ? error.message
+          : 'PDF analysis failed. The document was not attached.',
       )
-      setDraft((current) => ({
-        ...current,
-        documents: [...current.documents, ...inferUploadedDocuments(files)],
-      }))
     } finally {
       setDocumentPending(false)
     }

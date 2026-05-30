@@ -1387,7 +1387,7 @@ async function verifyUploadedPdfDocument(
   if (document.sizeBytes !== metadata.size || analysis.fileSizeBytes !== metadata.size) {
     throw new Error('Uploaded PDF metadata does not match stored file metadata.')
   }
-  if (document.sha256 && document.sha256 !== metadata.sha256) {
+  if (document.sha256 && metadata.sha256 && document.sha256 !== metadata.sha256) {
     throw new Error('Uploaded PDF checksum does not match stored file metadata.')
   }
   const existingDocument = await ctx.db
@@ -1403,7 +1403,7 @@ async function verifyUploadedPdfDocument(
   return {
     storageId,
     sizeBytes: metadata.size,
-    sha256: metadata.sha256,
+    sha256: metadata.sha256 ?? document.sha256,
   }
 }
 
