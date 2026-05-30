@@ -39,4 +39,31 @@ describe('trial docket records', () => {
       ).toBe(true)
     }
   })
+
+  it('does not append appellate session filings to fallback trial dockets', () => {
+    const baseSession = createInitialSession()
+    const { trialDocket: _trialDocket, ...scenarioWithoutTrialDocket } = baseSession.scenario
+    const session = {
+      ...baseSession,
+      scenario: scenarioWithoutTrialDocket,
+      docketEntries: [
+        ...baseSession.docketEntries,
+        {
+          id: 'dkt_appellate_opening_brief',
+          entryNumber: baseSession.docketEntries.length + 1,
+          filedAt: '2026-03-10T15:00:00.000Z',
+          actorRole: 'appellant' as const,
+          title: 'Opening Brief',
+          text: 'Opening brief filed in the court of appeals.',
+          filingId: 'filing_opening_brief',
+          ruleRefs: [],
+        },
+      ],
+    }
+
+    const docket = createTrialDocket(session)
+
+    expect(docket.entries.map((entry) => entry.title)).not.toContain('Opening Brief')
+    expect(docket.entries).toHaveLength(20)
+  })
 })

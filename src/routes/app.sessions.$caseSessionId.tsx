@@ -28,7 +28,7 @@ function SessionView() {
     <AppFrame title={session.scenario.shortCaption}>
       <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
         <section className="rounded border border-slate-200 bg-white p-4">
-          <h2 className="font-semibold">Docket</h2>
+          <h2 className="font-semibold">Appeals Docket</h2>
           <ol className="mt-3 divide-y divide-slate-100">
             {session.docketEntries.map((entry) => (
               <li key={entry.id} className="py-3 text-sm">

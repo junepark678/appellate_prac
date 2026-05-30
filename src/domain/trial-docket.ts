@@ -1,7 +1,5 @@
 import type {
   CaseSession,
-  DocketEntry,
-  FilingRecord,
   Scenario,
   ScenarioDocumentAsset,
   TrialDocket,
@@ -48,36 +46,6 @@ function fallbackDocument(
     pageCount: 1,
     extractedText: `${title}. ${scenario.shortCaption}. ${scenarioRecordText(scenario)}`,
   }
-}
-
-function documentFromFiling(
-  filing: FilingRecord,
-  document: FilingRecord['documents'][number],
-): TrialDocketDocument {
-  return {
-    id: document.id,
-    label: filing.title,
-    fileName: document.fileName,
-    mimeType: 'application/pdf',
-    source: 'uploaded',
-    ...(document.storageId ? { storageId: document.storageId } : {}),
-    ...(document.sha256 ? { sha256: document.sha256 } : {}),
-    sizeBytes: document.sizeBytes,
-    pageCount: document.pageCount ?? 1,
-    ...(document.extractedText ? { extractedText: document.extractedText } : {}),
-  }
-}
-
-function filingDocumentsForEntry(
-  session: CaseSession,
-  entry: DocketEntry,
-): TrialDocketDocument[] {
-  if (!entry.filingId) return []
-  const filing = session.filings.find((candidate) => candidate.id === entry.filingId)
-  if (!filing) return []
-  return filing.documents
-    .filter((document) => document.mimeType === 'application/pdf')
-    .map((document) => documentFromFiling(filing, document))
 }
 
 function fallbackEntry(
@@ -247,24 +215,7 @@ function fallbackTrialEntries(session: CaseSession): TrialDocketEntry[] {
     ),
   ]
 
-  const filingEntries = session.docketEntries
-    .filter((entry) => entry.filingId)
-    .map((entry) => {
-      const documents = filingDocumentsForEntry(session, entry)
-      return {
-        id: entry.id,
-        entryNumber: entry.entryNumber,
-        filedAt: entry.filedAt,
-        title: entry.title,
-        text: entry.text,
-        documents:
-          documents.length > 0
-            ? documents
-            : [fallbackDocument(scenario, entry.entryNumber, entry.title)],
-      }
-    })
-
-  return [...lowerCourtEntries, ...filingEntries]
+  return lowerCourtEntries
 }
 
 export function createTrialDocket(session: CaseSession): TrialDocket {

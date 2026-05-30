@@ -1067,7 +1067,7 @@ function hasPartyActivity(session: CaseSession) {
 
 function navigationTabsForSession(session: CaseSession): ViewTab[] {
   return [
-    { key: 'docket', label: 'Docket', icon: PanelTop },
+    { key: 'docket', label: 'Appeals Docket', icon: PanelTop },
     { key: 'file', label: 'File', icon: Upload },
     ...((session.ecfReceipts?.length ?? 0) > 0
       ? [{ key: 'receipts' as const, label: 'Receipts', icon: FileCheck2 }]
@@ -2402,7 +2402,7 @@ function TrialDocketView({
           <div className="grid grid-cols-[1fr_auto] gap-3 border-b border-[#d8d1c4] p-4">
             <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
               <Search className="h-4 w-4" aria-hidden="true" />
-              Docket Results
+              Trial Docket Results
             </div>
             {recapResults.length ? (
               <span className="rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
@@ -2421,8 +2421,7 @@ function TrialDocketView({
             ))}
             {!recapPending && !recapResults.length ? (
               <div className="p-4 text-sm leading-6 text-[#68716c]">
-                Search CourtListener to open a public trial docket or import a source
-                reference into the simulator docket.
+                Search CourtListener to open or import a public trial docket.
               </div>
             ) : null}
           </div>
@@ -2458,7 +2457,7 @@ function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">
             <ListTree className="h-4 w-4" aria-hidden="true" />
-            Current Trial Docket
+            Trial Docket
           </div>
           <h2 className="mt-1 text-xl font-semibold">{trialDocket.caption}</h2>
           <div className="mt-1 text-sm text-[#59625d]">
