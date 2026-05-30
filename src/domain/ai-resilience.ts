@@ -10,17 +10,16 @@ export async function withTimeout<T>(
   ms: number,
   label: string,
 ): Promise<T> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), ms)
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
       promise,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new TimeoutError(label, ms)), ms),
-      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new TimeoutError(label, ms)), ms)
+      }),
     ])
   } finally {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
   }
 }
 

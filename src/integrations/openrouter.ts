@@ -1,5 +1,6 @@
 import type { CaseSession, ToolCall } from '../domain/types'
-import { validateToolCall } from '../domain/simulation'
+import { nextExpectedToolCall, validateToolCall } from '../domain/simulation'
+import { getCourtPack } from '../domain/packs'
 import {
   withTimeout,
   openRouterCircuitBreaker,
@@ -21,78 +22,89 @@ export type OpenRouterToolResult = {
   degradedReason?: string
 }
 
-const toolSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['tool', 'actorId'],
-  properties: {
-    tool: {
-      type: 'string',
-      enum: [
-        'issueClerkOrder',
-        'setDeadline',
-        'fileCounterpartyDocument',
-        'submitToPanel',
-        'issuePanelOrder',
-        'disposeCase',
-        'draftStaffMemo',
-        'castRuntimePanelVote',
-        'draftRuntimePanelDisposition',
-        'enterJudgment',
-        'setMandateDeadline',
-      ],
-    },
-    actorId: { type: 'string' },
-    title: { type: 'string' },
-    text: { type: 'string' },
-    label: { type: 'string' },
-    targetEventId: { type: 'string' },
-    offsetDays: { type: 'number' },
-    eventId: { type: 'string' },
-    disposition: { type: 'string' },
-    issueSummaries: { type: 'array', items: { type: 'string' } },
-    recommendedDisposition: { type: 'string' },
-    risks: { type: 'array', items: { type: 'string' } },
-    vote: {
-      type: 'string',
-      enum: ['affirm', 'reverse', 'vacate', 'vacate_in_part', 'dismiss', 'remand'],
-    },
-    reliefOption: { type: 'string' },
-    rationale: { type: 'string' },
-    joinsMajority: { type: 'boolean' },
-    separateWritingType: {
-      type: 'string',
-      enum: ['concurrence', 'dissent', 'concur_in_judgment'],
-    },
-    confidence: { type: 'number' },
-    judgmentText: { type: 'string' },
-    ruleRefs: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['ruleId', 'label', 'sourceUrl'],
-        properties: {
-          ruleId: { type: 'string' },
-          label: { type: 'string' },
-          sourceUrl: { type: 'string' },
+function toolSchema(actorIds: string[]) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['tool', 'actorId'],
+    properties: {
+      tool: {
+        type: 'string',
+        enum: [
+          'issueClerkOrder',
+          'setDeadline',
+          'fileCounterpartyDocument',
+          'submitToPanel',
+          'issuePanelOrder',
+          'disposeCase',
+          'draftStaffMemo',
+          'castRuntimePanelVote',
+          'draftRuntimePanelDisposition',
+          'enterJudgment',
+          'setMandateDeadline',
+        ],
+      },
+      actorId: actorIds.length
+        ? { type: 'string', enum: actorIds }
+        : { type: 'string' },
+      title: { type: 'string' },
+      text: { type: 'string' },
+      label: { type: 'string' },
+      targetEventId: { type: 'string' },
+      offsetDays: { type: 'number' },
+      eventId: { type: 'string' },
+      disposition: { type: 'string' },
+      issueSummaries: { type: 'array', items: { type: 'string' } },
+      recommendedDisposition: { type: 'string' },
+      risks: { type: 'array', items: { type: 'string' } },
+      vote: {
+        type: 'string',
+        enum: [
+          'affirm',
+          'reverse',
+          'vacate',
+          'vacate_in_part',
+          'dismiss',
+          'remand',
+        ],
+      },
+      reliefOption: { type: 'string' },
+      rationale: { type: 'string' },
+      joinsMajority: { type: 'boolean' },
+      separateWritingType: {
+        type: 'string',
+        enum: ['concurrence', 'dissent', 'concur_in_judgment'],
+      },
+      confidence: { type: 'number' },
+      judgmentText: { type: 'string' },
+      ruleRefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['ruleId', 'label', 'sourceUrl'],
+          properties: {
+            ruleId: { type: 'string' },
+            label: { type: 'string' },
+            sourceUrl: { type: 'string' },
+          },
+        },
+      },
+      sourceRuleRefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['ruleId', 'label', 'sourceUrl'],
+          properties: {
+            ruleId: { type: 'string' },
+            label: { type: 'string' },
+            sourceUrl: { type: 'string' },
+          },
         },
       },
     },
-    sourceRuleRefs: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['ruleId', 'label', 'sourceUrl'],
-        properties: {
-          ruleId: { type: 'string' },
-          label: { type: 'string' },
-          sourceUrl: { type: 'string' },
-        },
-      },
-    },
-  },
+  }
 }
 
 const OPENROUTER_TIMEOUT_MS = 30_000
@@ -111,6 +123,14 @@ export async function requestProceduralToolCall(
   }
 
   try {
+    const courtPack = getCourtPack(session.courtPackId)
+    const validAiActors = courtPack.aiActors.map((actor) => ({
+      id: actor.id,
+      label: actor.label,
+      allowedTools: actor.allowedTools,
+      authorityScope: actor.authorityScope,
+    }))
+    const recommendedToolCall = nextExpectedToolCall(session)
     const response = await withTimeout(
       fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -126,11 +146,13 @@ export async function requestProceduralToolCall(
             {
               role: 'system',
               content:
-                'You are a constrained court-simulator actor. Return one procedural tool call as JSON. Do not invent authority outside the case state.',
+                'You are a constrained court-simulator actor. Return one procedural tool call as JSON. Use only valid actor IDs and tools from the case state. If no stronger validated move is available, return recommendedToolCall exactly.',
             },
             {
               role: 'user',
               content: JSON.stringify({
+                recommendedToolCall,
+                validAiActors,
                 status: session.status,
                 procedureState: session.procedureState,
                 scenario: session.scenario,
@@ -155,7 +177,7 @@ export async function requestProceduralToolCall(
             json_schema: {
               name: 'procedural_tool_call',
               strict: true,
-              schema: toolSchema,
+              schema: toolSchema(validAiActors.map((actor) => actor.id)),
             },
           },
         }),
@@ -175,13 +197,22 @@ export async function requestProceduralToolCall(
     const rawText = payload.choices?.[0]?.message?.content ?? ''
 
     try {
-      const parsed = JSON.parse(rawText) as { tool?: unknown; actorId?: unknown }
-      if (typeof parsed.tool !== 'string' || typeof parsed.actorId !== 'string') {
+      const parsed = JSON.parse(rawText) as {
+        tool?: unknown
+        actorId?: unknown
+      }
+      if (
+        typeof parsed.tool !== 'string' ||
+        typeof parsed.actorId !== 'string'
+      ) {
         openRouterCircuitBreaker.recordSuccess()
         return { toolCall: null, rawText }
       }
 
-      const validation = validateToolCall(session, parsed as { tool: string; actorId: string })
+      const validation = validateToolCall(
+        session,
+        parsed as { tool: string; actorId: string },
+      )
       if (!validation.accepted) {
         openRouterCircuitBreaker.recordSuccess()
         return { toolCall: null, rawText }
@@ -195,7 +226,10 @@ export async function requestProceduralToolCall(
     }
   } catch (err) {
     openRouterCircuitBreaker.recordFailure()
-    if (err instanceof TimeoutError) {
+    if (
+      err instanceof TimeoutError ||
+      (err instanceof Error && err.name === 'AbortError')
+    ) {
       return {
         toolCall: null,
         rawText: DEGRADED_MODE_TEMPLATE,

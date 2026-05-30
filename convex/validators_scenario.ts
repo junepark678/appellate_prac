@@ -1,5 +1,5 @@
 import { v } from 'convex/values'
-import { participantRoleValidator } from './validators-core'
+import { participantRoleValidator } from './validators_core'
 
 export const scenarioRecordExcerptValidator = v.object({
   id: v.string(),
@@ -104,6 +104,15 @@ export const scenarioTrialDocketValidator = v.object({
 
 export const scenarioValidator = v.object({
   id: v.string(),
+  visibility: v.optional(v.union(v.literal('public_template'), v.literal('private'))),
+  ownerUserId: v.optional(v.string()),
+  scenarioFamilyKey: v.optional(v.string()),
+  revision: v.optional(v.number()),
+  revisionStatus: v.optional(
+    v.union(v.literal('draft'), v.literal('published'), v.literal('archived')),
+  ),
+  createdFromScenarioId: v.optional(v.string()),
+  supersededByScenarioId: v.optional(v.string()),
   title: v.string(),
   source: v.union(
     v.literal('synthetic'),

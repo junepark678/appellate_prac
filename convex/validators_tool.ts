@@ -1,6 +1,6 @@
 import { v } from 'convex/values'
-import { ruleRefValidator } from './validators-core'
-import { scenarioDocumentAssetValidator } from './validators-scenario'
+import { ruleRefValidator } from './validators_core'
+import { scenarioDocumentAssetValidator } from './validators_scenario'
 
 export const toolCallValidator = v.union(
   v.object({

@@ -8,10 +8,10 @@ import {
   qualityStateValidator,
   deadlineStatusValidator,
   ruleRefValidator,
-} from './validators-core'
-import { scenarioValidator, participantValidator } from './validators-scenario'
-import { filingRecordValidator } from './validators-filing'
-import { actorWorkProductValidator } from './validators-actor'
+} from './validators_core'
+import { scenarioValidator, participantValidator } from './validators_scenario'
+import { filingRecordValidator } from './validators_filing'
+import { actorWorkProductValidator } from './validators_actor'
 
 export const docketEntryValidator = v.object({
   id: v.string(),

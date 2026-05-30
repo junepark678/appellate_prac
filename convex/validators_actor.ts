@@ -1,5 +1,5 @@
 import { v } from 'convex/values'
-import { participantRoleValidator, ruleRefValidator, validationIssueValidator } from './validators-core'
+import { participantRoleValidator, ruleRefValidator, validationIssueValidator } from './validators_core'
 
 export const actorWorkProductKindValidator = v.union(
   v.literal('counterparty_strategy'),

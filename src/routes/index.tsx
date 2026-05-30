@@ -188,7 +188,9 @@ function Home() {
   const importCourtListenerSource = useMutation(
     api.caseSessions.importCourtListenerSource,
   )
-  const advanceLive = useAction(api.caseSessions.advanceLiveEvent) as AdvanceLiveEventAction
+  const advanceLive = useAction(
+    api.integrations.requestLiveProceduralToolCall,
+  ) as AdvanceLiveEventAction
   const generateActorWorkProduct = useAction(api.caseSessions.generateActorWorkProduct)
   const searchCourtListener = useAction(
     api.integrations.searchLiveCourtListenerDockets,

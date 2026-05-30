@@ -1,6 +1,6 @@
 import { v } from 'convex/values'
-import { participantRoleValidator, filingOutcomeValidator, validationIssueValidator } from './validators-core'
-import { uploadedDocumentValidator } from './validators-document'
+import { participantRoleValidator, filingOutcomeValidator, validationIssueValidator } from './validators_core'
+import { uploadedDocumentValidator } from './validators_document'
 
 export const filingAttachmentValidator = v.object({
   id: v.string(),
