@@ -8,9 +8,6 @@ type ReadCtx = QueryCtx | MutationCtx
 
 async function requireReviewer(ctx: ReadCtx) {
   const { user } = await requireCurrentUser(ctx)
-  if (!['admin', 'instructor'].includes(user.role)) {
-    throw new Error('Instructor or admin role required')
-  }
   return user
 }
 

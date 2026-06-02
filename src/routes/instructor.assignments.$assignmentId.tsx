@@ -53,7 +53,7 @@ function InstructorAssignment() {
           {sessions?.map((session) => (
             <div key={session.assignmentSessionId} className="grid gap-3 p-4 md:grid-cols-5">
               <div className="md:col-span-2">
-                <p className="font-medium">{session.studentName}</p>
+                <p className="font-medium">{session.accountName}</p>
                 <p className="text-sm text-slate-600">{session.status}</p>
               </div>
               <p className="text-sm text-slate-600">{session.submittedAt ?? 'Not submitted'}</p>

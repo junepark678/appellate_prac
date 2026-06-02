@@ -44,7 +44,11 @@ export function isActiveInstitutionMembership(
 
 export async function requireGlobalRole(ctx: ReadCtx, roles: UserRole[]) {
   const { user } = await requireCurrentUser(ctx)
-  if (!roles.includes(user.role)) {
+  const requiresAdminOnly = roles.every((role) => role === 'admin')
+  const roleAllowed =
+    roles.includes(user.role) ||
+    (!requiresAdminOnly && user.role !== 'admin' && roles.some((role) => role !== 'admin'))
+  if (!roleAllowed) {
     throw unauthorizedRole(roles)
   }
   return user
@@ -52,6 +56,18 @@ export async function requireGlobalRole(ctx: ReadCtx, roles: UserRole[]) {
 
 export async function requireAdmin(ctx: ReadCtx) {
   return requireGlobalRole(ctx, ['admin'])
+}
+
+function institutionRoleAllowed(role: InstitutionRole, roles: InstitutionRole[]) {
+  if (roles.includes(role)) return true
+  if (role === 'admin') return roles.includes('admin')
+  return roles.some((requestedRole) => requestedRole !== 'admin')
+}
+
+function cohortRoleAllowed(role: CohortRole, roles: CohortRole[]) {
+  if (roles.includes(role)) return true
+  if (role === 'admin') return roles.includes('admin')
+  return roles.some((requestedRole) => requestedRole !== 'admin')
 }
 
 async function hasActiveSupportGrant(
@@ -92,7 +108,7 @@ export async function requireInstitutionRole(
   const now = new Date().toISOString()
   const membership = memberships
     .filter((candidate) => isActiveInstitutionMembership(candidate, now))
-    .filter((candidate) => roles.includes(candidate.role))
+    .filter((candidate) => institutionRoleAllowed(candidate.role, roles))
     .sort(
       (a, b) =>
         institutionRoleRank[b.role] - institutionRoleRank[a.role] ||
@@ -104,7 +120,6 @@ export async function requireInstitutionRole(
 
   if (
     options.allowSupportGrant &&
-    user.role === 'instructor' &&
     (await hasActiveSupportGrant(ctx, institutionId, user._id))
   ) {
     return { user, membership: null }
@@ -133,7 +148,7 @@ export async function requireCohortRole(
       index.eq('cohortId', cohortId).eq('userId', user._id),
     )
     .unique()
-  if (membership && roles.includes(membership.role)) {
+  if (membership && cohortRoleAllowed(membership.role, roles)) {
     return { user, cohort, membership }
   }
 

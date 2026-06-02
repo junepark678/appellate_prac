@@ -3,12 +3,13 @@ import {
   ClerkLoaded,
   ClerkLoading,
   SignInButton,
+  SignOutButton,
   UserButton,
   useUser,
 } from '@clerk/tanstack-react-start'
 import { useConvexAuth, useMutation } from 'convex/react'
 import { useEffect, type ReactNode } from 'react'
-import { BookOpen, GraduationCap, Shield } from 'lucide-react'
+import { BookOpen, GraduationCap, LogOut, Shield } from 'lucide-react'
 
 import { api } from '../../convex/_generated/api'
 
@@ -42,14 +43,14 @@ export function AppFrame({
               className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
             >
               <BookOpen className="h-4 w-4" aria-hidden="true" />
-              Learner
+              Practice
             </Link>
             <Link
               to="/instructor"
               className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
             >
               <GraduationCap className="h-4 w-4" aria-hidden="true" />
-              Instructor
+              Courses
             </Link>
             <Link
               to="/admin"
@@ -64,7 +65,18 @@ export function AppFrame({
           </ClerkLoading>
           <ClerkLoaded>
             {isSignedIn ? (
-              <UserButton />
+              <div className="flex items-center gap-2">
+                <UserButton />
+                <SignOutButton redirectUrl="/">
+                  <button
+                    className="inline-flex items-center gap-1 rounded border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-100"
+                    type="button"
+                  >
+                    <LogOut className="h-4 w-4" aria-hidden="true" />
+                    Log out
+                  </button>
+                </SignOutButton>
+              </div>
             ) : (
               <SignInButton mode="modal">
                 <button className="rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white">
