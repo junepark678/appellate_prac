@@ -575,3 +575,36 @@ export const listMine = query({
     }))
   },
 })
+
+export const listRoster = query({
+  args: {
+    cohortId: v.id('cohorts'),
+  },
+  returns: v.array(
+    v.object({
+      userId: v.id('users'),
+      displayName: v.string(),
+      accountRole: v.union(v.literal('student'), v.literal('admin'), v.literal('instructor')),
+      cohortRole: cohortRoleValidator,
+    }),
+  ),
+  handler: async (ctx, args) => {
+    await requireCohortRole(ctx, args.cohortId, ['instructor', 'admin'])
+    const memberships = await ctx.db
+      .query('cohortMemberships')
+      .withIndex('by_cohort', (index) => index.eq('cohortId', args.cohortId))
+      .collect()
+    const rows = []
+    for (const membership of memberships) {
+      const user = await ctx.db.get(membership.userId)
+      if (!user) continue
+      rows.push({
+        userId: user._id,
+        displayName: user.displayName,
+        accountRole: user.role,
+        cohortRole: membership.role,
+      })
+    }
+    return rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+  },
+})

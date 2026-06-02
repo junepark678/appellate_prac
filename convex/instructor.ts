@@ -146,6 +146,80 @@ export const getSessionReplay = query({
   },
 })
 
+export const getReviewContext = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.union(
+    v.object({
+      assignmentSessionId: v.id('assignmentSessions'),
+      assignmentId: v.id('assignments'),
+      assignmentTitle: v.string(),
+      accountName: v.string(),
+      status: v.union(
+        v.literal('in_progress'),
+        v.literal('submitted'),
+        v.literal('reviewed'),
+      ),
+      submittedAt: v.optional(v.string()),
+      reviewedAt: v.optional(v.string()),
+      instructorNote: v.optional(v.string()),
+      score: v.optional(v.number()),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const assignmentSessions = await ctx.db
+      .query('assignmentSessions')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
+      .collect()
+
+    let permissionError: Error | null = null
+    for (const assignmentSession of assignmentSessions) {
+      try {
+        const { assignment } = await requireAssignmentInstructor(
+          ctx,
+          assignmentSession.assignmentId,
+        )
+        const user = await ctx.db.get(assignmentSession.userId)
+        const status: ReviewStatus = assignmentSession.reviewedAt
+          ? 'reviewed'
+          : isSubmittedLockActive(assignmentSession)
+            ? 'submitted'
+            : 'in_progress'
+        return {
+          assignmentSessionId: assignmentSession._id,
+          assignmentId: assignment._id,
+          assignmentTitle: assignment.title,
+          accountName: user?.displayName ?? 'Account',
+          status,
+          ...(assignmentSession.submittedAt
+            ? { submittedAt: assignmentSession.submittedAt }
+            : {}),
+          ...(assignmentSession.reviewedAt
+            ? { reviewedAt: assignmentSession.reviewedAt }
+            : {}),
+          ...(assignmentSession.instructorNote
+            ? { instructorNote: assignmentSession.instructorNote }
+            : {}),
+          ...(typeof assignmentSession.score === 'number'
+            ? { score: assignmentSession.score }
+            : {}),
+        }
+      } catch (error) {
+        if (error instanceof Error) {
+          permissionError = error
+        }
+      }
+    }
+
+    if (assignmentSessions.length > 0) {
+      throw permissionError ?? notFound('Assignment session', args.caseSessionId)
+    }
+    return null
+  },
+})
+
 export const reviewAssignmentSession = mutation({
   args: {
     assignmentSessionId: v.id('assignmentSessions'),

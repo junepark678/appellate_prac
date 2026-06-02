@@ -386,8 +386,8 @@ export const update = mutation({
     ])
     await ctx.db.patch(args.assignmentId, {
       ...(args.title ? { title: args.title } : {}),
-      ...(args.dueAt ? { dueAt: args.dueAt } : {}),
-      ...(args.rubricId ? { rubricId: args.rubricId } : {}),
+      ...(args.dueAt !== undefined ? { dueAt: args.dueAt || undefined } : {}),
+      ...(args.rubricId !== undefined ? { rubricId: args.rubricId || undefined } : {}),
       ...(args.autonomyMode ? { autonomyMode: args.autonomyMode } : {}),
       ...(typeof args.budgetCapCents === 'number'
         ? { budgetCapCents: args.budgetCapCents }

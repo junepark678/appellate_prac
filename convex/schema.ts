@@ -298,6 +298,32 @@ export default defineSchema({
     published: v.boolean(),
   }).index('by_pack_id', ['packId']),
 
+  packBundles: defineTable({
+    courtPackId: v.string(),
+    bundleVersion: v.string(),
+    label: v.string(),
+    manifestJson: v.string(),
+    zipStorageId: v.optional(v.id('_storage')),
+    zipFileName: v.optional(v.string()),
+    zipContentHash: v.optional(v.string()),
+    zipSizeBytes: v.optional(v.number()),
+    sourceVersionIds: v.array(v.string()),
+    componentModuleIds: v.array(v.string()),
+    artifactIds: v.array(v.id('sourceArtifacts')),
+    status: v.union(
+      v.literal('draft'),
+      v.literal('indexed'),
+      v.literal('published'),
+      v.literal('retired'),
+    ),
+    createdByUserId: v.id('users'),
+    createdAt: v.string(),
+    updatedAt: v.string(),
+  })
+    .index('by_court_pack', ['courtPackId'])
+    .index('by_court_pack_version', ['courtPackId', 'bundleVersion'])
+    .index('by_status', ['status']),
+
   scenarios: defineTable({
     scenarioKey: v.string(),
     visibility: v.optional(v.union(v.literal('public_template'), v.literal('private'))),

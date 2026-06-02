@@ -2742,7 +2742,7 @@ export const courtPacks: CourtPack[] = [
     procedureDomain: 'civil_appeal',
     baseCourtPackIds: [],
     includedRulePackIds: ['procedure-core', 'civil-appeal', 'frap-2025'],
-    rulePackIds: ['frap-2025', 'ca4-current'],
+    rulePackIds: ['ca4-current'],
     procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
     participantRoles: [
       'appellant',
@@ -2773,7 +2773,7 @@ export const courtPacks: CourtPack[] = [
     procedureDomain: 'criminal_appeal',
     baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
     includedRulePackIds: ['procedure-core', 'criminal-appeal', 'frap-2025'],
-    rulePackIds: ['frap-2025', 'ca4-current'],
+    rulePackIds: ['ca4-current'],
     procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
     participantRoles: [
       'appellant',
@@ -2796,7 +2796,7 @@ export const courtPacks: CourtPack[] = [
     procedureDomain: 'agency_review',
     baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
     includedRulePackIds: ['procedure-core', 'agency-review', 'frap-2025'],
-    rulePackIds: ['frap-2025', 'ca4-current'],
+    rulePackIds: ['ca4-current'],
     procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
     participantRoles: [
       'appellant',
@@ -2819,7 +2819,7 @@ export const courtPacks: CourtPack[] = [
     procedureDomain: 'original_writ',
     baseCourtPackIds: ['us-federal-ca4-civil-appeal'],
     includedRulePackIds: ['procedure-core', 'original-writ', 'frap-2025'],
-    rulePackIds: ['frap-2025', 'ca4-current'],
+    rulePackIds: ['ca4-current'],
     procedureModuleIds: ['federal-civil-appeal-standard-briefing'],
     participantRoles: [
       'appellant',

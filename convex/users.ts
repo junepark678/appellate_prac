@@ -63,12 +63,25 @@ export const list = query({
       displayName: v.string(),
       role: userRoleValidator,
       monthlyAiBudgetCents: v.number(),
+      currentMonthAiSpendCents: v.number(),
     }),
   ),
   handler: async (ctx, args) => {
     await requireAdmin(ctx)
-    const users = await ctx.db.query('users').collect()
+    const [users, aiRuns] = await Promise.all([
+      ctx.db.query('users').collect(),
+      ctx.db.query('aiRuns').collect(),
+    ])
     const search = args.search?.trim().toLowerCase()
+    const month = new Date().toISOString().slice(0, 7)
+    const spendByUser = new Map<string, number>()
+    for (const run of aiRuns) {
+      if (run.createdMonth !== month) continue
+      spendByUser.set(
+        run.userId,
+        (spendByUser.get(run.userId) ?? 0) + run.costCents,
+      )
+    }
     return users
       .filter((user) =>
         search
@@ -83,6 +96,7 @@ export const list = query({
         displayName: user.displayName,
         role: user.role,
         monthlyAiBudgetCents: user.monthlyAiBudgetCents,
+        currentMonthAiSpendCents: spendByUser.get(user._id) ?? 0,
       }))
   },
 })
@@ -106,6 +120,37 @@ export const setRole = mutation({
       targetTable: 'users',
       targetId: args.userId,
       metadata: { previousRole: target.role, nextRole: args.role },
+    })
+    return null
+  },
+})
+
+export const setMonthlyAiBudget = mutation({
+  args: {
+    userId: v.id('users'),
+    monthlyAiBudgetCents: v.number(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const actor = await requireAdmin(ctx)
+    const target = await ctx.db.get(args.userId)
+    if (!target) {
+      throw notFound('User', args.userId)
+    }
+    const monthlyAiBudgetCents = Math.max(
+      0,
+      Math.round(args.monthlyAiBudgetCents),
+    )
+    await ctx.db.patch(args.userId, { monthlyAiBudgetCents })
+    await writeAuditLog(ctx, {
+      actorUserId: actor._id,
+      action: 'user.ai_budget_changed',
+      targetTable: 'users',
+      targetId: args.userId,
+      metadata: {
+        previousMonthlyAiBudgetCents: target.monthlyAiBudgetCents,
+        nextMonthlyAiBudgetCents: monthlyAiBudgetCents,
+      },
     })
     return null
   },

@@ -9,6 +9,7 @@
  */
 
 import type * as admin from "../admin.js";
+import type * as adminPackBundles from "../adminPackBundles.js";
 import type * as adminSources from "../adminSources.js";
 import type * as assignments from "../assignments.js";
 import type * as authHelpers from "../authHelpers.js";
@@ -43,6 +44,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   admin: typeof admin;
+  adminPackBundles: typeof adminPackBundles;
   adminSources: typeof adminSources;
   assignments: typeof assignments;
   authHelpers: typeof authHelpers;
