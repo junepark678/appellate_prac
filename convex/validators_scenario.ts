@@ -76,6 +76,7 @@ export const scenarioDocumentAssetValidator = v.object({
     v.literal('courtlistener'),
     v.literal('uploaded'),
   ),
+  fileUrl: v.optional(v.string()),
   publicUrl: v.optional(v.string()),
   sourceUrl: v.optional(v.string()),
   storageId: v.optional(v.string()),

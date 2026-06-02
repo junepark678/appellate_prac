@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { createSyntheticPdf, wrapPdfWords } from '../src/domain/synthetic-pdf'
 import type { Scenario, ScenarioDocumentAsset, ScenarioTrialDocket } from '../src/domain/types'
 
 type MutableScenario = Scenario & {
@@ -11,7 +12,6 @@ type MutableScenario = Scenario & {
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)))
 const seedPath = join(rootDir, 'src/domain/scenarios.seed.json')
-const recordsRoot = join(rootDir, 'public/trial-records')
 
 type TrialDocketEntryDraft = {
   entryNumber: number
@@ -19,63 +19,6 @@ type TrialDocketEntryDraft = {
   title: string
   text: string
   assetIndex?: number
-}
-
-function pdfEscape(value: string) {
-  return value.replaceAll('\\', '\\\\').replaceAll('(', '\\(').replaceAll(')', '\\)')
-}
-
-function wrapWords(value: string, width = 86) {
-  const words = value.replace(/\s+/g, ' ').trim().split(' ')
-  const lines: string[] = []
-  let current = ''
-  for (const word of words) {
-    const next = current ? `${current} ${word}` : word
-    if (next.length > width && current) {
-      lines.push(current)
-      current = word
-    } else {
-      current = next
-    }
-  }
-  if (current) lines.push(current)
-  return lines
-}
-
-function createPdf(title: string, lines: string[]) {
-  const contentLines = [
-    'BT',
-    '/F1 12 Tf',
-    '50 760 Td',
-    '14 TL',
-    `(${pdfEscape(title)}) Tj`,
-    'T*',
-    '/F1 10 Tf',
-    ...lines.flatMap((line) => [`(${pdfEscape(line)}) Tj`, 'T*']),
-    'ET',
-  ]
-  const stream = contentLines.join('\n')
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
-  ]
-  let pdf = '%PDF-1.4\n'
-  const offsets = [0]
-  for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(pdf))
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
-  }
-  const xrefOffset = Buffer.byteLength(pdf)
-  pdf += `xref\n0 ${objects.length + 1}\n`
-  pdf += '0000000000 65535 f \n'
-  for (const offset of offsets.slice(1)) {
-    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
-  }
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
-  return pdf
 }
 
 function docketNumberFor(scenario: Scenario) {
@@ -415,27 +358,20 @@ function filedAtFor(day: number, entryNumber: number) {
 }
 
 function createAssets(scenario: Scenario, docketEntries: TrialDocketEntryDraft[]) {
-  const assetEntries = docketEntries
-    .filter((entry): entry is TrialDocketEntryDraft & { assetIndex: number } => entry.assetIndex !== undefined)
-    .sort((left, right) => left.assetIndex - right.assetIndex)
-  const dir = join(recordsRoot, scenario.id)
-  mkdirSync(dir, { recursive: true })
-
-  return assetEntries.map((entry): ScenarioDocumentAsset => {
+  return docketEntries.map((entry, index): ScenarioDocumentAsset => {
     const fileName = fileNameFor(entry.entryNumber, entry.title)
-    const extractedText = entryTextFor(scenario, entry.title, entry.assetIndex)
-    const pdf = createPdf(
+    const extractedText = entryTextFor(scenario, entry.title, entry.assetIndex ?? index)
+    const pdf = createSyntheticPdf(
       `${scenario.shortCaption} - ${entry.title}`,
-      wrapWords(extractedText),
+      wrapPdfWords(extractedText),
     )
-    writeFileSync(join(dir, fileName), pdf)
     return {
       id: `${scenario.id}-${fileName.replace(/\.pdf$/, '')}`,
       label: entry.title,
       fileName,
       mimeType: 'application/pdf',
       source: 'synthetic',
-      sizeBytes: Buffer.byteLength(pdf),
+      sizeBytes: new TextEncoder().encode(pdf).byteLength,
       pageCount: 1,
       extractedText,
     }
@@ -447,24 +383,27 @@ function createTrialDocket(
   docketEntries: TrialDocketEntryDraft[],
   assets: ScenarioDocumentAsset[],
 ): ScenarioTrialDocket {
+  const assetByEntryNumber = new Map(
+    assets.map((asset) => [Number(asset.fileName.slice(0, 3)), asset]),
+  )
   return {
     caption: scenario.shortCaption,
     court: scenario.lowerTribunal,
     docketNumber: docketNumberFor(scenario),
-    entries: docketEntries.map((entry) => ({
-      id: `${scenario.id}-trial-docket-${String(entry.entryNumber).padStart(3, '0')}`,
-      entryNumber: entry.entryNumber,
-      filedAt: filedAtFor(entry.day, entry.entryNumber),
-      title: entry.title,
-      text:
-        entry.assetIndex === undefined
-          ? entry.text
-          : assets[entry.assetIndex]?.extractedText ?? entry.text,
-      documentAssetIds:
-        entry.assetIndex === undefined || !assets[entry.assetIndex]
-          ? []
-          : [assets[entry.assetIndex].id],
-    })),
+    entries: docketEntries.map((entry) => {
+      const asset = assetByEntryNumber.get(entry.entryNumber)
+      return {
+        id: `${scenario.id}-trial-docket-${String(entry.entryNumber).padStart(3, '0')}`,
+        entryNumber: entry.entryNumber,
+        filedAt: filedAtFor(entry.day, entry.entryNumber),
+        title: entry.title,
+        text:
+          entry.assetIndex === undefined
+            ? entry.text
+            : asset?.extractedText ?? entry.text,
+        documentAssetIds: asset ? [asset.id] : [],
+      }
+    }),
   }
 }
 

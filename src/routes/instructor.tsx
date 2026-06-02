@@ -22,7 +22,7 @@ function InstructorHome() {
   }
 
   return (
-    <AppFrame title="Instructor Dashboard">
+    <AppFrame title="Course Dashboard">
       <section className="mb-5 rounded border border-slate-200 bg-white p-4">
         <h2 className="font-semibold">Create cohort</h2>
         <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]">

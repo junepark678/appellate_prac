@@ -6,6 +6,7 @@ import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
 import { requireAdminUser, requireCurrentUser } from './authHelpers'
+import { createSyntheticPdf, wrapPdfWords } from '../src/domain/synthetic-pdf'
 import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
@@ -643,9 +644,41 @@ export const upsertScenarioDocumentAsset = internalMutation({
   },
 })
 
+export const getScenarioDocumentAssetStorageId = internalQuery({
+  args: {
+    scenarioKey: v.string(),
+    assetKey: v.string(),
+  },
+  returns: v.union(v.id('_storage'), v.null()),
+  handler: async (ctx, args) => {
+    const scenario = await ctx.db
+      .query('scenarios')
+      .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', args.scenarioKey))
+      .unique()
+    if (!scenario) return null
+    const existing = await ctx.db
+      .query('scenarioDocumentAssets')
+      .withIndex('by_scenario_asset_key', (index) =>
+        index.eq('scenarioId', scenario._id).eq('assetKey', args.assetKey),
+      )
+      .unique()
+    return existing?.storageId ?? null
+  },
+})
+
 async function sha256Hex(buffer: ArrayBuffer) {
   const digest = await crypto.subtle.digest('SHA-256', buffer)
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function syntheticScenarioAssetBlob(scenario: Scenario, asset: ScenarioDocumentAsset) {
+  const pdf = createSyntheticPdf(
+    `${scenario.shortCaption} - ${asset.label}`,
+    wrapPdfWords(asset.extractedText ?? asset.label),
+  )
+  const blob = new Blob([pdf], { type: 'application/pdf' })
+  const buffer = await blob.arrayBuffer()
+  return { blob, buffer }
 }
 
 export const requireAdminForAction = internalQuery({
@@ -659,73 +692,39 @@ export const requireAdminForAction = internalQuery({
 
 const maxScenarioAssetBytes = 30 * 1024 * 1024
 
-export function scenarioAssetFetchUrl(baseUrl: URL, scenarioId: string, fileName: string) {
-  const url = new URL(baseUrl.href)
-  const basePath = url.pathname.replace(/\/$/, '')
-  url.pathname = `${basePath}/trial-records/${scenarioId}/${fileName}`
-  url.search = ''
-  url.hash = ''
-  return url
-}
-
-function isAllowedScenarioAssetBaseUrl(baseUrl: URL) {
-  if (!['http:', 'https:'].includes(baseUrl.protocol)) return false
-  if (['localhost', '127.0.0.1', '::1'].includes(baseUrl.hostname)) return true
-
-  const appUrl = process.env.OPENROUTER_APP_URL
-  if (!appUrl) return false
-
-  try {
-    return new URL(appUrl).origin === baseUrl.origin
-  } catch {
-    return false
-  }
-}
-
 export const migrateBundledScenarioPdfAssets = action({
-  args: {
-    baseUrl: v.string(),
-  },
+  args: {},
   returns: v.object({
     uploaded: v.number(),
     skipped: v.number(),
   }),
-  handler: async (ctx, args) => {
+  handler: async (ctx) => {
     await ctx.runQuery(internal.scenarios.requireAdminForAction, {})
     let uploaded = 0
     let skipped = 0
-    const baseUrl = new URL(args.baseUrl)
-    if (!isAllowedScenarioAssetBaseUrl(baseUrl)) {
-      throw new Error('Scenario asset base URL is not allowed.')
-    }
     for (const scenario of seedScenarios) {
       for (const asset of scenario.documentAssets ?? []) {
         if (asset.storageId) {
           skipped += 1
           continue
         }
-        const response = await fetch(scenarioAssetFetchUrl(baseUrl, scenario.id, asset.fileName))
-        if (!response.ok) {
+        const existingStorageId = await ctx.runQuery(
+          internal.scenarios.getScenarioDocumentAssetStorageId,
+          {
+            scenarioKey: scenario.id,
+            assetKey: asset.id,
+          },
+        )
+        if (existingStorageId) {
           skipped += 1
           continue
         }
-        const contentType = response.headers.get('content-type') ?? ''
-        if (contentType && !contentType.toLowerCase().includes('application/pdf')) {
-          skipped += 1
-          continue
-        }
-        const contentLength = Number(response.headers.get('content-length') ?? '0')
-        if (contentLength > maxScenarioAssetBytes) {
-          skipped += 1
-          continue
-        }
-        const buffer = await response.arrayBuffer()
+        const { blob, buffer } = await syntheticScenarioAssetBlob(scenario, asset)
         if (buffer.byteLength > maxScenarioAssetBytes) {
           skipped += 1
           continue
         }
         const sha256 = await sha256Hex(buffer)
-        const blob = new Blob([buffer], { type: 'application/pdf' })
         const storageId = await ctx.storage.store(blob, { sha256 })
         await ctx.runMutation(internal.scenarios.upsertScenarioDocumentAsset, {
           scenarioKey: scenario.id,

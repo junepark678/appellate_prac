@@ -222,11 +222,7 @@ function canViewUnpublishedAssignment(
   user: Doc<'users'>,
   membership: Doc<'cohortMemberships'> | null,
 ) {
-  return (
-    user.role === 'admin' ||
-    membership?.role === 'instructor' ||
-    membership?.role === 'admin'
-  )
+  return user.role === 'admin' || membership !== null
 }
 
 async function insertInitialSessionState(

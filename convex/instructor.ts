@@ -43,7 +43,7 @@ export const listAssignmentSessions = query({
       assignmentSessionId: v.id('assignmentSessions'),
       caseSessionId: v.id('caseSessions'),
       userId: v.id('users'),
-      studentName: v.string(),
+      accountName: v.string(),
       status: v.union(
         v.literal('in_progress'),
         v.literal('submitted'),
@@ -79,7 +79,7 @@ export const listAssignmentSessions = query({
         assignmentSessionId: session._id,
         caseSessionId: session.caseSessionId,
         userId: session.userId,
-        studentName: user?.displayName ?? 'Student',
+        accountName: user?.displayName ?? 'Account',
         status,
         ...(session.submittedAt ? { submittedAt: session.submittedAt } : {}),
         ...(session.reviewedAt ? { reviewedAt: session.reviewedAt } : {}),
@@ -203,7 +203,7 @@ export const exportAssignmentCsv = query({
       .collect()
     const rows = [
       [
-        'studentName',
+        'accountName',
         'status',
         'submittedAt',
         'reviewedAt',
@@ -219,7 +219,7 @@ export const exportAssignmentCsv = query({
         .withIndex('by_case', (index) => index.eq('caseSessionId', session.caseSessionId))
         .collect()
       rows.push([
-        user?.displayName ?? 'Student',
+        user?.displayName ?? 'Account',
         session.reviewedAt
           ? 'reviewed'
           : isSubmittedLockActive(session)

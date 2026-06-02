@@ -5,6 +5,7 @@ import {
   ClerkLoading,
   Show,
   SignInButton,
+  SignOutButton,
   SignUpButton,
   UserButton,
   useUser,
@@ -24,6 +25,7 @@ import {
   ListTree,
   Library,
   LogIn,
+  LogOut,
   PanelTop,
   Scale,
   Search,
@@ -58,6 +60,10 @@ import {
   preflightEcfFiling,
 } from '../domain/filing/ecf'
 import { createTrialDocket } from '../domain/trial-docket'
+import {
+  canCreateTrialDocketDocumentPdf,
+  createTrialDocketDocumentPdf,
+} from '../domain/trial-docket-download'
 import { nextProcedureToolCall } from '../domain/procedure/state-machine'
 import { defaultPanelJudgeProfiles, formPanelConference } from '../domain/panel/conference'
 import type {
@@ -753,12 +759,21 @@ function AuthenticatedAccount() {
   const label =
     user?.fullName ??
     user?.primaryEmailAddress?.emailAddress ??
-    'Student account'
+    'Account'
 
   return (
-    <div className="flex items-center gap-2 rounded-md border border-[#d8d1c4] bg-white px-3 py-2">
-      <span className="max-w-[200px] truncate font-medium">{label}</span>
+    <div className="flex items-center gap-2 rounded-md border border-[#d8d1c4] bg-white px-2 py-2">
+      <span className="max-w-[200px] truncate px-1 font-medium">{label}</span>
       <UserButton />
+      <SignOutButton redirectUrl="/">
+        <button
+          className="inline-flex items-center gap-1 rounded-md border border-[#d8d1c4] px-2 py-1 font-semibold text-[#1d4d4f] hover:bg-[#eef6f3]"
+          type="button"
+        >
+          <LogOut className="h-4 w-4" aria-hidden="true" />
+          Log out
+        </button>
+      </SignOutButton>
     </div>
   )
 }
@@ -2442,10 +2457,41 @@ function trialDocketDocumentHref(document: TrialDocket['entries'][number]['docum
   return document.fileUrl ?? document.sourceUrl
 }
 
+function isDownloadableTrialDocketDocument(
+  document: TrialDocket['entries'][number]['documents'][number],
+) {
+  return Boolean(document.fileUrl)
+}
+
+function downloadGeneratedTrialDocketDocument(
+  entry: TrialDocket['entries'][number],
+  document: TrialDocket['entries'][number]['documents'][number],
+) {
+  const blob = new Blob([createTrialDocketDocumentPdf(entry, document)], {
+    type: 'application/pdf',
+  })
+  const href = URL.createObjectURL(blob)
+  const link = window.document.createElement('a')
+  link.href = href
+  link.download = document.fileName
+  link.rel = 'noreferrer'
+  window.document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(href), 0)
+}
+
 function trialDocketDocumentLabel(
   entry: TrialDocket['entries'][number],
   document: TrialDocket['entries'][number]['documents'][number],
 ) {
+  if (
+    isDownloadableTrialDocketDocument(document) ||
+    (!trialDocketDocumentHref(document) &&
+      canCreateTrialDocketDocumentPdf(document))
+  ) {
+    return 'Download PDF'
+  }
   const value = `${document.label} ${entry.title}`.toLowerCase()
   if (value.includes('opinion') || value.includes('order')) return 'Opinion PDF'
   if (value.includes('judgment')) return 'Judgment PDF'
@@ -2515,13 +2561,29 @@ function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
                       return href ? (
                         <a
                           className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[#cfc7b9] bg-white px-3 py-2 text-xs font-semibold text-[#1d4d4f] hover:border-[#1d4d4f]"
+                          download={
+                            isDownloadableTrialDocketDocument(document)
+                              ? document.fileName
+                              : undefined
+                          }
                           href={href}
                           key={document.id}
                           rel="noreferrer"
-                          target="_blank"
+                          target={
+                            isDownloadableTrialDocketDocument(document) ? undefined : '_blank'
+                          }
                         >
                           {content}
                         </a>
+                      ) : canCreateTrialDocketDocumentPdf(document) ? (
+                        <button
+                          className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[#cfc7b9] bg-white px-3 py-2 text-xs font-semibold text-[#1d4d4f] hover:border-[#1d4d4f]"
+                          key={document.id}
+                          type="button"
+                          onClick={() => downloadGeneratedTrialDocketDocument(entry, document)}
+                        >
+                          {content}
+                        </button>
                       ) : (
                         <span
                           className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[#d8d1c4] bg-[#f2eee6] px-3 py-2 text-xs font-semibold text-[#59625d]"

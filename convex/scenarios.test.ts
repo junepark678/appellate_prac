@@ -1,17 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { scenarioAssetFetchUrl } from './scenarios'
+import scenarioSeed from '../src/domain/scenarios.seed.json'
 
-describe('scenarioAssetFetchUrl', () => {
-  it('preserves the configured base URL path for bundled trial record assets', () => {
-    const url = scenarioAssetFetchUrl(
-      new URL('https://example.com/app?preview=true#trial-records'),
-      'synthetic-scenario',
-      '001-complaint.pdf',
-    )
-
-    expect(url.toString()).toBe(
-      'https://example.com/app/trial-records/synthetic-scenario/001-complaint.pdf',
-    )
+describe('seed scenario assets', () => {
+  it('does not expose bundled synthetic trial-record PDFs as public static URLs', () => {
+    for (const scenario of scenarioSeed) {
+      for (const asset of scenario.documentAssets ?? []) {
+        const assetWithLegacyUrls = asset as { fileUrl?: string; publicUrl?: string }
+        expect(assetWithLegacyUrls.fileUrl).toBeUndefined()
+        expect(assetWithLegacyUrls.publicUrl).toBeUndefined()
+      }
+    }
   })
 })

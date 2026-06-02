@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useMutation, useQuery } from 'convex/react'
+import { useAction, useMutation, useQuery } from 'convex/react'
 import { useState } from 'react'
 
 import { api } from '../../convex/_generated/api'
@@ -14,8 +14,13 @@ function AdminHome() {
   const createInstitution = useMutation(api.cohorts.createInstitution)
   const seedPolicies = useMutation(api.policies.seedDefaults)
   const seedSources = useMutation(api.adminSources.seedSourceManifest)
+  const migrateScenarioPdfAssets = useAction(api.scenarios.migrateBundledScenarioPdfAssets)
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
+  const [assetMigration, setAssetMigration] = useState<{
+    pending: boolean
+    message: string
+  }>({ pending: false, message: '' })
 
   return (
     <AppFrame title="Admin Operations">
@@ -66,7 +71,32 @@ function AdminHome() {
           >
             Seed source manifest
           </button>
+          <button
+            className="rounded border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+            disabled={assetMigration.pending}
+            onClick={() => {
+              setAssetMigration({ pending: true, message: '' })
+              void migrateScenarioPdfAssets({})
+                .then((result) => {
+                  setAssetMigration({
+                    pending: false,
+                    message: `Uploaded ${result.uploaded}; skipped ${result.skipped}.`,
+                  })
+                })
+                .catch((error) => {
+                  setAssetMigration({
+                    pending: false,
+                    message: error instanceof Error ? error.message : 'Asset migration failed.',
+                  })
+                })
+            }}
+          >
+            {assetMigration.pending ? 'Uploading PDFs' : 'Upload scenario PDFs'}
+          </button>
         </div>
+        {assetMigration.message ? (
+          <p className="mt-3 text-sm text-slate-600">{assetMigration.message}</p>
+        ) : null}
       </section>
       <section className="grid gap-4 lg:grid-cols-2">
         <div className="rounded border border-slate-200 bg-white p-4">

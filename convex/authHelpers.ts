@@ -12,7 +12,7 @@ function displayNameFromIdentity(identity: UserIdentity) {
     identity.email ??
     identity.preferredUsername ??
     identity.nickname ??
-    'Student account'
+    'Account'
   )
 }
 

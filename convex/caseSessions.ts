@@ -190,6 +190,21 @@ function scenarioDocumentAssetFromDoc(doc: Doc<'scenarioDocumentAssets'>): Scena
   }
 }
 
+function bundledDocumentAssetsForScenario(scenarioKey: string) {
+  return seedScenarios.find((scenario) => scenario.id === scenarioKey)?.documentAssets ?? []
+}
+
+function mergeDocumentAssets(
+  bundledAssets: ScenarioDocumentAsset[],
+  persistedAssets: ScenarioDocumentAsset[] | undefined,
+) {
+  const assetById = new Map(bundledAssets.map((asset) => [asset.id, asset]))
+  for (const asset of persistedAssets ?? []) {
+    assetById.set(asset.id, asset)
+  }
+  return assetById.size ? [...assetById.values()] : undefined
+}
+
 function scenarioFromDoc(
   doc: Doc<'scenarios'>,
   issues: ScenarioIssue[] = [],
@@ -213,6 +228,10 @@ function scenarioFromDoc(
       asset as ScenarioDocumentAsset & { publicUrl?: string }
     return assetWithoutUrls
   })
+  const mergedDocumentAssets = mergeDocumentAssets(
+    bundledDocumentAssetsForScenario(doc.scenarioKey),
+    assets.length ? assets : documentAssets,
+  )
   return {
     id: doc.scenarioKey,
     visibility: doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template'),
@@ -235,7 +254,7 @@ function scenarioFromDoc(
     ...(recordExcerpts.length ? { recordExcerpts } : {}),
     ...(training ? { training } : {}),
     ...(trialDocket ? { trialDocket } : {}),
-    ...(assets.length ? { documentAssets: assets } : documentAssets ? { documentAssets } : {}),
+    ...(mergedDocumentAssets ? { documentAssets: mergedDocumentAssets } : {}),
     ...sourceCaseUrl,
   }
 }
