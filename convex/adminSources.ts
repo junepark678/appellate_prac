@@ -1,7 +1,8 @@
 import { v } from 'convex/values'
 
-import { mutation, query } from './_generated/server'
+import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
 import type { MutationCtx, QueryCtx } from './_generated/server'
+import { internal } from './_generated/api'
 import { requireCurrentUser } from './authHelpers'
 import { writeAuditLog } from './authz'
 import { fourthCircuitCivilAppealSourceManifest } from '../src/domain/rules/source-manifest'
@@ -12,6 +13,7 @@ import {
 } from '../src/domain/rules/ca4-source-profile'
 import { sourceFreshnessStatuses } from '../src/domain/rules/source-governance'
 import { ca4EcfCatalogEvents } from '../src/domain/filing/ca4-ecf-catalog'
+import { ca4FormTemplates } from '../src/packages/trial-record-pdfs'
 
 type ReadCtx = QueryCtx | MutationCtx
 
@@ -30,6 +32,15 @@ async function requireAdmin(ctx: ReadCtx) {
   }
   return user
 }
+
+export const requireAdminForAction = internalQuery({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    await requireAdmin(ctx)
+    return null
+  },
+})
 
 export const seedSourceManifest = mutation({
   args: {},
@@ -135,6 +146,113 @@ export const upsertSourceArtifact = mutation({
       return existing._id
     }
     return ctx.db.insert('sourceArtifacts', doc)
+  },
+})
+
+export const upsertStoredSourceArtifact = internalMutation({
+  args: {
+    sourceVersionId: v.string(),
+    label: v.string(),
+    url: v.string(),
+    rawText: v.optional(v.string()),
+    parserVersion: v.string(),
+    contentHash: v.string(),
+    effectiveDate: v.optional(v.string()),
+    mediaType: v.optional(v.string()),
+    rawStorageId: v.optional(v.id('_storage')),
+    reviewStatus: v.union(
+      v.literal('draft'),
+      v.literal('reviewed'),
+      v.literal('published'),
+      v.literal('rejected'),
+    ),
+  },
+  returns: v.id('sourceArtifacts'),
+  handler: async (ctx, args) => {
+    const sourceArtifacts = await ctx.db
+      .query('sourceArtifacts')
+      .withIndex('by_source_version', (index) =>
+        index.eq('sourceVersionId', args.sourceVersionId),
+      )
+      .collect()
+    const existing = sourceArtifacts
+      .filter((artifact) => artifact.url === args.url && artifact.contentHash === args.contentHash)
+      .sort((a, b) => b._creationTime - a._creationTime)[0]
+    const doc = {
+      sourceVersionId: args.sourceVersionId,
+      label: args.label,
+      url: args.url,
+      fetchedAt: new Date().toISOString(),
+      contentHash: args.contentHash,
+      parserVersion: args.parserVersion,
+      ...(args.effectiveDate ? { effectiveDate: args.effectiveDate } : {}),
+      ...(args.mediaType ? { mediaType: args.mediaType } : {}),
+      ...(args.rawStorageId ? { rawStorageId: args.rawStorageId } : {}),
+      ...(args.rawText ? { rawText: args.rawText } : {}),
+      reviewStatus: args.reviewStatus,
+    }
+    if (existing) {
+      await ctx.db.patch(existing._id, doc)
+      return existing._id
+    }
+    return ctx.db.insert('sourceArtifacts', doc)
+  },
+})
+
+async function sha256Hex(buffer: ArrayBuffer) {
+  const digest = await crypto.subtle.digest('SHA-256', buffer)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export const storeCa4FormPdfArtifacts = action({
+  args: {},
+  returns: v.object({
+    stored: v.number(),
+    failed: v.array(v.object({ label: v.string(), sourceUrl: v.string(), reason: v.string() })),
+  }),
+  handler: async (ctx) => {
+    await ctx.runQuery(internal.adminSources.requireAdminForAction, {})
+    let stored = 0
+    const failed: Array<{ label: string; sourceUrl: string; reason: string }> = []
+    for (const template of ca4FormTemplates) {
+      try {
+        const response = await fetch(template.sourceUrl)
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const contentType = response.headers.get('content-type') ?? template.mediaType
+        if (!contentType.toLowerCase().includes('pdf')) {
+          throw new Error(`Expected PDF, received ${contentType}`)
+        }
+        const buffer = await response.arrayBuffer()
+        const sha256 = await sha256Hex(buffer)
+        const blob = new Blob([buffer], { type: template.mediaType })
+        const storageId = await ctx.storage.store(blob, { sha256 })
+        await ctx.runMutation(internal.adminSources.upsertStoredSourceArtifact, {
+          sourceVersionId: template.sourceVersionId,
+          label: template.label,
+          url: template.sourceUrl,
+          rawText: JSON.stringify({
+            formTemplateId: template.id,
+            category: template.category,
+            fileName: template.fileName,
+          }),
+          parserVersion: 'ca4-form-pdf-catalog-v1',
+          contentHash: `sha256:${sha256}`,
+          mediaType: template.mediaType,
+          rawStorageId: storageId,
+          reviewStatus: 'published',
+        })
+        stored += 1
+      } catch (error) {
+        failed.push({
+          label: template.label,
+          sourceUrl: template.sourceUrl,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    return { stored, failed }
   },
 })
 
@@ -402,6 +520,9 @@ export const listSourceArtifacts = query({
       contentHash: v.string(),
       parserVersion: v.string(),
       fetchedAt: v.string(),
+      mediaType: v.optional(v.string()),
+      rawStorageId: v.optional(v.id('_storage')),
+      fileUrl: v.optional(v.string()),
       reviewStatus: v.union(
         v.literal('draft'),
         v.literal('reviewed'),
@@ -413,10 +534,11 @@ export const listSourceArtifacts = query({
   handler: async (ctx) => {
     await requireAdmin(ctx)
     const artifacts = await ctx.db.query('sourceArtifacts').collect()
-    return artifacts
+    const sortedArtifacts = artifacts
       .slice()
       .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt))
-      .map((artifact) => ({
+    return Promise.all(
+      sortedArtifacts.map(async (artifact) => ({
         id: artifact._id,
         sourceVersionId: artifact.sourceVersionId,
         label: artifact.label,
@@ -424,8 +546,14 @@ export const listSourceArtifacts = query({
         contentHash: artifact.contentHash,
         parserVersion: artifact.parserVersion,
         fetchedAt: artifact.fetchedAt,
+        ...(artifact.mediaType ? { mediaType: artifact.mediaType } : {}),
+        ...(artifact.rawStorageId ? { rawStorageId: artifact.rawStorageId } : {}),
+        ...(artifact.rawStorageId
+          ? { fileUrl: (await ctx.storage.getUrl(artifact.rawStorageId)) ?? undefined }
+          : {}),
         reviewStatus: artifact.reviewStatus,
-      }))
+      })),
+    )
   },
 })
 

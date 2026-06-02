@@ -26,7 +26,10 @@ import { ca4SourceVersionIds } from '../rules/ca4-source-profile'
 export function defaultFilingMetadata(eventId: string, sealed = false): FilingMetadata {
   const isCaseOpening = ['notice_of_appeal', 'criminal_notice_of_appeal', 'petition_for_review', 'petition_for_writ_mandamus'].includes(eventId)
   const isBrief = eventId.includes('brief') || eventId === 'corrected_brief'
-  const feePaymentStatus = isCaseOpening ? 'pending' : 'not_required'
+  const feePaymentStatus =
+    isCaseOpening || ['ifp_application', 'plra_application'].includes(eventId)
+      ? 'pending'
+      : 'not_required'
 
   return {
     filingAttorneyName: 'Simulated ECF Filer',
@@ -98,16 +101,17 @@ function receiptNumber(session: CaseSession, filingCount: number) {
 
 function categoryForEvent(eventId: string): EcfEventCategory {
   if (eventId === 'notice_of_appeal') return 'case_opening'
-  if (['appearance_disclosure', 'docketing_statement', 'transcript_order_acknowledgment'].includes(eventId)) {
+  if (['appearance_disclosure', 'docketing_statement', 'transcript_order_acknowledgment', 'ifp_application', 'plra_application'].includes(eventId)) {
     return 'appearance'
   }
+  if (eventId.includes('oral_argument')) return 'argument'
   if (eventId.includes('appendix')) return 'appendix'
   if (eventId === 'rule_28j_letter') return 'brief'
   if (eventId.includes('brief') || eventId === 'corrected_brief') return 'brief'
   if (eventId.includes('response')) return 'response'
-  if (eventId.includes('seal')) return 'sealed'
+  if (eventId.includes('seal') || eventId.includes('confidentiality') || eventId.includes('highly_sensitive')) return 'sealed'
   if (eventId.includes('amicus')) return 'amicus'
-  if (eventId.includes('rehearing') || eventId.includes('mandate') || eventId === 'bill_of_costs') return 'post_disposition'
+  if (eventId.includes('rehearing') || eventId.includes('mandate') || eventId.includes('costs') || eventId.includes('certiorari')) return 'post_disposition'
   return 'motion'
 }
 
@@ -625,14 +629,22 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
         : courtPack.procedureDomain === 'original_writ'
           ? 'writ_docketing_statement'
           : 'docketing_statement'
+  const postDispositionEventIds = [
+    'petition_rehearing',
+    'mandate_stay_motion',
+    'bill_of_costs',
+    'costs_objection',
+    'certiorari_information_sheet',
+    'certiorari_status_form',
+  ]
 
   // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint ID "post_closure_event". Prefer the constraint catalog as the single source of truth.
-  if (status === 'closed' && !['petition_rehearing', 'mandate_stay_motion', 'bill_of_costs'].includes(event.id)) {
-    reasons.push('Only rehearing, costs, and mandate-stay events are available after judgment.')
+  if (status === 'closed' && !postDispositionEventIds.includes(event.id)) {
+    reasons.push('Only rehearing, costs, certiorari-status, and mandate-stay events are available after judgment.')
   }
 
   // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint IDs "rehearing_after_judgment", "bill_of_costs_after_judgment", "mandate_stay_after_judgment". Prefer the constraint catalog as the single source of truth.
-  if (status !== 'closed' && ['petition_rehearing', 'mandate_stay_motion', 'bill_of_costs'].includes(event.id)) {
+  if (status !== 'closed' && postDispositionEventIds.includes(event.id)) {
     reasons.push('This is a post-disposition event and is unavailable before judgment.')
   }
 
@@ -641,10 +653,24 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
   }
 
   if (
-    ['appearance_disclosure', docketingEventId, 'transcript_order_acknowledgment', 'cja_financial_disclosure', 'certified_agency_record', 'appendix_to_writ_petition'].includes(event.id) &&
+    [
+      'appearance_disclosure',
+      docketingEventId,
+      'transcript_order_acknowledgment',
+      'transcript_extension_request',
+      'ifp_application',
+      'plra_application',
+      'cja_financial_disclosure',
+      'certified_agency_record',
+      'appendix_to_writ_petition',
+    ].includes(event.id) &&
     !hasAcceptedEvent(session, openingEventId)
   ) {
     reasons.push('The case-initiating filing must be filed first.')
+  }
+
+  if (event.id === 'transcript_extension_request' && !hasAcceptedEvent(session, 'transcript_order_acknowledgment')) {
+    reasons.push('A transcript extension request follows a transcript order or acknowledgment entry.')
   }
 
   // CONSTRAINT_CATALOG_DUPLICATE: This check is also in constraint-catalog.ts as constraint IDs "opening_brief_before_docketing_statement" and "opening_brief_before_record_ready". Prefer the constraint catalog as the single source of truth.
@@ -684,12 +710,25 @@ function availabilityReasons(session: CaseSession, event: FilingEvent) {
     reasons.push('The reply brief cannot precede the appellee brief.')
   }
 
+  if (['oral_argument_acknowledgment', 'oral_argument_conflict_notice'].includes(event.id)) {
+    const briefingComplete =
+      hasAcceptedEvent(session, 'reply_brief') ||
+      (hasAcceptedEvent(session, 'opening_brief') && hasAcceptedEvent(session, 'appellee_brief'))
+    if (!briefingComplete && !['submitted', 'panel_deliberation', 'closed'].includes(status)) {
+      reasons.push('Oral-argument acknowledgments and conflict notices follow completed briefing or a calendar notice.')
+    }
+  }
+
   if (event.id === 'motion_response' && !hasOpenDeadline(session, 'motion_response')) {
     reasons.push('No response-to-motion deadline is currently open.')
   }
 
   if (event.id === 'response_to_amicus_motion' && !hasOpenDeadline(session, 'response_to_amicus_motion')) {
     reasons.push('No response-to-amicus-motion deadline is currently open.')
+  }
+
+  if (event.id === 'costs_objection' && !hasAcceptedEvent(session, 'bill_of_costs')) {
+    reasons.push('An objection to costs requires a pending bill of costs entry.')
   }
 
   if (event.id === 'motion_to_supplement_record' && !hasAcceptedEvent(session, 'certified_agency_record')) {

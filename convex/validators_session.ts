@@ -236,6 +236,7 @@ export const ecfEventCategoryValidator = v.union(
   v.literal('motion'),
   v.literal('response'),
   v.literal('sealed'),
+  v.literal('argument'),
   v.literal('post_disposition'),
   v.literal('amicus'),
 )

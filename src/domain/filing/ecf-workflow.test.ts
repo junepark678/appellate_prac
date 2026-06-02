@@ -5,11 +5,13 @@ import type { FilingDraft, FilingSubmission, UploadedDocument } from '../types'
 import {
   buildNoticeOfDocketActivityPreview,
   defaultFilingMetadata,
+  getAvailableEcfEventDefinitions,
   preflightEcfFiling,
   serviceRecipientsForSubmission,
   submitEcfFiling,
   validateEcfWizardCompleteness,
 } from './ecf'
+import { getCa4EcfCatalogEvent } from './ca4-ecf-catalog'
 
 const noticePdf: UploadedDocument = {
   id: 'notice',
@@ -58,6 +60,61 @@ function draft(eventId: string, document: UploadedDocument): FilingDraft {
 }
 
 describe('ECF workflow completeness', () => {
+  it('exposes expanded Fourth Circuit form workflows from the catalog', () => {
+    const session = createInitialSession()
+    const events = getAvailableEcfEventDefinitions(session)
+    const eventIds = new Set(events.map((event) => event.eventId))
+
+    expect([...eventIds]).toEqual(
+      expect.arrayContaining([
+        'ifp_application',
+        'plra_application',
+        'certificate_of_confidentiality',
+        'highly_sensitive_document_certificate',
+        'sealed_brief',
+        'sealed_appendix',
+        'oral_argument_acknowledgment',
+        'oral_argument_conflict_notice',
+        'costs_objection',
+        'certiorari_information_sheet',
+        'certiorari_status_form',
+      ]),
+    )
+
+    expect(getCa4EcfCatalogEvent('appearance_disclosure')?.requiredDocuments).toEqual(
+      expect.arrayContaining(['Appearance of counsel PDF', 'Disclosure statement PDF']),
+    )
+    expect(getCa4EcfCatalogEvent('sealed_brief')?.requiredDocuments).toEqual(
+      expect.arrayContaining(['Certificate of confidentiality PDF', 'Public redacted brief PDF']),
+    )
+    expect(events.find((event) => event.eventId === 'oral_argument_acknowledgment')?.category).toBe('argument')
+  })
+
+  it('defaults fee status for IFP and PLRA fee-waiver workflows', () => {
+    expect(defaultFilingMetadata('ifp_application').feePaymentStatus).toBe('pending')
+    expect(defaultFilingMetadata('plra_application').feePaymentStatus).toBe('pending')
+  })
+
+  it('gates oral argument and certiorari form workflows by procedural posture', () => {
+    const active = createInitialSession()
+    const activeEvents = getAvailableEcfEventDefinitions(active)
+
+    expect(
+      activeEvents.find((event) => event.eventId === 'oral_argument_acknowledgment')
+        ?.available,
+    ).toBe(false)
+    expect(activeEvents.find((event) => event.eventId === 'certiorari_status_form')?.available).toBe(false)
+
+    const closed = { ...active, status: 'closed' as const }
+    const closedEvents = getAvailableEcfEventDefinitions(closed)
+
+    expect(closedEvents.find((event) => event.eventId === 'certiorari_status_form')?.available).toBe(true)
+    expect(
+      closedEvents.find((event) => event.eventId === 'oral_argument_acknowledgment')
+        ?.available,
+    ).toBe(false)
+  })
+
   it('fails motion events before rule preflight when relief text is missing', () => {
     const session = createInitialSession()
     const result = preflightEcfFiling(session, submission('motion', motionPdf))
@@ -146,4 +203,3 @@ describe('ECF workflow completeness', () => {
     expect(result.receipt?.nextExpectedDeadline?.targetEventId).toBe('appearance_disclosure')
   })
 })
-

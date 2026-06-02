@@ -61,6 +61,7 @@ import {
 } from '../domain/filing/ecf'
 import { createTrialDocket } from '../domain/trial-docket'
 import {
+  ca4FormTemplateForTrialDocketDocument,
   canCreateTrialDocketDocumentPdf,
   createTrialDocketDocumentPdf,
 } from '../domain/trial-docket-download'
@@ -2453,14 +2454,23 @@ function formatFileSize(sizeBytes: number) {
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`
 }
 
-function trialDocketDocumentHref(document: TrialDocket['entries'][number]['documents'][number]) {
-  return document.fileUrl ?? document.sourceUrl
+function trialDocketDocumentHref(
+  entry: TrialDocket['entries'][number],
+  document: TrialDocket['entries'][number]['documents'][number],
+) {
+  return (
+    document.fileUrl ??
+    document.sourceUrl ??
+    ca4FormTemplateForTrialDocketDocument(entry, document)?.sourceUrl
+  )
 }
 
 function isDownloadableTrialDocketDocument(
   document: TrialDocket['entries'][number]['documents'][number],
 ) {
-  return Boolean(document.fileUrl)
+  return Boolean(
+    document.fileUrl,
+  )
 }
 
 function downloadGeneratedTrialDocketDocument(
@@ -2487,7 +2497,7 @@ function trialDocketDocumentLabel(
 ) {
   if (
     isDownloadableTrialDocketDocument(document) ||
-    (!trialDocketDocumentHref(document) &&
+    (!trialDocketDocumentHref(entry, document) &&
       canCreateTrialDocketDocumentPdf(document))
   ) {
     return 'Download PDF'
@@ -2546,7 +2556,7 @@ function CurrentTrialDocket({ trialDocket }: { trialDocket: TrialDocket }) {
                 {entry.documents.length ? (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {entry.documents.map((document) => {
-                      const href = trialDocketDocumentHref(document)
+                      const href = trialDocketDocumentHref(entry, document)
                       const metadata = [
                         `${document.pageCount} ${document.pageCount === 1 ? 'page' : 'pages'}`,
                         formatFileSize(document.sizeBytes),

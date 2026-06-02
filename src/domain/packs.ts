@@ -417,15 +417,33 @@ const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
     'DOCKET_STMT_WRIT',
   ),
   cja_financial_disclosure: ecfEventMetadata(
-    ['Forms, Notices & Filing Fees', 'CJA financial disclosure'],
+    ['IFP, CJA and PLRA', 'CJA 23 financial affidavit'],
     'appearance',
-    'CJA_FIN_DISC',
+    'CJA23_AFFIDAVIT',
     { serviceBehavior: 'manual_required' },
+  ),
+  ifp_application: ecfEventMetadata(
+    ['IFP, CJA and PLRA', 'In forma pauperis affidavit'],
+    'appearance',
+    'IFP_AFFIDAVIT',
+    { feeBehavior: 'waivable' },
+  ),
+  plra_application: ecfEventMetadata(
+    ['IFP, CJA and PLRA', 'Prison Litigation Reform Act application'],
+    'appearance',
+    'PLRA_APPLICATION',
+    { feeBehavior: 'waivable', serviceBehavior: 'mixed' },
   ),
   transcript_order_acknowledgment: ecfEventMetadata(
     ['Forms, Notices & Filing Fees', 'Transcript order form'],
     'appearance',
     'TRANSCRIPT_ACK',
+  ),
+  transcript_extension_request: ecfEventMetadata(
+    ['Forms, Notices & Filing Fees', 'Transcript extension request'],
+    'motion',
+    'TRANSCRIPT_EXT_REQ',
+    { requiresRelatedEntry: true },
   ),
   certified_agency_record: ecfEventMetadata(
     ['Other Filings', 'Certified list / agency record'],
@@ -567,13 +585,59 @@ const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
     },
   ),
   sealed_filing_acknowledgment: ecfEventMetadata(
-    ['Forms, Notices & Filing Fees', 'SEALED DOCUMENT (court access only)'],
+    ['Sealed Material', 'SEALED DOCUMENT (court access only)'],
     'sealed',
     'SEALED_DOCUMENT',
     {
       serviceBehavior: 'manual_required',
       receiptTemplateId: 'sealed_noda',
     },
+  ),
+  certificate_of_confidentiality: ecfEventMetadata(
+    ['Sealed Material', 'Certificate of confidentiality'],
+    'sealed',
+    'CERT_CONFIDENTIALITY',
+    {
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  highly_sensitive_document_certificate: ecfEventMetadata(
+    ['Sealed Material', 'Certificate for highly sensitive document protection'],
+    'sealed',
+    'HSD_CERTIFICATE',
+    {
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  sealed_brief: ecfEventMetadata(
+    ['Sealed Material', 'SEALED BRIEF'],
+    'sealed',
+    'SEALED_BRIEF',
+    {
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  sealed_appendix: ecfEventMetadata(
+    ['Sealed Material', 'SEALED APPENDIX'],
+    'sealed',
+    'SEALED_APPENDIX',
+    {
+      serviceBehavior: 'manual_required',
+      receiptTemplateId: 'sealed_noda',
+    },
+  ),
+  oral_argument_acknowledgment: ecfEventMetadata(
+    ['Oral Argument', 'Oral argument acknowledgment'],
+    'argument',
+    'ORAL_ARG_ACK',
+  ),
+  oral_argument_conflict_notice: ecfEventMetadata(
+    ['Oral Argument', 'Notice regarding conflict with proposed argument dates'],
+    'argument',
+    'ORAL_ARG_CONFLICT',
   ),
   mandate_stay_motion: ecfEventMetadata(
     ['Motions, Responses & Replies', 'Motion to stay mandate'],
@@ -587,9 +651,25 @@ const ecfMetadataByEventId: Record<string, EcfEventMetadata> = {
     'REHEARING_PETITION',
   ),
   bill_of_costs: ecfEventMetadata(
-    ['Bills of Cost & Objections', 'Bill of Costs'],
+    ['Costs & Sanctions', 'Bill of Costs'],
     'post_disposition',
     'BILL_COSTS',
+  ),
+  costs_objection: ecfEventMetadata(
+    ['Costs & Sanctions', 'Objection to bill of costs'],
+    'post_disposition',
+    'COSTS_OBJECTION',
+    { requiresRelatedEntry: true },
+  ),
+  certiorari_information_sheet: ecfEventMetadata(
+    ['Certiorari', 'Petition for writ of certiorari information sheet'],
+    'post_disposition',
+    'CERT_INFO_SHEET',
+  ),
+  certiorari_status_form: ecfEventMetadata(
+    ['Certiorari', 'Certiorari status form'],
+    'post_disposition',
+    'CERT_STATUS',
   ),
 }
 
@@ -836,39 +916,96 @@ const baseFilingEvents: BaseFilingEvent[] = [
   },
   {
     id: 'cja_financial_disclosure',
-    label: 'CJA Financial Disclosure',
+    label: 'CJA 23 Financial Affidavit',
     domain: 'criminal_appeal',
     allowedCourtLevels: ['intermediate_appellate'],
     allowedParticipantRoles: ['appellant'],
     requiredDocuments: [
       {
-        ...pdfRequirement('cja_financial_disclosure_pdf', 'CJA financial disclosure PDF', 20),
+        ...pdfRequirement('cja_23_financial_affidavit_pdf', 'CJA 23 financial affidavit PDF', 20),
         mustContain: ['financial'],
       },
     ],
     optionalDocuments: [],
     validationRuleRefs: [ruleRefs.frap9, ruleRefs.ca4Local9],
     deadlineEffects: [],
-    docketTextTemplate: 'CJA financial disclosure filed by {participant}.',
+    docketTextTemplate: 'CJA 23 financial affidavit filed by {participant}.',
     possibleClerkResponses: ['Filed under clerk review', 'Financial disclosure deficiency noted'],
   },
   {
+    id: 'ifp_application',
+    label: 'In Forma Pauperis Affidavit',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'petitioner'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('ifp_affidavit_pdf', 'In forma pauperis affidavit PDF', 20),
+        mustContain: ['in forma pauperis'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3],
+    deadlineEffects: [],
+    docketTextTemplate: 'In forma pauperis affidavit filed by {participant}.',
+    possibleClerkResponses: ['IFP papers referred for review', 'Fee deficiency noted'],
+  },
+  {
+    id: 'plra_application',
+    label: 'PLRA Application and Fee-Collection Consent',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'petitioner'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('plra_application_pdf', 'PLRA application PDF', 20),
+        mustContain: ['prison litigation reform act'],
+      },
+    ],
+    optionalDocuments: [
+      pdfRequirement('prisoner_trust_statement_pdf', 'Prisoner trust account statement PDF'),
+      pdfRequirement('plra_fee_consent_pdf', 'Consent to collection of fees PDF'),
+    ],
+    validationRuleRefs: [ruleRefs.frap3, ruleRefs.ca4Local3, ruleRefs.frap21, ruleRefs.ca4Local21],
+    deadlineEffects: [],
+    docketTextTemplate: 'PLRA application and fee-collection consent filed by {participant}.',
+    possibleClerkResponses: ['PLRA fee status noted', 'Trust-account deficiency noted'],
+  },
+  {
     id: 'transcript_order_acknowledgment',
-    label: 'Transcript Order Acknowledgment',
+    label: 'Transcript Order Form',
     domain: 'civil_appeal',
     allowedCourtLevels: ['intermediate_appellate'],
     allowedParticipantRoles: ['appellant', 'appellee'],
     requiredDocuments: [
       {
-        ...pdfRequirement('transcript_ack_pdf', 'Transcript order acknowledgment PDF', 20),
+        ...pdfRequirement('transcript_order_pdf', 'Transcript order form PDF', 20),
         mustContain: ['transcript'],
       },
     ],
     optionalDocuments: [],
     validationRuleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
     deadlineEffects: [],
-    docketTextTemplate: 'Transcript order acknowledgment filed by {participant}.',
+    docketTextTemplate: 'Transcript order form filed by {participant}.',
     possibleClerkResponses: ['Transcript order acknowledged', 'Record issue noted'],
+  },
+  {
+    id: 'transcript_extension_request',
+    label: 'Transcript Extension Request',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'district_court'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('transcript_extension_request_pdf', 'Transcript extension request PDF', 10),
+        mustContain: ['transcript', 'extension'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap10, ruleRefs.ca4Local10, ruleRefs.ca4Local11],
+    deadlineEffects: [],
+    docketTextTemplate: 'Transcript extension request filed by {participant}.',
+    possibleClerkResponses: ['Transcript extension request referred', 'Reporter deadline reset'],
   },
   {
     id: 'certified_agency_record',
@@ -1397,6 +1534,119 @@ const baseFilingEvents: BaseFilingEvent[] = [
     possibleClerkResponses: ['Acknowledgement accepted', 'Redaction issue noted'],
   },
   {
+    id: 'certificate_of_confidentiality',
+    label: 'Certificate of Confidentiality',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'amicus', 'agency'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('certificate_confidentiality_pdf', 'Certificate of confidentiality PDF', 10),
+        mustContain: ['confidentiality'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
+    deadlineEffects: [],
+    docketTextTemplate: 'Certificate of confidentiality filed by {participant}.',
+    possibleClerkResponses: ['Certificate accepted', 'Sealed-material handling reviewed'],
+  },
+  {
+    id: 'highly_sensitive_document_certificate',
+    label: 'Highly Sensitive Document Certificate',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'amicus', 'agency'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('highly_sensitive_document_certificate_pdf', 'Certificate for highly sensitive document protection PDF', 10),
+        mustContain: ['highly sensitive'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.ca4Local25],
+    deadlineEffects: [],
+    docketTextTemplate: 'Certificate for highly sensitive document protection filed by {participant}.',
+    possibleClerkResponses: ['Paper-protection certificate noted', 'Clerk reviews HSD handling'],
+  },
+  {
+    id: 'sealed_brief',
+    label: 'Sealed Brief',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'amicus'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('sealed_brief_pdf', 'Sealed brief PDF', 80),
+        mustContain: ['sealed'],
+      },
+    ],
+    optionalDocuments: [
+      pdfRequirement('certificate_confidentiality_pdf', 'Certificate of confidentiality PDF'),
+      pdfRequirement('public_redacted_brief_pdf', 'Public redacted brief PDF'),
+    ],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.frap28, ruleRefs.frap32, ruleRefs.ca4Local25, ruleRefs.ca4Local28, ruleRefs.ca4Local32],
+    deadlineEffects: [],
+    docketTextTemplate: 'Sealed brief filed by {participant}.',
+    possibleClerkResponses: ['Sealed brief lodged', 'Public redacted brief deficiency noted'],
+  },
+  {
+    id: 'sealed_appendix',
+    label: 'Sealed Appendix',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee', 'amicus'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('sealed_appendix_pdf', 'Sealed appendix PDF', 500),
+        mustContain: ['sealed'],
+      },
+    ],
+    optionalDocuments: [
+      pdfRequirement('certificate_confidentiality_pdf', 'Certificate of confidentiality PDF'),
+    ],
+    validationRuleRefs: [ruleRefs.frap25, ruleRefs.frap30, ruleRefs.ca4Local25, ruleRefs.ca4Local30],
+    deadlineEffects: [],
+    docketTextTemplate: 'Sealed appendix filed by {participant}.',
+    possibleClerkResponses: ['Sealed appendix lodged', 'Certificate deficiency noted'],
+  },
+  {
+    id: 'oral_argument_acknowledgment',
+    label: 'Oral Argument Acknowledgment',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('oral_argument_acknowledgment_pdf', 'Oral argument acknowledgment PDF', 10),
+        mustContain: ['oral argument'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap34, ruleRefs.ca4Local34],
+    deadlineEffects: [],
+    docketTextTemplate: 'Oral argument acknowledgment filed by {participant}.',
+    possibleClerkResponses: ['Argument acknowledgment accepted', 'Calendar clerk notified'],
+  },
+  {
+    id: 'oral_argument_conflict_notice',
+    label: 'Oral Argument Conflict Notice',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('oral_argument_conflict_notice_pdf', 'Notice regarding conflict with proposed argument dates PDF', 10),
+        mustContain: ['conflict'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap34, ruleRefs.ca4Local34],
+    deadlineEffects: [],
+    docketTextTemplate: 'Notice regarding conflict with proposed argument dates filed by {participant}.',
+    possibleClerkResponses: ['Calendar conflict noted', 'Argument scheduling unchanged'],
+  },
+  {
     id: 'mandate_stay_motion',
     label: 'Motion to Stay Mandate',
     domain: 'civil_appeal',
@@ -1450,13 +1700,70 @@ const baseFilingEvents: BaseFilingEvent[] = [
     docketTextTemplate: 'Bill of costs filed by {participant}.',
     possibleClerkResponses: ['Costs taxed if timely', 'Returned if premature'],
   },
+  {
+    id: 'costs_objection',
+    label: 'Objection to Bill of Costs',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('costs_objection_pdf', 'Objection to bill of costs PDF', 20),
+        mustContain: ['costs'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap39, ruleRefs.ca4Local39],
+    deadlineEffects: [],
+    docketTextTemplate: 'Objection to bill of costs filed by {participant}.',
+    possibleClerkResponses: ['Costs objection referred', 'Objection returned if no bill is pending'],
+  },
+  {
+    id: 'certiorari_information_sheet',
+    label: 'Certiorari Information Sheet',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('certiorari_information_sheet_pdf', 'Petition for writ of certiorari information sheet PDF', 10),
+        mustContain: ['certiorari'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap41, ruleRefs.ca4Local41],
+    deadlineEffects: [],
+    docketTextTemplate: 'Petition for writ of certiorari information sheet filed by {participant}.',
+    possibleClerkResponses: ['Certiorari petition noted', 'Mandate posture reviewed'],
+  },
+  {
+    id: 'certiorari_status_form',
+    label: 'Certiorari Status Form',
+    domain: 'civil_appeal',
+    allowedCourtLevels: ['intermediate_appellate'],
+    allowedParticipantRoles: ['appellant', 'appellee'],
+    requiredDocuments: [
+      {
+        ...pdfRequirement('certiorari_status_pdf', 'Certiorari status form PDF', 10),
+        mustContain: ['certiorari'],
+      },
+    ],
+    optionalDocuments: [],
+    validationRuleRefs: [ruleRefs.frap41, ruleRefs.ca4Local41],
+    deadlineEffects: [],
+    docketTextTemplate: 'Certiorari status form filed by {participant}.',
+    possibleClerkResponses: ['Certiorari status noted', 'Mandate or closure status updated'],
+  },
 ]
 
 export const filingEvents: FilingEvent[] = baseFilingEvents.map(withEcfMetadata)
 
 const commonAppealEventIds = new Set([
   'appearance_disclosure',
+  'ifp_application',
+  'plra_application',
   'transcript_order_acknowledgment',
+  'transcript_extension_request',
   'opening_brief',
   'joint_appendix',
   'appellee_brief',
@@ -1467,15 +1774,25 @@ const commonAppealEventIds = new Set([
   'motion_overlength_brief',
   'motion_to_seal',
   'sealed_filing_acknowledgment',
+  'certificate_of_confidentiality',
+  'highly_sensitive_document_certificate',
+  'sealed_brief',
+  'sealed_appendix',
+  'oral_argument_acknowledgment',
+  'oral_argument_conflict_notice',
   'corrected_brief',
   'rule_28j_letter',
   'petition_rehearing',
   'mandate_stay_motion',
   'bill_of_costs',
+  'costs_objection',
+  'certiorari_information_sheet',
+  'certiorari_status_form',
 ])
 
 const commonAgencyEventIds = new Set([
   'appearance_disclosure',
+  'ifp_application',
   'opening_brief',
   'joint_appendix',
   'appellee_brief',
@@ -1486,11 +1803,20 @@ const commonAgencyEventIds = new Set([
   'motion_overlength_brief',
   'motion_to_seal',
   'sealed_filing_acknowledgment',
+  'certificate_of_confidentiality',
+  'highly_sensitive_document_certificate',
+  'sealed_brief',
+  'sealed_appendix',
+  'oral_argument_acknowledgment',
+  'oral_argument_conflict_notice',
   'corrected_brief',
   'rule_28j_letter',
   'petition_rehearing',
   'mandate_stay_motion',
   'bill_of_costs',
+  'costs_objection',
+  'certiorari_information_sheet',
+  'certiorari_status_form',
 ])
 
 const civilFilingEvents = filingEvents.filter((event) => event.domain === 'civil_appeal')
@@ -1511,7 +1837,19 @@ const agencyReviewFilingEvents = filingEvents.filter(
 const originalWritFilingEvents = filingEvents.filter(
   (event) =>
     event.domain === 'original_writ' ||
-    ['appearance_disclosure', 'motion', 'motion_response', 'motion_to_seal', 'sealed_filing_acknowledgment'].includes(event.id),
+    [
+      'appearance_disclosure',
+      'ifp_application',
+      'plra_application',
+      'motion',
+      'motion_response',
+      'motion_to_seal',
+      'sealed_filing_acknowledgment',
+      'certificate_of_confidentiality',
+      'highly_sensitive_document_certificate',
+      'sealed_brief',
+      'sealed_appendix',
+    ].includes(event.id),
 )
 
 const frapItems: RuleItem[] = [
