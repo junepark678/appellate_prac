@@ -1,60 +1,69 @@
-import { v } from 'convex/values'
+import { v } from "convex/values";
 
-import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
-import type { MutationCtx, QueryCtx } from './_generated/server'
-import { internal } from './_generated/api'
-import { requireCurrentUser } from './authHelpers'
-import { writeAuditLog } from './authz'
-import { fourthCircuitCivilAppealSourceManifest } from '../src/domain/rules/source-manifest'
+import {
+  action,
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { requireCurrentUser } from "./authHelpers";
+import { writeAuditLog } from "./authz";
+import { fourthCircuitCivilAppealSourceManifest } from "../src/domain/rules/source-manifest";
 import {
   ca4CourtSourceVersions,
   ca4DeadlineRules,
   ca4SourceBackedConstraints,
-} from '../src/domain/rules/ca4-source-profile'
-import { sourceFreshnessStatuses } from '../src/domain/rules/source-governance'
-import { ca4EcfCatalogEvents } from '../src/domain/filing/ca4-ecf-catalog'
-import { ca4FormTemplates } from '../src/packages/trial-record-pdfs'
+} from "../src/domain/rules/ca4-source-profile";
+import {
+  sourceFreshnessStatuses,
+  validateEvalFreshness,
+} from "../src/domain/rules/source-governance";
+import { ca4EcfCatalogEvents } from "../src/domain/filing/ca4-ecf-catalog";
+import { ca4FormTemplates } from "../src/packages/trial-record-pdfs";
 
-type ReadCtx = QueryCtx | MutationCtx
+type ReadCtx = QueryCtx | MutationCtx;
 
 function simpleHash(value: string) {
-  let hash = 0
+  let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
-  return hash.toString(16).padStart(8, '0')
+  return hash.toString(16).padStart(8, "0");
 }
 
 async function requireAdmin(ctx: ReadCtx) {
-  const { user } = await requireCurrentUser(ctx)
-  if (user.role !== 'admin') {
-    throw new Error('Admin role required')
+  const { user } = await requireCurrentUser(ctx);
+  if (user.role !== "admin") {
+    throw new Error("Admin role required");
   }
-  return user
+  return user;
 }
 
 export const requireAdminForAction = internalQuery({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
-    return null
+    await requireAdmin(ctx);
+    return null;
   },
-})
+});
 
 export const seedSourceManifest = mutation({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
-    let count = 0
+    await requireAdmin(ctx);
+    let count = 0;
     for (const source of fourthCircuitCivilAppealSourceManifest) {
       const existing = await ctx.db
-        .query('legalSourceVersions')
-        .withIndex('by_source_version', (index) =>
-          index.eq('sourceVersionId', source.sourceVersionId),
+        .query("legalSourceVersions")
+        .withIndex("by_source_version", (index) =>
+          index.eq("sourceVersionId", source.sourceVersionId),
         )
-        .unique()
+        .unique();
       const doc = {
         sourceVersionId: source.sourceVersionId,
         moduleId: source.moduleId,
@@ -64,24 +73,26 @@ export const seedSourceManifest = mutation({
         effectiveFrom: source.effectiveFrom,
         sourceUrl: source.sourceUrl,
         sourceSystem: source.sourceSystem,
-        reviewed: source.reviewStatus === 'reviewed' || source.reviewStatus === 'published',
+        reviewed:
+          source.reviewStatus === "reviewed" ||
+          source.reviewStatus === "published",
         metadataJson: JSON.stringify({
           parserVersion: source.parserVersion,
           contentHash: source.contentHash,
           reviewStatus: source.reviewStatus,
           ruleRefs: source.ruleRefs,
         }),
-      }
+      };
       if (existing) {
-        await ctx.db.patch(existing._id, doc)
+        await ctx.db.patch(existing._id, doc);
       } else {
-        await ctx.db.insert('legalSourceVersions', doc)
+        await ctx.db.insert("legalSourceVersions", doc);
       }
-      count += 1
+      count += 1;
     }
-    return count
+    return count;
   },
-})
+});
 
 export const storeSnapshot = mutation({
   args: {
@@ -89,19 +100,19 @@ export const storeSnapshot = mutation({
     rawText: v.string(),
     parserVersion: v.string(),
   },
-  returns: v.id('legalSourceSnapshots'),
+  returns: v.id("legalSourceSnapshots"),
   handler: async (ctx, args) => {
-    await requireAdmin(ctx)
-    return ctx.db.insert('legalSourceSnapshots', {
+    await requireAdmin(ctx);
+    return ctx.db.insert("legalSourceSnapshots", {
       sourceVersionId: args.sourceVersionId,
       fetchedAt: new Date().toISOString(),
       contentHash: simpleHash(args.rawText),
       rawText: args.rawText,
       parserVersion: args.parserVersion,
-      reviewStatus: 'draft',
-    })
+      reviewStatus: "draft",
+    });
   },
-})
+});
 
 export const upsertSourceArtifact = mutation({
   args: {
@@ -113,21 +124,24 @@ export const upsertSourceArtifact = mutation({
     contentHash: v.optional(v.string()),
     effectiveDate: v.optional(v.string()),
     mediaType: v.optional(v.string()),
-    rawStorageId: v.optional(v.id('_storage')),
+    rawStorageId: v.optional(v.id("_storage")),
   },
-  returns: v.id('sourceArtifacts'),
+  returns: v.id("sourceArtifacts"),
   handler: async (ctx, args) => {
-    await requireAdmin(ctx)
-    const contentHash = args.contentHash ?? simpleHash(args.rawText)
+    await requireAdmin(ctx);
+    const contentHash = args.contentHash ?? simpleHash(args.rawText);
     const sourceArtifacts = await ctx.db
-      .query('sourceArtifacts')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', args.sourceVersionId),
+      .query("sourceArtifacts")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", args.sourceVersionId),
       )
-      .collect()
+      .collect();
     const existing = sourceArtifacts
-      .filter((artifact) => artifact.url === args.url && artifact.contentHash === contentHash)
-      .sort((a, b) => b._creationTime - a._creationTime)[0]
+      .filter(
+        (artifact) =>
+          artifact.url === args.url && artifact.contentHash === contentHash,
+      )
+      .sort((a, b) => b._creationTime - a._creationTime)[0];
     const doc = {
       sourceVersionId: args.sourceVersionId,
       label: args.label,
@@ -139,15 +153,15 @@ export const upsertSourceArtifact = mutation({
       ...(args.mediaType ? { mediaType: args.mediaType } : {}),
       ...(args.rawStorageId ? { rawStorageId: args.rawStorageId } : {}),
       rawText: args.rawText,
-      reviewStatus: 'draft' as const,
-    }
+      reviewStatus: "draft" as const,
+    };
     if (existing) {
-      await ctx.db.patch(existing._id, doc)
-      return existing._id
+      await ctx.db.patch(existing._id, doc);
+      return existing._id;
     }
-    return ctx.db.insert('sourceArtifacts', doc)
+    return ctx.db.insert("sourceArtifacts", doc);
   },
-})
+});
 
 export const upsertStoredSourceArtifact = internalMutation({
   args: {
@@ -159,25 +173,29 @@ export const upsertStoredSourceArtifact = internalMutation({
     contentHash: v.string(),
     effectiveDate: v.optional(v.string()),
     mediaType: v.optional(v.string()),
-    rawStorageId: v.optional(v.id('_storage')),
+    rawStorageId: v.optional(v.id("_storage")),
     reviewStatus: v.union(
-      v.literal('draft'),
-      v.literal('reviewed'),
-      v.literal('published'),
-      v.literal('rejected'),
+      v.literal("draft"),
+      v.literal("reviewed"),
+      v.literal("published"),
+      v.literal("rejected"),
     ),
   },
-  returns: v.id('sourceArtifacts'),
+  returns: v.id("sourceArtifacts"),
   handler: async (ctx, args) => {
     const sourceArtifacts = await ctx.db
-      .query('sourceArtifacts')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', args.sourceVersionId),
+      .query("sourceArtifacts")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", args.sourceVersionId),
       )
-      .collect()
+      .collect();
     const existing = sourceArtifacts
-      .filter((artifact) => artifact.url === args.url && artifact.contentHash === args.contentHash)
-      .sort((a, b) => b._creationTime - a._creationTime)[0]
+      .filter(
+        (artifact) =>
+          artifact.url === args.url &&
+          artifact.contentHash === args.contentHash,
+      )
+      .sort((a, b) => b._creationTime - a._creationTime)[0];
     const doc = {
       sourceVersionId: args.sourceVersionId,
       label: args.label,
@@ -190,88 +208,105 @@ export const upsertStoredSourceArtifact = internalMutation({
       ...(args.rawStorageId ? { rawStorageId: args.rawStorageId } : {}),
       ...(args.rawText ? { rawText: args.rawText } : {}),
       reviewStatus: args.reviewStatus,
-    }
+    };
     if (existing) {
-      await ctx.db.patch(existing._id, doc)
-      return existing._id
+      await ctx.db.patch(existing._id, doc);
+      return existing._id;
     }
-    return ctx.db.insert('sourceArtifacts', doc)
+    return ctx.db.insert("sourceArtifacts", doc);
   },
-})
+});
 
 async function sha256Hex(buffer: ArrayBuffer) {
-  const digest = await crypto.subtle.digest('SHA-256', buffer)
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 export const storeCa4FormPdfArtifacts = action({
   args: {},
   returns: v.object({
     stored: v.number(),
-    failed: v.array(v.object({ label: v.string(), sourceUrl: v.string(), reason: v.string() })),
+    failed: v.array(
+      v.object({
+        label: v.string(),
+        sourceUrl: v.string(),
+        reason: v.string(),
+      }),
+    ),
   }),
   handler: async (ctx) => {
-    await ctx.runQuery(internal.adminSources.requireAdminForAction, {})
-    let stored = 0
-    const failed: Array<{ label: string; sourceUrl: string; reason: string }> = []
+    await ctx.runQuery(internal.adminSources.requireAdminForAction, {});
+    let stored = 0;
+    const failed: Array<{ label: string; sourceUrl: string; reason: string }> =
+      [];
     for (const template of ca4FormTemplates) {
       try {
-        const response = await fetch(template.sourceUrl)
+        const response = await fetch(template.sourceUrl);
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
+          throw new Error(`HTTP ${response.status}`);
         }
-        const contentType = response.headers.get('content-type') ?? template.mediaType
-        if (!contentType.toLowerCase().includes('pdf')) {
-          throw new Error(`Expected PDF, received ${contentType}`)
+        const contentType =
+          response.headers.get("content-type") ?? template.mediaType;
+        if (!contentType.toLowerCase().includes("pdf")) {
+          throw new Error(`Expected PDF, received ${contentType}`);
         }
-        const buffer = await response.arrayBuffer()
-        const sha256 = await sha256Hex(buffer)
-        const blob = new Blob([buffer], { type: template.mediaType })
-        const storageId = await ctx.storage.store(blob, { sha256 })
-        await ctx.runMutation(internal.adminSources.upsertStoredSourceArtifact, {
-          sourceVersionId: template.sourceVersionId,
-          label: template.label,
-          url: template.sourceUrl,
-          rawText: JSON.stringify({
-            formTemplateId: template.id,
-            category: template.category,
-            fileName: template.fileName,
-          }),
-          parserVersion: 'ca4-form-pdf-catalog-v1',
-          contentHash: `sha256:${sha256}`,
-          mediaType: template.mediaType,
-          rawStorageId: storageId,
-          reviewStatus: 'published',
-        })
-        stored += 1
+        const buffer = await response.arrayBuffer();
+        const sha256 = await sha256Hex(buffer);
+        const blob = new Blob([buffer], { type: template.mediaType });
+        const storageId = await ctx.storage.store(blob, { sha256 });
+        await ctx.runMutation(
+          internal.adminSources.upsertStoredSourceArtifact,
+          {
+            sourceVersionId: template.sourceVersionId,
+            label: template.label,
+            url: template.sourceUrl,
+            rawText: JSON.stringify({
+              formTemplateId: template.id,
+              category: template.category,
+              fileName: template.fileName,
+            }),
+            parserVersion: "ca4-form-pdf-catalog-v1",
+            contentHash: `sha256:${sha256}`,
+            mediaType: template.mediaType,
+            rawStorageId: storageId,
+            reviewStatus: "published",
+          },
+        );
+        stored += 1;
       } catch (error) {
         failed.push({
           label: template.label,
           sourceUrl: template.sourceUrl,
           reason: error instanceof Error ? error.message : String(error),
-        })
+        });
       }
     }
-    return { stored, failed }
+    return { stored, failed };
   },
-})
+});
 
 export const decideSourceArtifact = mutation({
   args: {
-    sourceArtifactId: v.id('sourceArtifacts'),
-    decision: v.union(v.literal('reviewed'), v.literal('published'), v.literal('rejected')),
+    sourceArtifactId: v.id("sourceArtifacts"),
+    decision: v.union(
+      v.literal("reviewed"),
+      v.literal("published"),
+      v.literal("rejected"),
+    ),
     notes: v.string(),
     changedConstraintsJson: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const user = await requireAdmin(ctx)
-    const artifact = await ctx.db.get(args.sourceArtifactId)
+    const user = await requireAdmin(ctx);
+    const artifact = await ctx.db.get(args.sourceArtifactId);
     if (!artifact) {
-      throw new Error('Source artifact not found.')
+      throw new Error("Source artifact not found.");
     }
-    await ctx.db.patch(args.sourceArtifactId, { reviewStatus: args.decision })
-    await ctx.db.insert('sourceReviewDecisions', {
+    await ctx.db.patch(args.sourceArtifactId, { reviewStatus: args.decision });
+    await ctx.db.insert("sourceReviewDecisions", {
       sourceArtifactId: args.sourceArtifactId,
       reviewerUserId: user._id,
       decision: args.decision,
@@ -280,85 +315,94 @@ export const decideSourceArtifact = mutation({
         ? { changedConstraintsJson: args.changedConstraintsJson }
         : {}),
       createdAt: new Date().toISOString(),
-    })
+    });
 
     const source = await ctx.db
-      .query('legalSourceVersions')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', artifact.sourceVersionId),
+      .query("legalSourceVersions")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", artifact.sourceVersionId),
       )
-      .unique()
+      .unique();
     if (source) {
-      await ctx.db.patch(source._id, { reviewed: args.decision !== 'rejected' })
+      await ctx.db.patch(source._id, {
+        reviewed: args.decision !== "rejected",
+      });
     }
-    return null
+    return null;
   },
-})
+});
 
 export const publishSourceSnapshot = mutation({
   args: {
     sourceVersionId: v.string(),
     reviewStatus: v.union(
-      v.literal('reviewed'),
-      v.literal('published'),
-      v.literal('rejected'),
+      v.literal("reviewed"),
+      v.literal("published"),
+      v.literal("rejected"),
     ),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    await requireAdmin(ctx)
+    await requireAdmin(ctx);
     const snapshot = await ctx.db
-      .query('legalSourceSnapshots')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', args.sourceVersionId),
+      .query("legalSourceSnapshots")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", args.sourceVersionId),
       )
-      .order('desc')
-      .first()
+      .order("desc")
+      .first();
     if (!snapshot) {
-      throw new Error('No source snapshot exists for this source version.')
+      throw new Error("No source snapshot exists for this source version.");
     }
-    await ctx.db.patch(snapshot._id, { reviewStatus: args.reviewStatus })
+    await ctx.db.patch(snapshot._id, { reviewStatus: args.reviewStatus });
     const source = await ctx.db
-      .query('legalSourceVersions')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', args.sourceVersionId),
+      .query("legalSourceVersions")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", args.sourceVersionId),
       )
-      .unique()
+      .unique();
     if (source) {
-      await ctx.db.patch(source._id, { reviewed: args.reviewStatus !== 'rejected' })
+      await ctx.db.patch(source._id, {
+        reviewed: args.reviewStatus !== "rejected",
+      });
     }
-    return null
+    return null;
   },
-})
+});
 
-async function requireReviewedSources(ctx: ReadCtx, sourceVersionIds: string[]) {
-  const uniqueIds = [...new Set(sourceVersionIds)]
+async function requireReviewedSources(
+  ctx: ReadCtx,
+  sourceVersionIds: string[],
+) {
+  const uniqueIds = [...new Set(sourceVersionIds)];
   for (const sourceVersionId of uniqueIds) {
     const snapshot = await ctx.db
-      .query('legalSourceSnapshots')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', sourceVersionId),
+      .query("legalSourceSnapshots")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", sourceVersionId),
       )
-      .order('desc')
-      .first()
+      .order("desc")
+      .first();
     const bundledReviewed = ca4CourtSourceVersions.some(
       (source) =>
         source.sourceVersionId === sourceVersionId &&
-        ['reviewed', 'published'].includes(source.reviewStatus),
-    )
+        ["reviewed", "published"].includes(source.reviewStatus),
+    );
     const artifact = await ctx.db
-      .query('sourceArtifacts')
-      .withIndex('by_source_version', (index) =>
-        index.eq('sourceVersionId', sourceVersionId),
+      .query("sourceArtifacts")
+      .withIndex("by_source_version", (index) =>
+        index.eq("sourceVersionId", sourceVersionId),
       )
-      .order('desc')
-      .first()
+      .order("desc")
+      .first();
     if (
       !bundledReviewed &&
-      snapshot?.reviewStatus !== 'published' &&
-      !['reviewed', 'published'].includes(artifact?.reviewStatus ?? 'draft')
+      snapshot?.reviewStatus !== "published" &&
+      !["reviewed", "published"].includes(artifact?.reviewStatus ?? "draft")
     ) {
-      throw new Error(`Source ${sourceVersionId} must be reviewed before publication.`)
+      throw new Error(
+        `Source ${sourceVersionId} must be reviewed before publication.`,
+      );
     }
   }
 }
@@ -367,107 +411,117 @@ export const publishEcfCatalogEvents = mutation({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
+    await requireAdmin(ctx);
     await requireReviewedSources(
       ctx,
       ca4EcfCatalogEvents.flatMap((event) => event.sourceVersionIds),
-    )
-    let count = 0
+    );
+    let count = 0;
     for (const event of ca4EcfCatalogEvents) {
       const existing = await ctx.db
-        .query('ecfCatalogEvents')
-        .withIndex('by_event', (index) =>
-          index.eq('courtPackId', 'us-federal-ca4-civil-appeal').eq('eventId', event.eventId),
+        .query("ecfCatalogEvents")
+        .withIndex("by_event", (index) =>
+          index
+            .eq("courtPackId", "us-federal-ca4-civil-appeal")
+            .eq("eventId", event.eventId),
         )
-        .unique()
+        .unique();
       const doc = {
-        courtPackId: 'us-federal-ca4-civil-appeal',
+        courtPackId: "us-federal-ca4-civil-appeal",
         eventId: event.eventId,
         catalogJson: JSON.stringify(event),
         sourceVersionIds: event.sourceVersionIds,
         published: true,
-      }
-      if (existing) await ctx.db.patch(existing._id, doc)
-      else await ctx.db.insert('ecfCatalogEvents', doc)
-      count += 1
+      };
+      if (existing) await ctx.db.patch(existing._id, doc);
+      else await ctx.db.insert("ecfCatalogEvents", doc);
+      count += 1;
     }
-    return count
+    return count;
   },
-})
+});
 
 export const publishDeadlineRules = mutation({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
+    await requireAdmin(ctx);
     await requireReviewedSources(
       ctx,
       ca4DeadlineRules.flatMap((rule) =>
         rule.ruleRefs.map((ruleRef) =>
-          ruleRef.ruleId.startsWith('CA4_') ? 'ca4-local-rules-current-2026-03-23' : 'frap-effective-2025-12-01',
+          ruleRef.ruleId.startsWith("CA4_")
+            ? "ca4-local-rules-current-2026-03-23"
+            : "frap-effective-2025-12-01",
         ),
       ),
-    )
-    let count = 0
+    );
+    let count = 0;
     for (const rule of ca4DeadlineRules) {
       const sourceVersionIds = [
-        'frap-effective-2025-12-01',
-        ...(rule.ruleRefs.some((ruleRef) => ruleRef.ruleId.startsWith('CA4_'))
-          ? ['ca4-local-rules-current-2026-03-23']
+        "frap-effective-2025-12-01",
+        ...(rule.ruleRefs.some((ruleRef) => ruleRef.ruleId.startsWith("CA4_"))
+          ? ["ca4-local-rules-current-2026-03-23"]
           : []),
-      ]
+      ];
       const existing = await ctx.db
-        .query('deadlineRules')
-        .withIndex('by_deadline', (index) =>
-          index.eq('courtPackId', 'us-federal-ca4-civil-appeal').eq('deadlineId', rule.deadlineId),
+        .query("deadlineRules")
+        .withIndex("by_deadline", (index) =>
+          index
+            .eq("courtPackId", "us-federal-ca4-civil-appeal")
+            .eq("deadlineId", rule.deadlineId),
         )
-        .unique()
+        .unique();
       const doc = {
-        courtPackId: 'us-federal-ca4-civil-appeal',
+        courtPackId: "us-federal-ca4-civil-appeal",
         deadlineId: rule.deadlineId,
         deadlineJson: JSON.stringify(rule),
         sourceVersionIds,
         published: true,
-      }
-      if (existing) await ctx.db.patch(existing._id, doc)
-      else await ctx.db.insert('deadlineRules', doc)
-      count += 1
+      };
+      if (existing) await ctx.db.patch(existing._id, doc);
+      else await ctx.db.insert("deadlineRules", doc);
+      count += 1;
     }
-    return count
+    return count;
   },
-})
+});
 
 export const publishSourceBackedConstraints = mutation({
   args: {},
   returns: v.number(),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
+    await requireAdmin(ctx);
     await requireReviewedSources(
       ctx,
-      ca4SourceBackedConstraints.flatMap((constraint) => constraint.sourceVersionIds),
-    )
-    let count = 0
+      ca4SourceBackedConstraints.flatMap(
+        (constraint) => constraint.sourceVersionIds,
+      ),
+    );
+    let count = 0;
     for (const constraint of ca4SourceBackedConstraints) {
       const existing = await ctx.db
-        .query('sourceBackedConstraints')
-        .withIndex('by_constraint', (index) =>
-          index.eq('courtPackId', 'us-federal-ca4-civil-appeal').eq('constraintId', constraint.constraintId),
+        .query("sourceBackedConstraints")
+        .withIndex("by_constraint", (index) =>
+          index
+            .eq("courtPackId", "us-federal-ca4-civil-appeal")
+            .eq("constraintId", constraint.constraintId),
         )
-        .unique()
+        .unique();
       const doc = {
-        courtPackId: 'us-federal-ca4-civil-appeal',
+        courtPackId: "us-federal-ca4-civil-appeal",
         constraintId: constraint.constraintId,
         constraintJson: JSON.stringify(constraint),
         sourceVersionIds: constraint.sourceVersionIds,
         published: true,
-      }
-      if (existing) await ctx.db.patch(existing._id, doc)
-      else await ctx.db.insert('sourceBackedConstraints', doc)
-      count += 1
+      };
+      if (existing) await ctx.db.patch(existing._id, doc);
+      else await ctx.db.insert("sourceBackedConstraints", doc);
+      count += 1;
     }
-    return count
+    return count;
   },
-})
+});
 
 export const addReviewNote = mutation({
   args: {
@@ -476,16 +530,16 @@ export const addReviewNote = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const user = await requireAdmin(ctx)
-    await ctx.db.insert('ruleReviewNotes', {
+    const user = await requireAdmin(ctx);
+    await ctx.db.insert("ruleReviewNotes", {
       sourceVersionId: args.sourceVersionId,
       reviewerUserId: user._id,
       note: args.note,
       createdAt: new Date().toISOString(),
-    })
-    return null
+    });
+    return null;
   },
-})
+});
 
 export const listSources = query({
   args: {},
@@ -498,22 +552,22 @@ export const listSources = query({
     }),
   ),
   handler: async (ctx) => {
-    await requireCurrentUser(ctx)
-    const sources = await ctx.db.query('legalSourceVersions').collect()
+    await requireCurrentUser(ctx);
+    const sources = await ctx.db.query("legalSourceVersions").collect();
     return sources.map((source) => ({
       sourceVersionId: source.sourceVersionId,
       label: source.label,
       sourceUrl: source.sourceUrl,
       reviewed: source.reviewed,
-    }))
+    }));
   },
-})
+});
 
 export const listSourceArtifacts = query({
   args: {},
   returns: v.array(
     v.object({
-      id: v.id('sourceArtifacts'),
+      id: v.id("sourceArtifacts"),
       sourceVersionId: v.string(),
       label: v.string(),
       url: v.string(),
@@ -521,22 +575,22 @@ export const listSourceArtifacts = query({
       parserVersion: v.string(),
       fetchedAt: v.string(),
       mediaType: v.optional(v.string()),
-      rawStorageId: v.optional(v.id('_storage')),
+      rawStorageId: v.optional(v.id("_storage")),
       fileUrl: v.optional(v.string()),
       reviewStatus: v.union(
-        v.literal('draft'),
-        v.literal('reviewed'),
-        v.literal('published'),
-        v.literal('rejected'),
+        v.literal("draft"),
+        v.literal("reviewed"),
+        v.literal("published"),
+        v.literal("rejected"),
       ),
     }),
   ),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
-    const artifacts = await ctx.db.query('sourceArtifacts').collect()
+    await requireAdmin(ctx);
+    const artifacts = await ctx.db.query("sourceArtifacts").collect();
     const sortedArtifacts = artifacts
       .slice()
-      .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt))
+      .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt));
     return Promise.all(
       sortedArtifacts.map(async (artifact) => ({
         id: artifact._id,
@@ -547,15 +601,20 @@ export const listSourceArtifacts = query({
         parserVersion: artifact.parserVersion,
         fetchedAt: artifact.fetchedAt,
         ...(artifact.mediaType ? { mediaType: artifact.mediaType } : {}),
-        ...(artifact.rawStorageId ? { rawStorageId: artifact.rawStorageId } : {}),
         ...(artifact.rawStorageId
-          ? { fileUrl: (await ctx.storage.getUrl(artifact.rawStorageId)) ?? undefined }
+          ? { rawStorageId: artifact.rawStorageId }
+          : {}),
+        ...(artifact.rawStorageId
+          ? {
+              fileUrl:
+                (await ctx.storage.getUrl(artifact.rawStorageId)) ?? undefined,
+            }
           : {}),
         reviewStatus: artifact.reviewStatus,
       })),
-    )
+    );
   },
-})
+});
 
 export const listSourceFreshness = query({
   args: {},
@@ -568,10 +627,10 @@ export const listSourceFreshness = query({
       parsedHash: v.optional(v.string()),
       effectiveDate: v.string(),
       reviewStatus: v.union(
-        v.literal('draft'),
-        v.literal('reviewed'),
-        v.literal('published'),
-        v.literal('rejected'),
+        v.literal("draft"),
+        v.literal("reviewed"),
+        v.literal("published"),
+        v.literal("rejected"),
       ),
       published: v.boolean(),
       stale: v.boolean(),
@@ -580,8 +639,8 @@ export const listSourceFreshness = query({
     }),
   ),
   handler: async (ctx) => {
-    await requireAdmin(ctx)
-    const artifacts = await ctx.db.query('sourceArtifacts').collect()
+    await requireAdmin(ctx);
+    const artifacts = await ctx.db.query("sourceArtifacts").collect();
     return sourceFreshnessStatuses(
       ca4CourtSourceVersions,
       artifacts.map((artifact) => ({
@@ -590,9 +649,9 @@ export const listSourceFreshness = query({
         fetchedAt: artifact.fetchedAt,
         reviewStatus: artifact.reviewStatus,
       })),
-    )
+    );
   },
-})
+});
 
 export const promoteCourtPackRelease = mutation({
   args: {
@@ -601,41 +660,34 @@ export const promoteCourtPackRelease = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const user = await requireAdmin(ctx)
-    const snapshot = JSON.parse(args.simulationEvalSnapshotJson) as {
-      criticalFailureCount?: number
-      validTurnRate?: number
-      hallucinatedSourceRate?: number
-      roleAuthorityFailureRate?: number
-    }
-    if (
-      snapshot.criticalFailureCount !== 0 ||
-      (snapshot.validTurnRate ?? 0) < 0.98 ||
-      (snapshot.hallucinatedSourceRate ?? 1) > 0.01 ||
-      snapshot.roleAuthorityFailureRate !== 0
-    ) {
-      throw new Error('Simulation eval snapshot does not meet production thresholds')
+    const user = await requireAdmin(ctx);
+    const snapshot: unknown = JSON.parse(args.simulationEvalSnapshotJson);
+    const evalIssues = validateEvalFreshness(snapshot);
+    if (evalIssues.length) {
+      throw new Error(
+        `Simulation eval snapshot rejected: ${evalIssues.join("; ")}`,
+      );
     }
     const courtPack = await ctx.db
-      .query('courtPacks')
-      .withIndex('by_pack_id', (index) => index.eq('packId', args.courtPackId))
-      .unique()
+      .query("courtPacks")
+      .withIndex("by_pack_id", (index) => index.eq("packId", args.courtPackId))
+      .unique();
     if (!courtPack) {
-      throw new Error('Court pack not found')
+      throw new Error("Court pack not found");
     }
-    await requireReviewedSources(ctx, courtPack.sourceVersionIds ?? [])
+    await requireReviewedSources(ctx, courtPack.sourceVersionIds ?? []);
     await ctx.db.patch(courtPack._id, {
-      releaseStatus: 'production_approved',
+      releaseStatus: "production_approved",
       evalThresholdsJson: args.simulationEvalSnapshotJson,
       published: true,
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
-      action: 'court_pack.promoted_to_production',
-      targetTable: 'courtPacks',
+      action: "court_pack.promoted_to_production",
+      targetTable: "courtPacks",
       targetId: courtPack._id,
       metadata: { courtPackId: args.courtPackId },
-    })
-    return null
+    });
+    return null;
   },
-})
+});
