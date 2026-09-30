@@ -48,7 +48,40 @@ bun run deploy:backend
 
 Keep `CONVEX_DEPLOY_KEY` in the backend release environment rather than web-host
 preview builds. Production release checks also require `SIMULATION_EVAL_SNAPSHOT_JSON`
-with the latest simulation-eval result.
+with the latest simulation-eval result. The release scripts select `--target=web`
+or `--target=backend`; a direct production check defaults to `--target=all`.
+
+### Release environment and evidence
+
+- Web release runner: `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`,
+  `CLERK_AUTHORIZED_PARTIES`, and `VITE_CONVEX_URL`
+- Backend release runner: `CONVEX_DEPLOY_KEY`
+- Convex runtime (configure in Convex, not the web host):
+  `CLERK_JWT_ISSUER_DOMAIN`; `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` when
+  enabling live AI; `COURTLISTENER_TOKEN` when enabling CourtListener
+
+The gate checks required runner configuration is nonblank. It does not validate
+credentials or inspect remote Convex runtime configuration; verify those settings
+and exercise authenticated integrations before launch.
+
+`SIMULATION_EVAL_SNAPSHOT_JSON` must contain a boolean `pass`, a non-negative
+integer `criticalFailureCount`, numeric rates between 0 and 1 for `validTurnRate`,
+`hallucinatedSourceRate`, and `roleAuthorityFailureRate`, and a valid UTC ISO
+`createdAt` timestamp (for example `2026-09-30T04:00:00.000Z`). Missing, malformed,
+non-finite, failing, future-dated, or expired evidence blocks production.
+The conservative default maximum age is 24 hours, an explicit release policy
+chosen for this gate; set `SIMULATION_EVAL_MAX_AGE_HOURS` to a finite positive
+number to use the team's approved release window. Metric thresholds remain
+unchanged. The administrator court-pack promotion action applies the same schema
+and thresholds with the default 24-hour window after administrator authorization and before its existing source-review checks
+can permit a promotion.
+
+This snapshot is supplied by the release operator; the current schema does not
+cryptographically attest provenance or bind it to the current commit, model,
+and court-pack revision. Independently verify that the eval covers those exact
+release inputs. The bundled CA4 court pack remains `beta_approved`; passing
+evidence does not promote it, and production remains blocked until its reviewed
+approval is recorded in the bundled pack.
 
 ### Vercel
 
