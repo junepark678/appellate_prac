@@ -25,6 +25,9 @@ describe("continuous integration configuration", () => {
     )?.[1];
     expect(security).toMatch(/\n      contents: read(?:\n|$)/);
     expect(security).toMatch(/\n      pull-requests: read(?:\n|$)/);
+    expect(security).toMatch(
+      /uses: actions\/checkout@v6\n        with:\n          fetch-depth: 0(?:\n|$)/,
+    );
     expect(security).not.toContain("continue-on-error");
     expect(security).toContain("uses: gitleaks/gitleaks-action@v2");
   });
