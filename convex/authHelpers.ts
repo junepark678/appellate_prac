@@ -63,6 +63,12 @@ export async function requireCurrentUser(ctx: QueryCtx | MutationCtx) {
   return { identity, user }
 }
 
+/** Resolve an initialized account without exposing its legacy global role. */
+export async function requireOrganizationUser(ctx: QueryCtx | MutationCtx) {
+  const { user } = await requireCurrentUser(ctx)
+  return { userId: user._id }
+}
+
 export async function requireAdminUser(ctx: QueryCtx | MutationCtx) {
   const result = await requireCurrentUser(ctx)
   if (result.user.role !== 'admin') {
