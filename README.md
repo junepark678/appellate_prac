@@ -109,3 +109,25 @@ To connect live services:
 - Set `VITE_ENABLE_OPENROUTER=true`, plus Convex env vars `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`, to enable live AI events through the configured chat-completions provider.
 - Set `VITE_ENABLE_COURTLISTENER=true`, plus Convex env var `COURTLISTENER_TOKEN`, to enable live CourtListener requests.
 - Keep AI-generated procedural actions behind `validateToolCall` before writing any docket entry.
+
+## License
+
+Appellate Practice Simulator: Copyright (C) 2026 Rhajune Park.
+
+The project-authored software is free software licensed under the
+[GNU Affero General Public License](https://www.gnu.org/licenses/agpl-3.0.en.html),
+either version 3 of the License, or (at your option) any later version
+(`AGPL-3.0-or-later`). See [LICENSE](LICENSE) for the complete terms.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+
+Third-party dependencies and independently sourced legal materials retain their
+respective rights and notices. The program copyright above does not replace
+those notices or the Free Software Foundation's copyright in the license text.
+
+Before deploying a modified version for remote users, review section 13 of the
+license and provide those users an appropriate way to obtain the Corresponding
+Source for the version they use. A private repository link alone does not provide
+source access to users who cannot access that repository.
