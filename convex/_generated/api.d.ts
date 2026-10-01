@@ -26,6 +26,7 @@ import type * as errors from "../errors.js";
 import type * as instructor from "../instructor.js";
 import type * as integrations from "../integrations.js";
 import type * as organizationContracts from "../organizationContracts.js";
+import type * as organizations from "../organizations.js";
 import type * as policies from "../policies.js";
 import type * as rate_limit from "../rate_limit.js";
 import type * as scenarioDrafts from "../scenarioDrafts.js";
@@ -64,6 +65,7 @@ declare const fullApi: ApiFromModules<{
   instructor: typeof instructor;
   integrations: typeof integrations;
   organizationContracts: typeof organizationContracts;
+  organizations: typeof organizations;
   policies: typeof policies;
   rate_limit: typeof rate_limit;
   scenarioDrafts: typeof scenarioDrafts;
