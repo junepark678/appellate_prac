@@ -19,7 +19,7 @@
 
 import { v } from "convex/values";
 
-import type { Doc, Id } from "./_generated/dataModel";
+import type { Doc, Id, TableNames } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
 import { internalQuery } from "./_generated/server";
 import { isOrganizationMembershipActive } from "./organizationContracts";
@@ -112,6 +112,7 @@ const INSPECTABLE_TABLES = ORGANIZATION_MIGRATION_STEPS.flatMap(
 const MAX_CLASSIFICATION_RELATION_ROWS = 100;
 const CLASSIFICATION_RELATION_PROBE_LIMIT =
   MAX_CLASSIFICATION_RELATION_ROWS + 1;
+const MAX_INSPECTION_WORK_UNITS = 900;
 type ClassificationState = "ready" | "ambiguous";
 
 export type OwnershipClassification = {
@@ -567,146 +568,321 @@ const inspectionResultValidator = v.object({
 });
 
 type MigrationRow = Doc<MigrationTable> & Record<string, unknown>;
+type BoundedInspectionWork = {
+  remaining: number;
+  exhausted: boolean;
+  documentReads: Map<string, Promise<unknown>>;
+  queryReads: Map<string, Promise<unknown>>;
+  derivedReads: Map<string, Promise<unknown>>;
+};
+type InspectionContext = {
+  db: QueryCtx["db"];
+  work: BoundedInspectionWork;
+};
 type RowFinding = {
   outcome: "ready" | "ambiguous";
   reason: string;
   reportStorage?: boolean;
 };
 
+class InspectionWorkBudgetExceeded extends Error {
+  constructor() {
+    super("Inspection work budget exhausted");
+    this.name = "InspectionWorkBudgetExceeded";
+  }
+}
+
+function createInspectionContext(ctx: QueryCtx): InspectionContext {
+  return {
+    db: ctx.db,
+    work: {
+      remaining: MAX_INSPECTION_WORK_UNITS,
+      exhausted: false,
+      documentReads: new Map(),
+      queryReads: new Map(),
+      derivedReads: new Map(),
+    },
+  };
+}
+
+function chargeInspectionWork(ctx: InspectionContext, units: number) {
+  if (units <= 0) return;
+  if (units > ctx.work.remaining) {
+    ctx.work.exhausted = true;
+    throw new InspectionWorkBudgetExceeded();
+  }
+  ctx.work.remaining -= units;
+}
+
+function releaseInspectionWork(ctx: InspectionContext, units: number) {
+  ctx.work.remaining = Math.min(
+    MAX_INSPECTION_WORK_UNITS,
+    ctx.work.remaining + units,
+  );
+}
+
+async function readDocument<T extends TableNames>(
+  ctx: InspectionContext,
+  id: Id<T>,
+): Promise<Doc<T> | null> {
+  const key = String(id);
+  let pending = ctx.work.documentReads.get(key);
+  if (!pending) {
+    pending = (async () => {
+      // Count the db.get call and reserve for its possible document result.
+      chargeInspectionWork(ctx, 2);
+      try {
+        const document = await ctx.db.get(id);
+        if (!document) releaseInspectionWork(ctx, 1);
+        return document;
+      } catch (error) {
+        releaseInspectionWork(ctx, 2);
+        throw error;
+      }
+    })();
+    ctx.work.documentReads.set(key, pending);
+    void pending.catch(() => ctx.work.documentReads.delete(key));
+  }
+  return (await pending) as Doc<T> | null;
+}
+
+async function readQueryRows<T>(
+  ctx: InspectionContext,
+  cacheKey: string,
+  requestedLimit: number,
+  load: (limit: number) => Promise<T[]>,
+): Promise<T[]> {
+  let pending = ctx.work.queryReads.get(cacheKey);
+  if (!pending) {
+    pending = (async () => {
+      const queryLimit = Math.min(requestedLimit, ctx.work.remaining - 1);
+      if (queryLimit < 1) {
+        ctx.work.exhausted = true;
+        throw new InspectionWorkBudgetExceeded();
+      }
+      // Count the db.query operation and reserve for every possible result.
+      chargeInspectionWork(ctx, queryLimit + 1);
+      let rows: T[];
+      try {
+        rows = await load(queryLimit);
+      } catch (error) {
+        releaseInspectionWork(ctx, queryLimit + 1);
+        throw error;
+      }
+      releaseInspectionWork(ctx, queryLimit - rows.length);
+      if (queryLimit < requestedLimit && rows.length === queryLimit) {
+        ctx.work.exhausted = true;
+        throw new InspectionWorkBudgetExceeded();
+      }
+      return rows;
+    })();
+    ctx.work.queryReads.set(cacheKey, pending);
+    void pending.catch(() => ctx.work.queryReads.delete(cacheKey));
+  }
+  return (await pending) as T[];
+}
+
+function memoizeInspectionWork<T>(
+  ctx: InspectionContext,
+  cacheKey: string,
+  calculate: () => Promise<T>,
+): Promise<T> {
+  let pending = ctx.work.derivedReads.get(cacheKey);
+  if (!pending) {
+    pending = calculate();
+    ctx.work.derivedReads.set(cacheKey, pending);
+    void pending.catch(() => ctx.work.derivedReads.delete(cacheKey));
+  }
+  return pending as Promise<T>;
+}
+
+function chargeReferenceArray<T>(
+  ctx: InspectionContext,
+  values: readonly T[] | undefined,
+): readonly T[] {
+  if (!values) return [];
+  chargeInspectionWork(ctx, values.length);
+  return values;
+}
+
 function reportId(table: MigrationTable, recordId: string, suffix: string) {
   return `${ORGANIZATION_MIGRATION_KEY}/${table}/${recordId}/${suffix}`;
 }
 
 async function personalOrganizationEvidence(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   userId: Id<"users">,
   now: number,
 ): Promise<PersonalOrganizationEvidence[]> {
-  const institutions = await ctx.db
-    .query("institutions")
-    .withIndex("by_personal_owner", (index) =>
-      index.eq("personalOwnerUserId", userId),
-    )
-    .take(2);
-  return await Promise.all(
-    institutions.map(async (institution) => {
-      const memberships = await ctx.db
-        .query("institutionMemberships")
-        .withIndex("by_institution_user", (index) =>
-          index.eq("institutionId", institution._id).eq("userId", userId),
-        )
-        .take(2);
-      return {
-        institutionId: institution._id,
-        kind: institution.kind,
-        personalOwnerUserId: institution.personalOwnerUserId,
-        status: institution.status,
-        ownerMembershipActive:
-          memberships.length === 1 &&
-          isOrganizationMembershipActive(
-            institution,
-            memberships[0] ?? null,
-            now,
-          ),
-      };
-    }),
+  return memoizeInspectionWork(
+    ctx,
+    `personal-organizations:${userId}`,
+    async () => {
+      const institutions = await readQueryRows(
+        ctx,
+        `institutions/by-personal-owner:${userId}:2`,
+        2,
+        (limit) =>
+          ctx.db
+            .query("institutions")
+            .withIndex("by_personal_owner", (index) =>
+              index.eq("personalOwnerUserId", userId),
+            )
+            .take(limit),
+      );
+      const evidence: PersonalOrganizationEvidence[] = [];
+      for (const institution of institutions) {
+        const memberships = await readQueryRows(
+          ctx,
+          `institution-memberships/by-institution-user:${institution._id}:${userId}:2`,
+          2,
+          (limit) =>
+            ctx.db
+              .query("institutionMemberships")
+              .withIndex("by_institution_user", (index) =>
+                index.eq("institutionId", institution._id).eq("userId", userId),
+              )
+              .take(limit),
+        );
+        evidence.push({
+          institutionId: institution._id,
+          kind: institution.kind,
+          personalOwnerUserId: institution.personalOwnerUserId,
+          status: institution.status,
+          ownerMembershipActive:
+            memberships.length === 1 &&
+            isOrganizationMembershipActive(
+              institution,
+              memberships[0] ?? null,
+              now,
+            ),
+        });
+      }
+      return evidence;
+    },
   );
 }
 
 async function assignmentEvidenceForSession(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   sessionId: Id<"caseSessions">,
 ): Promise<AssignmentEvidence[]> {
-  const assignmentSessions = await ctx.db
-    .query("assignmentSessions")
-    .withIndex("by_case", (index) => index.eq("caseSessionId", sessionId))
-    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
-  if (assignmentSessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
-    return [
-      {
-        assignmentSessionUserId: "",
-        state: "truncated",
-      },
-    ];
-  }
-  const evidence: AssignmentEvidence[] = [];
-  for (const assignmentSession of assignmentSessions) {
-    const assignment = await ctx.db.get(assignmentSession.assignmentId);
-    if (!assignment) {
-      evidence.push({
-        assignmentSessionUserId: assignmentSession.userId,
-        state: "missing_assignment",
-      });
-      continue;
-    }
-    const cohort = await ctx.db.get(assignment.cohortId);
-    if (!cohort) {
-      evidence.push({
-        assignmentSessionUserId: assignmentSession.userId,
-        state: "missing_cohort",
-      });
-      continue;
-    }
-    const institution = await ctx.db.get(cohort.institutionId);
-    if (!institution) {
-      evidence.push({
-        assignmentSessionUserId: assignmentSession.userId,
-        state: "missing_institution",
-      });
-      continue;
-    }
-    evidence.push({
-      assignmentSessionUserId: assignmentSession.userId,
-      state: "ready",
-      institutionId: institution._id,
-      institutionActive: institution.status === "active",
-    });
-  }
-  return evidence;
+  return memoizeInspectionWork(
+    ctx,
+    `assignment-evidence:${sessionId}`,
+    async () => {
+      const assignmentSessions = await readQueryRows(
+        ctx,
+        `assignment-sessions/by-case:${sessionId}:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+        CLASSIFICATION_RELATION_PROBE_LIMIT,
+        (limit) =>
+          ctx.db
+            .query("assignmentSessions")
+            .withIndex("by_case", (index) =>
+              index.eq("caseSessionId", sessionId),
+            )
+            .take(limit),
+      );
+      if (assignmentSessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
+        return [{ assignmentSessionUserId: "", state: "truncated" }];
+      }
+      const evidence: AssignmentEvidence[] = [];
+      for (const assignmentSession of assignmentSessions) {
+        const assignment = await readDocument(
+          ctx,
+          assignmentSession.assignmentId,
+        );
+        if (!assignment) {
+          evidence.push({
+            assignmentSessionUserId: assignmentSession.userId,
+            state: "missing_assignment",
+          });
+          continue;
+        }
+        const cohort = await readDocument(ctx, assignment.cohortId);
+        if (!cohort) {
+          evidence.push({
+            assignmentSessionUserId: assignmentSession.userId,
+            state: "missing_cohort",
+          });
+          continue;
+        }
+        const institution = await readDocument(ctx, cohort.institutionId);
+        if (!institution) {
+          evidence.push({
+            assignmentSessionUserId: assignmentSession.userId,
+            state: "missing_institution",
+          });
+          continue;
+        }
+        evidence.push({
+          assignmentSessionUserId: assignmentSession.userId,
+          state: "ready",
+          institutionId: institution._id,
+          institutionActive: institution.status === "active",
+        });
+      }
+      return evidence;
+    },
+  );
 }
 
 async function classifyCaseSession(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   session: Doc<"caseSessions">,
   now: number,
 ): Promise<OwnershipClassification> {
-  const [owner, links, personalOrganizations] = await Promise.all([
-    ctx.db.get(session.userId),
-    assignmentEvidenceForSession(ctx, session._id),
-    personalOrganizationEvidence(ctx, session.userId, now),
-  ]);
-  const existingInstitution = session.institutionId
-    ? await ctx.db.get(session.institutionId)
-    : null;
-  return classifyCaseSessionOwnership({
-    userId: session.userId,
-    ownerExists: owner !== null,
-    institutionId: session.institutionId,
-    existingInstitution: existingInstitution
-      ? {
-          kind: existingInstitution.kind,
-          personalOwnerUserId: existingInstitution.personalOwnerUserId,
-          status: existingInstitution.status,
-        }
-      : null,
-    assignmentLinks: links,
-    personalOrganizations,
-  });
+  return memoizeInspectionWork(
+    ctx,
+    `case-session-classification:${session._id}`,
+    async () => {
+      const owner = await readDocument(ctx, session.userId);
+      const links = await assignmentEvidenceForSession(ctx, session._id);
+      const personalOrganizations = await personalOrganizationEvidence(
+        ctx,
+        session.userId,
+        now,
+      );
+      const existingInstitution = session.institutionId
+        ? await readDocument(ctx, session.institutionId)
+        : null;
+      return classifyCaseSessionOwnership({
+        userId: session.userId,
+        ownerExists: owner !== null,
+        institutionId: session.institutionId,
+        existingInstitution: existingInstitution
+          ? {
+              kind: existingInstitution.kind,
+              personalOwnerUserId: existingInstitution.personalOwnerUserId,
+              status: existingInstitution.status,
+            }
+          : null,
+        assignmentLinks: links,
+        personalOrganizations,
+      });
+    },
+  );
 }
 
 async function activeMembership(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   institutionId: Id<"institutions">,
   userId: Id<"users">,
   now: number,
 ) {
-  const institution = await ctx.db.get(institutionId);
-  const memberships = await ctx.db
-    .query("institutionMemberships")
-    .withIndex("by_institution_user", (index) =>
-      index.eq("institutionId", institutionId).eq("userId", userId),
-    )
-    .take(2);
+  const institution = await readDocument(ctx, institutionId);
+  const memberships = await readQueryRows(
+    ctx,
+    `institution-memberships/by-institution-user:${institutionId}:${userId}:2`,
+    2,
+    (limit) =>
+      ctx.db
+        .query("institutionMemberships")
+        .withIndex("by_institution_user", (index) =>
+          index.eq("institutionId", institutionId).eq("userId", userId),
+        )
+        .take(limit),
+  );
   return (
     memberships.length === 1 &&
     isOrganizationMembershipActive(institution, memberships[0] ?? null, now)
@@ -714,7 +890,28 @@ async function activeMembership(
 }
 
 async function classifyScenario(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
+  scenario: Doc<"scenarios">,
+  now: number,
+  assignments: Doc<"assignments">[],
+  assignmentScanTruncated: boolean,
+): Promise<OwnershipClassification> {
+  return memoizeInspectionWork(
+    ctx,
+    `scenario-classification:${scenario._id}`,
+    () =>
+      computeScenarioClassification(
+        ctx,
+        scenario,
+        now,
+        assignments,
+        assignmentScanTruncated,
+      ),
+  );
+}
+
+async function computeScenarioClassification(
+  ctx: InspectionContext,
   scenario: Doc<"scenarios">,
   now: number,
   assignments: Doc<"assignments">[],
@@ -732,19 +929,28 @@ async function classifyScenario(
     return { state: "ambiguous", reason: "scenario_visibility_unresolved" };
   }
   const owner = scenario.ownerUserId
-    ? await ctx.db.get(scenario.ownerUserId)
+    ? await readDocument(ctx, scenario.ownerUserId)
     : null;
   if (!owner) return { state: "ambiguous", reason: "missing_owner" };
   if (assignmentScanTruncated) {
     return { state: "ambiguous", reason: "scenario_assignment_scan_truncated" };
   }
-  const sessions = await ctx.db
-    .query("caseSessions")
-    .withIndex("by_scenario", (index) => index.eq("scenarioId", scenario._id))
-    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+  const sessions = await readQueryRows(
+    ctx,
+    `case-sessions/by-scenario:${scenario._id}:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+    CLASSIFICATION_RELATION_PROBE_LIMIT,
+    (limit) =>
+      ctx.db
+        .query("caseSessions")
+        .withIndex("by_scenario", (index) =>
+          index.eq("scenarioId", scenario._id),
+        )
+        .take(limit),
+  );
   if (sessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
     return { state: "ambiguous", reason: "scenario_session_scan_truncated" };
   }
+  chargeInspectionWork(ctx, assignments.length);
   const relatedAssignments = assignments.filter(
     (assignment) => assignment.scenarioId === scenario._id,
   );
@@ -777,8 +983,10 @@ async function classifyScenario(
     }
   }
   for (const assignment of relatedAssignments) {
-    const cohort = await ctx.db.get(assignment.cohortId);
-    const institution = cohort ? await ctx.db.get(cohort.institutionId) : null;
+    const cohort = await readDocument(ctx, assignment.cohortId);
+    const institution = cohort
+      ? await readDocument(ctx, cohort.institutionId)
+      : null;
     if (institution && institution.status === "active") {
       references.push({ state: "ready", institutionId: institution._id });
     } else {
@@ -810,7 +1018,7 @@ async function classifyScenario(
     }
   }
   const existingInstitution = scenario.institutionId
-    ? await ctx.db.get(scenario.institutionId)
+    ? await readDocument(ctx, scenario.institutionId)
     : null;
   return classifyPrivateScenarioOwnership({
     visibility: scenario.visibility,
@@ -841,11 +1049,11 @@ function sourceUrlFromProvenance(value: Record<string, unknown>): string {
 }
 
 async function classifySourceCase(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   sourceCase: Doc<"sourceCases">,
 ): Promise<OwnershipClassification> {
   if (sourceCase.caseSessionId) {
-    const session = await ctx.db.get(sourceCase.caseSessionId);
+    const session = await readDocument(ctx, sourceCase.caseSessionId);
     if (!session)
       return { state: "ambiguous", reason: "source_session_missing" };
     if (session.scenarioId !== sourceCase.scenarioId) {
@@ -881,28 +1089,42 @@ async function classifySourceCase(
       : `CourtListener docket ${provenance.docket_id ?? provenance.id}`;
   const sourceUrl = sourceUrlFromProvenance(provenance);
   const evidence: ProvenanceMatchEvidence[] = [];
-  const sessions = await ctx.db
-    .query("caseSessions")
-    .withIndex("by_scenario", (index) =>
-      index.eq("scenarioId", sourceCase.scenarioId),
-    )
-    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+  const sessions = await readQueryRows(
+    ctx,
+    `case-sessions/by-scenario:${sourceCase.scenarioId}:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+    CLASSIFICATION_RELATION_PROBE_LIMIT,
+    (limit) =>
+      ctx.db
+        .query("caseSessions")
+        .withIndex("by_scenario", (index) =>
+          index.eq("scenarioId", sourceCase.scenarioId),
+        )
+        .take(limit),
+  );
   if (sessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
     return { state: "ambiguous", reason: "source_case_session_scan_truncated" };
   }
   const imports: Doc<"trialDocketImports">[] = [];
   for (const session of sessions) {
-    const sessionImports = await ctx.db
-      .query("trialDocketImports")
-      .withIndex("by_case", (index) => index.eq("caseSessionId", session._id))
-      .take(3);
+    const sessionImports = await readQueryRows(
+      ctx,
+      `trial-docket-imports/by-case:${session._id}:3`,
+      3,
+      (limit) =>
+        ctx.db
+          .query("trialDocketImports")
+          .withIndex("by_case", (index) =>
+            index.eq("caseSessionId", session._id),
+          )
+          .take(limit),
+    );
     if (sessionImports.length > 2) {
       return { state: "ambiguous", reason: "source_import_scan_truncated" };
     }
     imports.push(...sessionImports);
   }
   for (const trialImport of imports) {
-    const session = await ctx.db.get(trialImport.caseSessionId);
+    const session = await readDocument(ctx, trialImport.caseSessionId);
     evidence.push({
       externalIdMatches: String(recordedExternalId) === sourceCase.externalId,
       sourceUrlMatches:
@@ -917,7 +1139,7 @@ async function classifySourceCase(
 }
 
 async function classifyIntegrationEvent(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   row: Doc<"integrationEvents">,
   now: number,
 ): Promise<RowFinding> {
@@ -929,7 +1151,7 @@ async function classifyIntegrationEvent(
     });
     return { outcome: classification.state, reason: classification.reason };
   }
-  const session = await ctx.db.get(row.caseSessionId);
+  const session = await readDocument(ctx, row.caseSessionId);
   if (!session)
     return { outcome: "ambiguous", reason: "event_session_missing" };
   const sessionClassification = await classifyCaseSession(ctx, session, now);
@@ -950,7 +1172,7 @@ async function classifyIntegrationEvent(
 }
 
 async function classifyAuditLog(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   row: Doc<"auditLog">,
   now: number,
 ): Promise<RowFinding> {
@@ -959,17 +1181,17 @@ async function classifyAuditLog(
   let missingParent = false;
   let sessionScopeUnresolved = false;
   if (row.institutionId) {
-    const institution = await ctx.db.get(row.institutionId);
+    const institution = await readDocument(ctx, row.institutionId);
     if (!institution) missingParent = true;
     scopes.push(row.institutionId);
   }
   if (row.cohortId) {
-    const cohort = await ctx.db.get(row.cohortId);
+    const cohort = await readDocument(ctx, row.cohortId);
     if (!cohort) missingParent = true;
     else scopes.push(cohort.institutionId);
   }
   if (row.caseSessionId) {
-    const session = await ctx.db.get(row.caseSessionId);
+    const session = await readDocument(ctx, row.caseSessionId);
     if (!session) {
       missingParent = true;
     } else {
@@ -1036,7 +1258,7 @@ type CaseSessionParentTable =
 type CaseSessionParentLinkState = "missing" | "cross_case" | "same_case";
 
 async function checkCaseSessionParentLink(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   table: CaseSessionParentTable,
   id: unknown,
   caseSessionId: Id<"caseSessions">,
@@ -1044,7 +1266,7 @@ async function checkCaseSessionParentLink(
   if (typeof id !== "string") return "missing";
   const normalizedId = ctx.db.normalizeId(table, id);
   if (!normalizedId) return "missing";
-  const parent = await ctx.db.get(normalizedId);
+  const parent = await readDocument(ctx, normalizedId);
   if (!parent) return "missing";
   return parent.caseSessionId === caseSessionId ? "same_case" : "cross_case";
 }
@@ -1055,14 +1277,14 @@ function parentLinkReason(prefix: string, state: CaseSessionParentLinkState) {
     : `${prefix}_cross_parent_conflict`;
 }
 
-async function userReferenceExists(ctx: QueryCtx, value: unknown) {
+async function userReferenceExists(ctx: InspectionContext, value: unknown) {
   if (typeof value !== "string") return false;
   const userId = ctx.db.normalizeId("users", value);
-  return userId !== null && (await ctx.db.get(userId)) !== null;
+  return userId !== null && (await readDocument(ctx, userId)) !== null;
 }
 
 async function classifyAssignmentSession(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   row: Doc<"assignmentSessions">,
   now: number,
 ): Promise<RowFinding> {
@@ -1078,14 +1300,16 @@ async function classifyAssignmentSession(
   ) {
     return { outcome: "ambiguous", reason: "assignment_reopener_missing" };
   }
-  const [assignment, session] = await Promise.all([
-    ctx.db.get(row.assignmentId),
-    ctx.db.get(row.caseSessionId),
-  ]);
+  const assignment = await readDocument(ctx, row.assignmentId);
+  const session = await readDocument(ctx, row.caseSessionId);
   const assignmentExists = assignment !== null;
   const sessionExists = session !== null;
-  const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null;
-  const institution = cohort ? await ctx.db.get(cohort.institutionId) : null;
+  const cohort = assignment
+    ? await readDocument(ctx, assignment.cohortId)
+    : null;
+  const institution = cohort
+    ? await readDocument(ctx, cohort.institutionId)
+    : null;
   const caseSessionClassification = session
     ? await classifyCaseSession(ctx, session, now)
     : null;
@@ -1110,7 +1334,7 @@ async function classifyAssignmentSession(
 }
 
 async function classifySimulationPolicy(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   row: Doc<"simulationPolicies">,
   now: number,
 ): Promise<RowFinding> {
@@ -1134,7 +1358,7 @@ async function classifySimulationPolicy(
     return { outcome: classification.state, reason: classification.reason };
   }
   if (row.scope === "session") {
-    const session = await ctx.db.get(id as Id<"caseSessions">);
+    const session = await readDocument(ctx, id as Id<"caseSessions">);
     if (!session) {
       const classification = classifySimulationPolicyOwnership({
         parentExists: false,
@@ -1149,35 +1373,35 @@ async function classifySimulationPolicy(
     return { outcome: resolved.state, reason: resolved.reason };
   }
   if (row.scope === "assignment") {
-    const assignment = await ctx.db.get(id as Id<"assignments">);
+    const assignment = await readDocument(ctx, id as Id<"assignments">);
     if (!assignment) {
       const classification = classifySimulationPolicyOwnership({
         parentExists: false,
       });
       return { outcome: classification.state, reason: classification.reason };
     }
-    const cohort = await ctx.db.get(assignment.cohortId);
+    const cohort = await readDocument(ctx, assignment.cohortId);
     if (!cohort) {
       const classification = classifySimulationPolicyOwnership({
         parentExists: false,
       });
       return { outcome: classification.state, reason: classification.reason };
     }
-    const institution = await ctx.db.get(cohort.institutionId);
+    const institution = await readDocument(ctx, cohort.institutionId);
     const classification = classifySimulationPolicyOwnership({
       parentExists: institution !== null,
       institutionActive: institution?.status === "active",
     });
     return { outcome: classification.state, reason: classification.reason };
   }
-  const cohort = await ctx.db.get(id as Id<"cohorts">);
+  const cohort = await readDocument(ctx, id as Id<"cohorts">);
   if (!cohort) {
     const classification = classifySimulationPolicyOwnership({
       parentExists: false,
     });
     return { outcome: classification.state, reason: classification.reason };
   }
-  const institution = await ctx.db.get(cohort.institutionId);
+  const institution = await readDocument(ctx, cohort.institutionId);
   const classification = classifySimulationPolicyOwnership({
     parentExists: institution !== null,
     institutionActive: institution?.status === "active",
@@ -1186,7 +1410,7 @@ async function classifySimulationPolicy(
 }
 
 async function classifyDescendant(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   table: MigrationTable,
   row: MigrationRow,
   now: number,
@@ -1209,7 +1433,7 @@ async function classifyDescendant(
     table === "scenarioRecordExcerpts"
   ) {
     const scenarioId = row.scenarioId as Id<"scenarios">;
-    const scenario = await ctx.db.get(scenarioId);
+    const scenario = await readDocument(ctx, scenarioId);
     if (!scenario) {
       const classification = classifyDescendantParentChain({
         parentExists: false,
@@ -1224,13 +1448,23 @@ async function classifyDescendant(
       };
     }
     if (table === "scenarioRecordExcerpts") {
-      for (const issueId of (row.citedByIssueIds as string[]) ?? []) {
-        const issues = await ctx.db
-          .query("scenarioIssues")
-          .withIndex("by_scenario_issue", (index) =>
-            index.eq("scenarioId", scenario._id).eq("issueId", issueId),
-          )
-          .take(2);
+      const citedByIssueIds = chargeReferenceArray(
+        ctx,
+        row.citedByIssueIds as string[] | undefined,
+      );
+      for (const issueId of citedByIssueIds) {
+        const issues = await readQueryRows(
+          ctx,
+          `scenario-issues/by-scenario-issue:${scenario._id}:${issueId}:2`,
+          2,
+          (limit) =>
+            ctx.db
+              .query("scenarioIssues")
+              .withIndex("by_scenario_issue", (index) =>
+                index.eq("scenarioId", scenario._id).eq("issueId", issueId),
+              )
+              .take(limit),
+        );
         if (issues.length === 0) {
           return {
             outcome: "ambiguous",
@@ -1282,7 +1516,7 @@ async function classifyDescendant(
 
   if (table === "documents" || CASE_SESSION_TABLES.has(table)) {
     const caseSessionId = row.caseSessionId as Id<"caseSessions">;
-    const session = await ctx.db.get(caseSessionId);
+    const session = await readDocument(ctx, caseSessionId);
     if (!session) {
       const classification = classifyDescendantParentChain({
         parentExists: false,
@@ -1335,18 +1569,26 @@ async function classifyDescendant(
           "documentAnalyses",
           row.analysisId as string,
         );
-        const analysis = analysisId ? await ctx.db.get(analysisId) : null;
+        const analysis = analysisId
+          ? await readDocument(ctx, analysisId)
+          : null;
         if (analysis?.documentId !== row._id) {
           crossParentReason = "document_analysis_reverse_link_conflict";
         }
       }
     } else if (table === "documents") {
-      const linkedAnalyses = await ctx.db
-        .query("documentAnalyses")
-        .withIndex("by_document", (index) =>
-          index.eq("documentId", row._id as Id<"documents">),
-        )
-        .take(1);
+      const linkedAnalyses = await readQueryRows(
+        ctx,
+        `document-analyses/by-document:${row._id}:1`,
+        1,
+        (limit) =>
+          ctx.db
+            .query("documentAnalyses")
+            .withIndex("by_document", (index) =>
+              index.eq("documentId", row._id as Id<"documents">),
+            )
+            .take(limit),
+      );
       if (linkedAnalyses.length > 0) {
         crossParentReason = "document_analysis_reverse_link_conflict";
       }
@@ -1362,18 +1604,26 @@ async function classifyDescendant(
           "documents",
           row.documentId as string,
         );
-        const document = documentId ? await ctx.db.get(documentId) : null;
+        const document = documentId
+          ? await readDocument(ctx, documentId)
+          : null;
         if (document?.analysisId !== row._id) {
           crossParentReason = "analysis_document_reverse_link_conflict";
         }
       }
     } else if (table === "documentAnalyses") {
-      const caseDocuments = await ctx.db
-        .query("documents")
-        .withIndex("by_case", (index) =>
-          index.eq("caseSessionId", caseSessionId),
-        )
-        .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+      const caseDocuments = await readQueryRows(
+        ctx,
+        `documents/by-case:${caseSessionId}:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+        CLASSIFICATION_RELATION_PROBE_LIMIT,
+        (limit) =>
+          ctx.db
+            .query("documents")
+            .withIndex("by_case", (index) =>
+              index.eq("caseSessionId", caseSessionId),
+            )
+            .take(limit),
+      );
       if (caseDocuments.some((document) => document.analysisId === row._id)) {
         crossParentReason = "analysis_document_reverse_link_conflict";
       } else if (caseDocuments.length > MAX_CLASSIFICATION_RELATION_ROWS) {
@@ -1381,7 +1631,11 @@ async function classifyDescendant(
       }
     }
     if (table === "actorWorkProducts") {
-      for (const id of (row.sourceDocumentAnalysisIds as string[]) ?? []) {
+      const sourceDocumentAnalysisIds = chargeReferenceArray(
+        ctx,
+        row.sourceDocumentAnalysisIds as string[] | undefined,
+      );
+      for (const id of sourceDocumentAnalysisIds) {
         crossParentReason = await sameCaseReason(
           "documentAnalyses",
           id,
@@ -1390,7 +1644,11 @@ async function classifyDescendant(
         if (crossParentReason) break;
       }
       if (crossParentReason === undefined) {
-        for (const id of (row.sourceFilingIds as string[]) ?? []) {
+        const sourceFilingIds = chargeReferenceArray(
+          ctx,
+          row.sourceFilingIds as string[] | undefined,
+        );
+        for (const id of sourceFilingIds) {
           crossParentReason = await sameCaseReason(
             "filings",
             id,
@@ -1411,9 +1669,14 @@ async function classifyDescendant(
       crossParentReason = "ai_run_user_missing";
     }
     if (table === "filings" && crossParentReason === undefined) {
-      const documentIds = (row.documentIds as string[]) ?? [];
-      const analysisIds =
-        (row.documentAnalysisIds as string[] | undefined) ?? [];
+      const documentIds = chargeReferenceArray(
+        ctx,
+        row.documentIds as string[] | undefined,
+      );
+      const analysisIds = chargeReferenceArray(
+        ctx,
+        row.documentAnalysisIds as string[] | undefined,
+      );
       for (const id of documentIds) {
         crossParentReason = await sameCaseReason(
           "documents",
@@ -1477,7 +1740,7 @@ async function classifyDescendant(
 }
 
 async function classifyRow(
-  ctx: QueryCtx,
+  ctx: InspectionContext,
   table: MigrationTable,
   row: MigrationRow,
   now: number,
@@ -1603,6 +1866,7 @@ export const inspectBatch = internalQuery({
       );
     }
     const table = args.table as MigrationTable;
+    const inspectionCtx = createInspectionContext(ctx);
     const cursor = parseCursor(table, args.cursor);
     const query = ctx.db.query(table) as unknown as {
       order: (direction: "asc") => {
@@ -1616,19 +1880,25 @@ export const inspectBatch = internalQuery({
         }>;
       };
     };
+    // Count the page query and reserve for the requested number of row documents.
+    chargeInspectionWork(inspectionCtx, args.limit + 1);
     const page = await query.order("asc").paginate({
       numItems: args.limit,
       cursor,
     });
+    releaseInspectionWork(inspectionCtx, args.limit - page.page.length);
     const inspectsScenarioOwnership =
       table === "scenarios" ||
       table === "scenarioDocumentAssets" ||
       table === "scenarioIssues" ||
       table === "scenarioRecordExcerpts";
     const assignmentProbe = inspectsScenarioOwnership
-      ? await ctx.db
-          .query("assignments")
-          .take(CLASSIFICATION_RELATION_PROBE_LIMIT)
+      ? await readQueryRows(
+          inspectionCtx,
+          `assignments/inspection-prefix:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+          CLASSIFICATION_RELATION_PROBE_LIMIT,
+          (limit) => ctx.db.query("assignments").take(limit),
+        )
       : [];
     const assignmentScanTruncated =
       assignmentProbe.length > MAX_CLASSIFICATION_RELATION_ROWS;
@@ -1647,14 +1917,31 @@ export const inspectBatch = internalQuery({
     let ambiguous = 0;
     for (const row of page.page) {
       const recordId = String(row._id);
-      const classification = await classifyRow(
-        ctx,
-        table,
-        row,
-        now,
-        allAssignments,
-        assignmentScanTruncated,
-      );
+      let classification: RowFinding;
+      if (inspectionCtx.work.exhausted || inspectionCtx.work.remaining === 0) {
+        inspectionCtx.work.exhausted = true;
+        classification = {
+          outcome: "ambiguous",
+          reason: "inspection_work_budget_exhausted",
+        };
+      } else {
+        try {
+          classification = await classifyRow(
+            inspectionCtx,
+            table,
+            row,
+            now,
+            allAssignments,
+            assignmentScanTruncated,
+          );
+        } catch (error) {
+          if (!(error instanceof InspectionWorkBudgetExceeded)) throw error;
+          classification = {
+            outcome: "ambiguous",
+            reason: "inspection_work_budget_exhausted",
+          };
+        }
+      }
       const base: (typeof findings)[number] = {
         id: reportId(table, recordId, "classification"),
         tableName: table,

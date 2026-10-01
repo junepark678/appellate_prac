@@ -740,6 +740,139 @@ describe("organization migration inspection contract", () => {
     });
   });
 
+  it("shares one work budget across nested scenario fanout and blocks later ready rows", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await seedLegacyDocument(t, "test|budget-owner");
+    const trailingScenarioId = await t.run(async (ctx) => {
+      const at = "2026-09-30T00:00:00.000Z";
+      const institutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Work budget organization",
+        slug: "work-budget-organization",
+        status: "active",
+        monthlyAiBudgetCents: 100,
+      });
+      await ctx.db.insert("institutionMemberships", {
+        institutionId,
+        userId: owner.userId,
+        role: "admin",
+        status: "active",
+        createdAt: at,
+      });
+      const cohortId = await ctx.db.insert("cohorts", {
+        institutionId,
+        title: "Work budget cohort",
+        term: "2026",
+        startsAt: at,
+        endsAt: "2027-01-01T00:00:00.000Z",
+        archived: false,
+      });
+      const assignmentId = await ctx.db.insert("assignments", {
+        cohortId,
+        scenarioId: owner.scenarioId,
+        title: "High fanout assignment",
+        published: true,
+        createdByUserId: owner.userId,
+        createdAt: at,
+      });
+      for (let sessionIndex = 1; sessionIndex < 100; sessionIndex += 1) {
+        const caseSessionId = await ctx.db.insert("caseSessions", {
+          scenarioId: owner.scenarioId,
+          userId: owner.userId,
+          courtPackId: "ca4",
+          status: "active",
+          simulatedDate: at,
+        });
+        for (let linkIndex = 0; linkIndex < 10; linkIndex += 1) {
+          await ctx.db.insert("assignmentSessions", {
+            assignmentId,
+            caseSessionId,
+            userId: owner.userId,
+          });
+        }
+      }
+      return await ctx.db.insert("scenarios", {
+        scenarioKey: "late-simple-scenario",
+        visibility: "private",
+        title: "Late simple scenario",
+        source: "synthetic",
+        courtPackId: "ca4",
+        shortCaption: "Owner v. Budget",
+        lowerTribunal: "district court",
+        natureOfSuit: "civil",
+        proceduralPosture: "appeal",
+        issuesPresented: [],
+        meritsRecord: [],
+        ownerUserId: owner.userId,
+        published: false,
+      });
+    });
+
+    const scenarios = await t.query(inspectRef, {
+      table: "scenarios",
+      limit: 100,
+    });
+    expect(
+      scenarios.findings.find(
+        (finding) => finding.recordId === String(owner.scenarioId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "inspection_work_budget_exhausted",
+    });
+    expect(
+      scenarios.findings.find(
+        (finding) => finding.recordId === String(trailingScenarioId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "inspection_work_budget_exhausted",
+    });
+  });
+
+  it("charges every reference-array element and makes later rows ambiguous on exhaustion", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await seedLegacyDocument(t, "test|long-reference-owner");
+    const rowIds = await t.run(async (ctx) => {
+      const sharedFields = {
+        caseSessionId: owner.caseSessionId,
+        actorId: "fixture-actor",
+        kind: "counterparty_strategy" as const,
+        status: "proposed" as const,
+        workProductJson: "{}",
+        sourceDocumentAnalysisIds: [],
+        createdAt: "2026-09-30T00:00:00.000Z",
+      };
+      const longArrayRowId = await ctx.db.insert("actorWorkProducts", {
+        ...sharedFields,
+        sourceFilingIds: Array.from(
+          { length: 8192 },
+          (_, index) => `missing-filing-${index}`,
+        ),
+      });
+      const laterReadyRowId = await ctx.db.insert("actorWorkProducts", {
+        ...sharedFields,
+        sourceFilingIds: [],
+      });
+      return { longArrayRowId, laterReadyRowId };
+    });
+
+    const workProducts = await t.query(inspectRef, {
+      table: "actorWorkProducts",
+      limit: 100,
+    });
+    for (const recordId of [rowIds.longArrayRowId, rowIds.laterReadyRowId]) {
+      expect(
+        workProducts.findings.find(
+          (finding) => finding.recordId === String(recordId),
+        ),
+      ).toMatchObject({
+        outcome: "ambiguous",
+        reason: "inspection_work_budget_exhausted",
+      });
+    }
+  });
+
   it("reports missing, cross-case, and conflicting descendant links", async () => {
     const t = convexTest(schema, modules);
     const owner = await seedLegacyDocument(t);
