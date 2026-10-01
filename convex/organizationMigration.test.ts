@@ -694,6 +694,52 @@ describe("organization migration inspection contract", () => {
     expect(after.migrationFindings).toBe(0);
   });
 
+  it("bounds scenario assignment probes and reports truncated ownership as ambiguous", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await seedLegacyDocument(t);
+    await t.run(async (ctx) => {
+      const at = "2026-09-30T00:00:00.000Z";
+      const institutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Bounded fixture organization",
+        slug: "bounded-fixture-organization",
+        status: "active",
+        monthlyAiBudgetCents: 100,
+      });
+      const cohortId = await ctx.db.insert("cohorts", {
+        institutionId,
+        title: "Bounded fixture cohort",
+        term: "2026",
+        startsAt: at,
+        endsAt: "2027-01-01T00:00:00.000Z",
+        archived: false,
+      });
+      for (let index = 0; index <= 100; index += 1) {
+        await ctx.db.insert("assignments", {
+          cohortId,
+          scenarioId: owner.scenarioId,
+          title: `Bounded assignment ${index}`,
+          published: true,
+          createdByUserId: owner.userId,
+          createdAt: at,
+        });
+      }
+    });
+
+    const scenarios = await t.query(inspectRef, {
+      table: "scenarios",
+      limit: 100,
+    });
+    expect(
+      scenarios.findings.find(
+        (finding) => finding.recordId === String(owner.scenarioId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "scenario_assignment_scan_truncated",
+    });
+  });
+
   it("reports missing, cross-case, and conflicting descendant links", async () => {
     const t = convexTest(schema, modules);
     const owner = await seedLegacyDocument(t);
@@ -794,6 +840,76 @@ describe("organization migration inspection contract", () => {
       );
       await ctx.db.patch(reverseConflictDocumentId, {
         analysisId: reverseConflictAnalysisId,
+      });
+      const missingAnalysisBacklinkId = await ctx.db.insert(
+        "documentAnalyses",
+        {
+          caseSessionId: owner.caseSessionId,
+          analyzerId: "fixture",
+          fileSizeBytes: 1,
+          mimeType: "application/pdf",
+          searchableText: false,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: at,
+        },
+      );
+      const missingAnalysisBacklinkDocumentId = await ctx.db.insert(
+        "documents",
+        {
+          caseSessionId: owner.caseSessionId,
+          fileName: "missing-analysis-backlink.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1,
+          extractedSignals: [],
+        },
+      );
+      await ctx.db.patch(missingAnalysisBacklinkDocumentId, {
+        analysisId: missingAnalysisBacklinkId,
+      });
+      const missingDocumentBacklinkId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "missing-document-backlink.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      const missingDocumentBacklinkAnalysisId = await ctx.db.insert(
+        "documentAnalyses",
+        {
+          caseSessionId: owner.caseSessionId,
+          documentId: missingDocumentBacklinkId,
+          analyzerId: "fixture",
+          fileSizeBytes: 1,
+          mimeType: "application/pdf",
+          searchableText: false,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: at,
+        },
+      );
+      const unlinkedDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "unlinked.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      const unlinkedAnalysisId = await ctx.db.insert("documentAnalyses", {
+        caseSessionId: owner.caseSessionId,
+        analyzerId: "fixture",
+        fileSizeBytes: 1,
+        mimeType: "application/pdf",
+        searchableText: false,
+        certificateOfServiceDetected: false,
+        certificateOfComplianceDetected: false,
+        sealedOrRedactionWarning: false,
+        warnings: [],
+        createdAt: at,
       });
 
       const missingDocumentId = await ctx.db.insert("documents", {
@@ -1041,6 +1157,12 @@ describe("organization migration inspection contract", () => {
         wrongCaseDocumentId,
         missingAnalysisDocumentId,
         reverseConflictDocumentId,
+        missingAnalysisBacklinkId,
+        missingAnalysisBacklinkDocumentId,
+        missingDocumentBacklinkId,
+        missingDocumentBacklinkAnalysisId,
+        unlinkedDocumentId,
+        unlinkedAnalysisId,
         missingAnalysisWorkProductId,
         crossCaseAnalysisWorkProductId,
         crossCaseFilingWorkProductId,
@@ -1117,6 +1239,42 @@ describe("organization migration inspection contract", () => {
     ).toMatchObject({
       outcome: "ambiguous",
       reason: "document_analysis_reverse_link_conflict",
+    });
+    expect(
+      findingFor(documents, String(fixture.missingAnalysisBacklinkDocumentId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "document_analysis_reverse_link_conflict",
+    });
+    expect(
+      findingFor(analyses, String(fixture.missingAnalysisBacklinkId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "analysis_document_reverse_link_conflict",
+    });
+    expect(
+      findingFor(analyses, String(fixture.missingDocumentBacklinkAnalysisId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "analysis_document_reverse_link_conflict",
+    });
+    expect(
+      findingFor(documents, String(fixture.missingDocumentBacklinkId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "document_analysis_reverse_link_conflict",
+    });
+    expect(
+      findingFor(documents, String(fixture.unlinkedDocumentId)),
+    ).toMatchObject({
+      outcome: "ready",
+      reason: "case_session_parent_chain_resolves",
+    });
+    expect(
+      findingFor(analyses, String(fixture.unlinkedAnalysisId)),
+    ).toMatchObject({
+      outcome: "ready",
+      reason: "case_session_parent_chain_resolves",
     });
     expect(
       findingFor(workProducts, String(fixture.missingAnalysisWorkProductId)),

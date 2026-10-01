@@ -109,6 +109,9 @@ type MigrationTable =
 const INSPECTABLE_TABLES = ORGANIZATION_MIGRATION_STEPS.flatMap(
   ({ tables }) => tables,
 ) as MigrationTable[];
+const MAX_CLASSIFICATION_RELATION_ROWS = 100;
+const CLASSIFICATION_RELATION_PROBE_LIMIT =
+  MAX_CLASSIFICATION_RELATION_ROWS + 1;
 type ClassificationState = "ready" | "ambiguous";
 
 export type OwnershipClassification = {
@@ -294,7 +297,8 @@ type AssignmentEvidence = {
     | "ready"
     | "missing_assignment"
     | "missing_cohort"
-    | "missing_institution";
+    | "missing_institution"
+    | "truncated";
   institutionId?: string;
   institutionActive?: boolean;
 };
@@ -324,6 +328,12 @@ export function classifyCaseSessionOwnership(input: {
     return { state: "ambiguous", reason: "missing_owner" };
 
   if (input.assignmentLinks.length > 0) {
+    if (input.assignmentLinks.some((link) => link.state === "truncated")) {
+      return {
+        state: "ambiguous",
+        reason: "assignment_session_scan_truncated",
+      };
+    }
     if (input.assignmentLinks.some((link) => link.state !== "ready")) {
       return { state: "ambiguous", reason: "assignment_parent_missing" };
     }
@@ -577,7 +587,7 @@ async function personalOrganizationEvidence(
     .withIndex("by_personal_owner", (index) =>
       index.eq("personalOwnerUserId", userId),
     )
-    .collect();
+    .take(2);
   return await Promise.all(
     institutions.map(async (institution) => {
       const memberships = await ctx.db
@@ -585,7 +595,7 @@ async function personalOrganizationEvidence(
         .withIndex("by_institution_user", (index) =>
           index.eq("institutionId", institution._id).eq("userId", userId),
         )
-        .collect();
+        .take(2);
       return {
         institutionId: institution._id,
         kind: institution.kind,
@@ -610,7 +620,15 @@ async function assignmentEvidenceForSession(
   const assignmentSessions = await ctx.db
     .query("assignmentSessions")
     .withIndex("by_case", (index) => index.eq("caseSessionId", sessionId))
-    .collect();
+    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+  if (assignmentSessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
+    return [
+      {
+        assignmentSessionUserId: "",
+        state: "truncated",
+      },
+    ];
+  }
   const evidence: AssignmentEvidence[] = [];
   for (const assignmentSession of assignmentSessions) {
     const assignment = await ctx.db.get(assignmentSession.assignmentId);
@@ -688,7 +706,7 @@ async function activeMembership(
     .withIndex("by_institution_user", (index) =>
       index.eq("institutionId", institutionId).eq("userId", userId),
     )
-    .collect();
+    .take(2);
   return (
     memberships.length === 1 &&
     isOrganizationMembershipActive(institution, memberships[0] ?? null, now)
@@ -700,11 +718,33 @@ async function classifyScenario(
   scenario: Doc<"scenarios">,
   now: number,
   assignments: Doc<"assignments">[],
+  assignmentScanTruncated: boolean,
 ): Promise<OwnershipClassification> {
+  if (scenario.visibility === "public_template") {
+    return scenario.institutionId === undefined
+      ? { state: "ready", reason: "public_template_remains_catalog" }
+      : {
+          state: "ambiguous",
+          reason: "public_template_has_organization_scope",
+        };
+  }
+  if (scenario.visibility !== "private") {
+    return { state: "ambiguous", reason: "scenario_visibility_unresolved" };
+  }
+  const owner = scenario.ownerUserId
+    ? await ctx.db.get(scenario.ownerUserId)
+    : null;
+  if (!owner) return { state: "ambiguous", reason: "missing_owner" };
+  if (assignmentScanTruncated) {
+    return { state: "ambiguous", reason: "scenario_assignment_scan_truncated" };
+  }
   const sessions = await ctx.db
     .query("caseSessions")
     .withIndex("by_scenario", (index) => index.eq("scenarioId", scenario._id))
-    .collect();
+    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+  if (sessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
+    return { state: "ambiguous", reason: "scenario_session_scan_truncated" };
+  }
   const relatedAssignments = assignments.filter(
     (assignment) => assignment.scenarioId === scenario._id,
   );
@@ -715,6 +755,12 @@ async function classifyScenario(
       ctx,
       session._id,
     );
+    if (assignmentLinks.some((link) => link.state === "truncated")) {
+      return {
+        state: "ambiguous",
+        reason: "scenario_assignment_session_scan_truncated",
+      };
+    }
     const institutionIds = new Set(
       assignmentLinks
         .map((link) => link.institutionId)
@@ -740,9 +786,6 @@ async function classifyScenario(
     }
   }
 
-  const owner = scenario.ownerUserId
-    ? await ctx.db.get(scenario.ownerUserId)
-    : null;
   const personalOrganizations = scenario.ownerUserId
     ? await personalOrganizationEvidence(ctx, scenario.ownerUserId, now)
     : [];
@@ -843,15 +886,20 @@ async function classifySourceCase(
     .withIndex("by_scenario", (index) =>
       index.eq("scenarioId", sourceCase.scenarioId),
     )
-    .collect();
+    .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+  if (sessions.length > MAX_CLASSIFICATION_RELATION_ROWS) {
+    return { state: "ambiguous", reason: "source_case_session_scan_truncated" };
+  }
   const imports: Doc<"trialDocketImports">[] = [];
   for (const session of sessions) {
-    imports.push(
-      ...(await ctx.db
-        .query("trialDocketImports")
-        .withIndex("by_case", (index) => index.eq("caseSessionId", session._id))
-        .collect()),
-    );
+    const sessionImports = await ctx.db
+      .query("trialDocketImports")
+      .withIndex("by_case", (index) => index.eq("caseSessionId", session._id))
+      .take(3);
+    if (sessionImports.length > 2) {
+      return { state: "ambiguous", reason: "source_import_scan_truncated" };
+    }
+    imports.push(...sessionImports);
   }
   for (const trialImport of imports) {
     const session = await ctx.db.get(trialImport.caseSessionId);
@@ -1143,6 +1191,7 @@ async function classifyDescendant(
   row: MigrationRow,
   now: number,
   allAssignments: Doc<"assignments">[],
+  assignmentScanTruncated: boolean,
 ): Promise<RowFinding> {
   if (table === "assignmentSessions") {
     return classifyAssignmentSession(
@@ -1181,7 +1230,7 @@ async function classifyDescendant(
           .withIndex("by_scenario_issue", (index) =>
             index.eq("scenarioId", scenario._id).eq("issueId", issueId),
           )
-          .collect();
+          .take(2);
         if (issues.length === 0) {
           return {
             outcome: "ambiguous",
@@ -1216,6 +1265,7 @@ async function classifyDescendant(
       scenario,
       now,
       allAssignments,
+      assignmentScanTruncated,
     );
     return classification.state === "ready"
       ? {
@@ -1286,9 +1336,19 @@ async function classifyDescendant(
           row.analysisId as string,
         );
         const analysis = analysisId ? await ctx.db.get(analysisId) : null;
-        if (analysis?.documentId && analysis.documentId !== row._id) {
+        if (analysis?.documentId !== row._id) {
           crossParentReason = "document_analysis_reverse_link_conflict";
         }
+      }
+    } else if (table === "documents") {
+      const linkedAnalyses = await ctx.db
+        .query("documentAnalyses")
+        .withIndex("by_document", (index) =>
+          index.eq("documentId", row._id as Id<"documents">),
+        )
+        .take(1);
+      if (linkedAnalyses.length > 0) {
+        crossParentReason = "document_analysis_reverse_link_conflict";
       }
     }
     if (table === "documentAnalyses" && row.documentId) {
@@ -1303,9 +1363,21 @@ async function classifyDescendant(
           row.documentId as string,
         );
         const document = documentId ? await ctx.db.get(documentId) : null;
-        if (document?.analysisId && document.analysisId !== row._id) {
+        if (document?.analysisId !== row._id) {
           crossParentReason = "analysis_document_reverse_link_conflict";
         }
+      }
+    } else if (table === "documentAnalyses") {
+      const caseDocuments = await ctx.db
+        .query("documents")
+        .withIndex("by_case", (index) =>
+          index.eq("caseSessionId", caseSessionId),
+        )
+        .take(CLASSIFICATION_RELATION_PROBE_LIMIT);
+      if (caseDocuments.some((document) => document.analysisId === row._id)) {
+        crossParentReason = "analysis_document_reverse_link_conflict";
+      } else if (caseDocuments.length > MAX_CLASSIFICATION_RELATION_ROWS) {
+        crossParentReason = "analysis_document_reverse_scan_truncated";
       }
     }
     if (table === "actorWorkProducts") {
@@ -1410,6 +1482,7 @@ async function classifyRow(
   row: MigrationRow,
   now: number,
   allAssignments: Doc<"assignments">[],
+  assignmentScanTruncated: boolean,
 ): Promise<RowFinding> {
   if (table === "institutions") {
     const institution = row as Doc<"institutions">;
@@ -1434,6 +1507,7 @@ async function classifyRow(
       row as Doc<"scenarios">,
       now,
       allAssignments,
+      assignmentScanTruncated,
     );
     return { outcome: classification.state, reason: classification.reason };
   }
@@ -1450,7 +1524,14 @@ async function classifyRow(
   if (table === "auditLog") {
     return classifyAuditLog(ctx, row as Doc<"auditLog">, now);
   }
-  return classifyDescendant(ctx, table, row, now, allAssignments);
+  return classifyDescendant(
+    ctx,
+    table,
+    row,
+    now,
+    allAssignments,
+    assignmentScanTruncated,
+  );
 }
 
 function storageReferenceFields(
@@ -1544,9 +1625,14 @@ export const inspectBatch = internalQuery({
       table === "scenarioDocumentAssets" ||
       table === "scenarioIssues" ||
       table === "scenarioRecordExcerpts";
-    const allAssignments = inspectsScenarioOwnership
-      ? await ctx.db.query("assignments").collect()
+    const assignmentProbe = inspectsScenarioOwnership
+      ? await ctx.db
+          .query("assignments")
+          .take(CLASSIFICATION_RELATION_PROBE_LIMIT)
       : [];
+    const assignmentScanTruncated =
+      assignmentProbe.length > MAX_CLASSIFICATION_RELATION_ROWS;
+    const allAssignments = assignmentScanTruncated ? [] : assignmentProbe;
     const now = Date.now();
     const findings: Array<{
       id: string;
@@ -1567,6 +1653,7 @@ export const inspectBatch = internalQuery({
         row,
         now,
         allAssignments,
+        assignmentScanTruncated,
       );
       const base: (typeof findings)[number] = {
         id: reportId(table, recordId, "classification"),
