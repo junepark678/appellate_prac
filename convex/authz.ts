@@ -229,6 +229,26 @@ async function requireScopedMembership(
   return membership
 }
 
+async function requireScopedCohortEnrollment(
+  ctx: ReadCtx,
+  cohortId: Id<'cohorts'>,
+  userId: Id<'users'>,
+) {
+  const enrollments = await ctx.db
+    .query('cohortMemberships')
+    .withIndex('by_cohort_user', (index) =>
+      index.eq('cohortId', cohortId).eq('userId', userId),
+    )
+    .collect()
+  if (enrollments.length > 1) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      'Cohort enrollment is ambiguous',
+    )
+  }
+  if (!enrollments[0]) throw notFound('Cohort')
+}
+
 /**
  * Organization-scoped authorization for the next membership cutover.
  * Legacy helpers above remain available until that cutover updates their
@@ -252,6 +272,9 @@ export async function requireScopedInstitutionRole(
  * Derive the cohort's institution from storage. The returned membership is
  * always the active organization membership; cohort membership is checked
  * only as enrollment for learner-scoped cohort operations.
+ * Callers must pass the exact operation role set: learner-scoped operations
+ * use ['learner']. Including 'instructor' or 'admin' gives eligible staff
+ * teaching access without requiring cohort enrollment.
  */
 export async function requireScopedCohortRole(
   ctx: ReadCtx,
@@ -262,12 +285,33 @@ export async function requireScopedCohortRole(
   const cohort = await ctx.db.get(cohortId)
   if (!cohort) throw notFound('Cohort')
 
-  const institution = await requireScopedInstitution(
-    ctx,
-    cohort.institutionId,
-    user,
-  )
-  const membership = await requireScopedMembership(ctx, institution, user)
+  let institution: Doc<'institutions'>
+  let membership: Doc<'institutionMemberships'>
+  try {
+    institution = await requireScopedInstitution(
+      ctx,
+      cohort.institutionId,
+      user,
+    )
+    membership = await requireScopedMembership(ctx, institution, user)
+  } catch (error) {
+    // A cohort is visible only through an active institution membership. Keep
+    // missing, inactive, and inaccessible cohort lookups indistinguishable.
+    if (
+      error instanceof ConvexError &&
+      error.data.code === AppErrorCode.NOT_FOUND
+    ) {
+      throw notFound('Cohort')
+    }
+    throw error
+  }
+
+  // Learners can see cohort existence only through their enrollment, even if
+  // the requested operation will later fail the institution-role check.
+  if (membership.role === 'learner') {
+    await requireScopedCohortEnrollment(ctx, cohortId, user._id)
+  }
+
   if (!scopedRoleAllowed(membership.role, roles)) {
     throw unauthorizedRole(roles)
   }
@@ -275,20 +319,8 @@ export async function requireScopedCohortRole(
   const mayUseTeachingAccess =
     membership.role !== 'learner' &&
     roles.some((role) => role === 'instructor' || role === 'admin')
-  if (!mayUseTeachingAccess) {
-    const enrollments = await ctx.db
-      .query('cohortMemberships')
-      .withIndex('by_cohort_user', (index) =>
-        index.eq('cohortId', cohortId).eq('userId', user._id),
-      )
-      .collect()
-    if (enrollments.length > 1) {
-      throw new ConvexError(
-        AppErrorCode.CONFLICT,
-        'Cohort enrollment is ambiguous',
-      )
-    }
-    if (!enrollments[0]) throw notFound('Cohort')
+  if (!mayUseTeachingAccess && membership.role !== 'learner') {
+    await requireScopedCohortEnrollment(ctx, cohortId, user._id)
   }
 
   return { user, cohort, institution, membership }
