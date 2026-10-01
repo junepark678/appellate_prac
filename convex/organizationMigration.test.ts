@@ -70,10 +70,13 @@ const inspectRef = makeFunctionReference<
   InspectionResult
 >("organizationMigration:inspectBatch");
 
-async function seedLegacyDocument(t: TestConvex<typeof schema>) {
+async function seedLegacyDocument(
+  t: TestConvex<typeof schema>,
+  authSubject = "test|legacy-owner",
+) {
   return await t.run(async (ctx) => {
     const userId = await ctx.db.insert("users", {
-      authSubject: "test|legacy-owner",
+      authSubject,
       displayName: "Legacy owner",
       role: "admin",
       monthlyAiBudgetCents: 17,
@@ -300,9 +303,26 @@ describe("organization migration inspection contract", () => {
       state: "ready",
       reason: "missing_kind_defaults_shared",
     });
+    expect(classifyInstitutionKind({ kind: "shared" })).toEqual({
+      state: "ready",
+      reason: "organization_kind_recorded",
+    });
     expect(classifyInstitutionKind({ personalOwnerUserId: "user-1" })).toEqual({
       state: "ambiguous",
       reason: "missing_kind_conflicts_with_personal_owner",
+    });
+    expect(classifyInstitutionKind({ kind: "personal" })).toEqual({
+      state: "ambiguous",
+      reason: "personal_organization_owner_missing",
+    });
+    expect(
+      classifyInstitutionKind({
+        kind: "shared",
+        personalOwnerUserId: "user-1",
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "shared_kind_conflicts_with_personal_owner",
     });
     expect(classifyLegacyUser()).toEqual({
       state: "ready",
@@ -672,6 +692,509 @@ describe("organization migration inspection contract", () => {
     }));
     expect(after).toEqual(before);
     expect(after.migrationFindings).toBe(0);
+  });
+
+  it("reports missing, cross-case, and conflicting descendant links", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await seedLegacyDocument(t);
+    const foreignOwner = await seedLegacyDocument(t, "test|foreign-owner");
+    const fixture = await t.run(async (ctx) => {
+      const at = "2026-09-30T00:00:00.000Z";
+      const foreignAnalysisId = await ctx.db.insert("documentAnalyses", {
+        caseSessionId: foreignOwner.caseSessionId,
+        documentId: foreignOwner.documentId,
+        analyzerId: "fixture",
+        fileSizeBytes: 13,
+        mimeType: "application/pdf",
+        searchableText: true,
+        certificateOfServiceDetected: false,
+        certificateOfComplianceDetected: false,
+        sealedOrRedactionWarning: false,
+        warnings: [],
+        createdAt: at,
+      });
+      const foreignFilingId = await ctx.db.insert("filings", {
+        caseSessionId: foreignOwner.caseSessionId,
+        eventId: "foreign-event",
+        participantRole: "appellant",
+        title: "Foreign fixture filing",
+        documentIds: [foreignOwner.documentId],
+        certificateOfService: false,
+        certificateOfCompliance: false,
+        sealed: false,
+        notes: "fixture",
+        filedAt: at,
+        outcome: "accepted",
+        validationIssues: [],
+      });
+
+      const wrongCaseDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "wrong-case-analysis.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      await ctx.db.patch(wrongCaseDocumentId, {
+        analysisId: foreignAnalysisId,
+      });
+      const missingAnalysisDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "missing-analysis.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      const deletedAnalysisId = await ctx.db.insert("documentAnalyses", {
+        caseSessionId: owner.caseSessionId,
+        documentId: missingAnalysisDocumentId,
+        analyzerId: "fixture",
+        fileSizeBytes: 1,
+        mimeType: "application/pdf",
+        searchableText: false,
+        certificateOfServiceDetected: false,
+        certificateOfComplianceDetected: false,
+        sealedOrRedactionWarning: false,
+        warnings: [],
+        createdAt: at,
+      });
+      await ctx.db.delete(deletedAnalysisId);
+      await ctx.db.patch(missingAnalysisDocumentId, {
+        analysisId: deletedAnalysisId,
+      });
+      const reverseConflictDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "reverse-conflict.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      const otherDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "other-document.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      const reverseConflictAnalysisId = await ctx.db.insert(
+        "documentAnalyses",
+        {
+          caseSessionId: owner.caseSessionId,
+          documentId: otherDocumentId,
+          analyzerId: "fixture",
+          fileSizeBytes: 1,
+          mimeType: "application/pdf",
+          searchableText: false,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: at,
+        },
+      );
+      await ctx.db.patch(reverseConflictDocumentId, {
+        analysisId: reverseConflictAnalysisId,
+      });
+
+      const missingDocumentId = await ctx.db.insert("documents", {
+        caseSessionId: owner.caseSessionId,
+        fileName: "deleted-parent.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1,
+        extractedSignals: [],
+      });
+      await ctx.db.delete(missingDocumentId);
+      const missingDocumentAnalysisId = await ctx.db.insert(
+        "documentAnalyses",
+        {
+          caseSessionId: owner.caseSessionId,
+          documentId: missingDocumentId,
+          analyzerId: "fixture",
+          fileSizeBytes: 1,
+          mimeType: "application/pdf",
+          searchableText: false,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: at,
+        },
+      );
+      const crossCaseDocumentAnalysisId = await ctx.db.insert(
+        "documentAnalyses",
+        {
+          caseSessionId: owner.caseSessionId,
+          documentId: foreignOwner.documentId,
+          analyzerId: "fixture",
+          fileSizeBytes: 13,
+          mimeType: "application/pdf",
+          searchableText: true,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: at,
+        },
+      );
+
+      const workProduct = async (
+        sourceDocumentAnalysisIds: string[],
+        sourceFilingIds: string[],
+      ) =>
+        await ctx.db.insert("actorWorkProducts", {
+          caseSessionId: owner.caseSessionId,
+          actorId: "fixture-actor",
+          kind: "counterparty_strategy",
+          status: "proposed",
+          workProductJson: "{}",
+          sourceDocumentAnalysisIds,
+          sourceFilingIds,
+          createdAt: at,
+        });
+      const missingAnalysisWorkProductId = await workProduct(
+        ["missing-analysis-id"],
+        [],
+      );
+      const crossCaseAnalysisWorkProductId = await workProduct(
+        [String(foreignAnalysisId)],
+        [],
+      );
+      const crossCaseFilingWorkProductId = await workProduct(
+        [],
+        [String(foreignFilingId)],
+      );
+      const missingFilingWorkProductId = await workProduct(
+        [],
+        ["missing-filing-id"],
+      );
+      await ctx.db.insert("scenarioIssues", {
+        scenarioId: foreignOwner.scenarioId,
+        issueId: "foreign-issue",
+        label: "Foreign issue fixture",
+        standardOfReview: "de novo",
+        preservationFacts: [],
+        recordSupportFacts: [],
+        likelyArgumentsForAppellant: [],
+        likelyArgumentsForAppellee: [],
+        possibleRelief: [],
+      });
+      const crossScenarioExcerptId = await ctx.db.insert(
+        "scenarioRecordExcerpts",
+        {
+          scenarioId: owner.scenarioId,
+          excerptId: "cross-scenario-excerpt",
+          label: "Cross-scenario citation fixture",
+          source: "synthetic",
+          text: "fixture",
+          citedByIssueIds: ["foreign-issue"],
+        },
+      );
+      const duplicateIssueId = "duplicate-issue";
+      const duplicateIssueFields = {
+        scenarioId: owner.scenarioId,
+        issueId: duplicateIssueId,
+        label: "Duplicate issue fixture",
+        standardOfReview: "de novo",
+        preservationFacts: [],
+        recordSupportFacts: [],
+        likelyArgumentsForAppellant: [],
+        likelyArgumentsForAppellee: [],
+        possibleRelief: [],
+      };
+      await ctx.db.insert("scenarioIssues", duplicateIssueFields);
+      await ctx.db.insert("scenarioIssues", duplicateIssueFields);
+      const duplicateIssueExcerptId = await ctx.db.insert(
+        "scenarioRecordExcerpts",
+        {
+          scenarioId: owner.scenarioId,
+          excerptId: "duplicate-issue-excerpt",
+          label: "Duplicate issue link fixture",
+          source: "synthetic",
+          text: "fixture",
+          citedByIssueIds: [duplicateIssueId],
+        },
+      );
+      const staleActorUserId = await ctx.db.insert("users", {
+        authSubject: "test|deleted-actor",
+        displayName: "Deleted actor fixture",
+        role: "student",
+        monthlyAiBudgetCents: 10,
+      });
+      await ctx.db.delete(staleActorUserId);
+      const danglingEventId = await ctx.db.insert("caseSessionEvents", {
+        caseSessionId: owner.caseSessionId,
+        sequence: 1,
+        eventType: "fixture",
+        payloadJson: "{}",
+        createdAt: at,
+        actorUserId: staleActorUserId,
+      });
+      const danglingAiRunId = await ctx.db.insert("aiRuns", {
+        caseSessionId: owner.caseSessionId,
+        userId: staleActorUserId,
+        actorId: "fixture-actor",
+        model: "fixture-model",
+        provider: "fixture-provider",
+        promptHash: "fixture-hash",
+        toolCallJson: "{}",
+        accepted: false,
+        issues: [],
+        costCents: 0,
+        latencyMs: 0,
+        createdMonth: "2026-09",
+        createdAt: at,
+      });
+      const danglingPolicyId = await ctx.db.insert("simulationPolicies", {
+        scope: "session",
+        scopeId: String(owner.caseSessionId),
+        autonomyMode: "supervised",
+        maxTurnsPerRun: 1,
+        maxCostCentsPerRun: 0,
+        requireHumanApprovalFor: [],
+        stopOnDeficiency: true,
+        createdByUserId: staleActorUserId,
+        createdAt: at,
+        updatedAt: at,
+      });
+
+      const conflictUserId = await ctx.db.insert("users", {
+        authSubject: "test|assignment-owner",
+        displayName: "Assignment owner fixture",
+        role: "student",
+        monthlyAiBudgetCents: 10,
+      });
+      const conflictScenarioId = await ctx.db.insert("scenarios", {
+        scenarioKey: "assignment-owner-conflict",
+        visibility: "private",
+        title: "Assignment owner fixture",
+        source: "synthetic",
+        courtPackId: "ca4",
+        shortCaption: "Owner v. Conflict",
+        lowerTribunal: "district court",
+        natureOfSuit: "civil",
+        proceduralPosture: "appeal",
+        issuesPresented: [],
+        meritsRecord: [],
+        ownerUserId: conflictUserId,
+        published: false,
+      });
+      const conflictSessionId = await ctx.db.insert("caseSessions", {
+        scenarioId: conflictScenarioId,
+        userId: conflictUserId,
+        courtPackId: "ca4",
+        status: "active",
+        simulatedDate: at,
+      });
+      const institutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Fixture organization",
+        slug: "fixture-organization",
+        status: "active",
+        monthlyAiBudgetCents: 100,
+      });
+      const cohortId = await ctx.db.insert("cohorts", {
+        institutionId,
+        title: "Fixture cohort",
+        term: "2026",
+        startsAt: at,
+        endsAt: "2027-01-01T00:00:00.000Z",
+        archived: false,
+      });
+      const assignmentId = await ctx.db.insert("assignments", {
+        cohortId,
+        scenarioId: conflictScenarioId,
+        title: "Fixture assignment",
+        published: true,
+        createdByUserId: conflictUserId,
+        createdAt: at,
+      });
+      const ownerConflictAssignmentSessionId = await ctx.db.insert(
+        "assignmentSessions",
+        {
+          assignmentId,
+          caseSessionId: conflictSessionId,
+          userId: foreignOwner.userId,
+        },
+      );
+      const missingReviewerAssignmentSessionId = await ctx.db.insert(
+        "assignmentSessions",
+        {
+          assignmentId,
+          caseSessionId: conflictSessionId,
+          userId: conflictUserId,
+          reviewerUserId: staleActorUserId,
+        },
+      );
+      const missingReopenerAssignmentSessionId = await ctx.db.insert(
+        "assignmentSessions",
+        {
+          assignmentId,
+          caseSessionId: conflictSessionId,
+          userId: conflictUserId,
+          reopenedAt: at,
+          reopenedByUserId: staleActorUserId,
+        },
+      );
+      return {
+        missingDocumentAnalysisId,
+        crossCaseDocumentAnalysisId,
+        wrongCaseDocumentId,
+        missingAnalysisDocumentId,
+        reverseConflictDocumentId,
+        missingAnalysisWorkProductId,
+        crossCaseAnalysisWorkProductId,
+        crossCaseFilingWorkProductId,
+        missingFilingWorkProductId,
+        crossScenarioExcerptId,
+        duplicateIssueExcerptId,
+        danglingEventId,
+        danglingAiRunId,
+        danglingPolicyId,
+        ownerConflictAssignmentSessionId,
+        missingReviewerAssignmentSessionId,
+        missingReopenerAssignmentSessionId,
+      };
+    });
+
+    const analyses = await t.query(inspectRef, {
+      table: "documentAnalyses",
+      limit: 100,
+    });
+    const documents = await t.query(inspectRef, {
+      table: "documents",
+      limit: 100,
+    });
+    const workProducts = await t.query(inspectRef, {
+      table: "actorWorkProducts",
+      limit: 100,
+    });
+    const excerpts = await t.query(inspectRef, {
+      table: "scenarioRecordExcerpts",
+      limit: 100,
+    });
+    const events = await t.query(inspectRef, {
+      table: "caseSessionEvents",
+      limit: 100,
+    });
+    const aiRuns = await t.query(inspectRef, { table: "aiRuns", limit: 100 });
+    const policies = await t.query(inspectRef, {
+      table: "simulationPolicies",
+      limit: 100,
+    });
+    const assignmentSessions = await t.query(inspectRef, {
+      table: "assignmentSessions",
+      limit: 100,
+    });
+    const findingFor = (result: InspectionResult, id: string) =>
+      result.findings.find((finding) => finding.recordId === id);
+
+    expect(
+      findingFor(analyses, String(fixture.missingDocumentAnalysisId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "analysis_document_parent_missing",
+    });
+    expect(
+      findingFor(analyses, String(fixture.crossCaseDocumentAnalysisId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "analysis_document_cross_parent_conflict",
+    });
+    expect(
+      findingFor(documents, String(fixture.wrongCaseDocumentId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "document_analysis_cross_parent_conflict",
+    });
+    expect(
+      findingFor(documents, String(fixture.missingAnalysisDocumentId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "document_analysis_parent_missing",
+    });
+    expect(
+      findingFor(documents, String(fixture.reverseConflictDocumentId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "document_analysis_reverse_link_conflict",
+    });
+    expect(
+      findingFor(workProducts, String(fixture.missingAnalysisWorkProductId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "work_product_source_analysis_parent_missing",
+    });
+    expect(
+      findingFor(workProducts, String(fixture.crossCaseAnalysisWorkProductId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "work_product_source_analysis_cross_parent_conflict",
+    });
+    expect(
+      findingFor(workProducts, String(fixture.crossCaseFilingWorkProductId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "work_product_source_filing_cross_parent_conflict",
+    });
+    expect(
+      findingFor(workProducts, String(fixture.missingFilingWorkProductId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "work_product_source_filing_parent_missing",
+    });
+    expect(
+      findingFor(excerpts, String(fixture.crossScenarioExcerptId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "scenario_excerpt_issue_missing_or_cross_scenario",
+    });
+    expect(
+      findingFor(excerpts, String(fixture.duplicateIssueExcerptId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "scenario_excerpt_issue_ambiguous",
+    });
+    expect(findingFor(events, String(fixture.danglingEventId))).toMatchObject({
+      outcome: "ambiguous",
+      reason: "case_session_event_actor_missing",
+    });
+    expect(findingFor(aiRuns, String(fixture.danglingAiRunId))).toMatchObject({
+      outcome: "ambiguous",
+      reason: "ai_run_user_missing",
+    });
+    expect(
+      findingFor(policies, String(fixture.danglingPolicyId)),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "simulation_policy_creator_missing",
+    });
+    expect(
+      findingFor(
+        assignmentSessions,
+        String(fixture.ownerConflictAssignmentSessionId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "assignment_session_cross_parent_conflict",
+    });
+    expect(
+      findingFor(
+        assignmentSessions,
+        String(fixture.missingReviewerAssignmentSessionId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "assignment_reviewer_missing",
+    });
+    expect(
+      findingFor(
+        assignmentSessions,
+        String(fixture.missingReopenerAssignmentSessionId),
+      ),
+    ).toMatchObject({
+      outcome: "ambiguous",
+      reason: "assignment_reopener_missing",
+    });
   });
 
   it("enforces limits, table-bound cursors, and the internal inventory boundary", async () => {

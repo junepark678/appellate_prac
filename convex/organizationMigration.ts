@@ -139,6 +139,12 @@ export function classifyInstitutionKind(input: {
       reason: "personal_organization_owner_missing",
     };
   }
+  if (input.kind === "shared" && input.personalOwnerUserId !== undefined) {
+    return {
+      state: "ambiguous",
+      reason: "shared_kind_conflicts_with_personal_owner",
+    };
+  }
   return {
     state: "ready",
     reason:
@@ -972,33 +978,39 @@ const CASE_SESSION_TABLES = new Set([
   "assessments",
 ]);
 
-async function checkSameCaseParent(
+type CaseSessionParentTable =
+  | "filings"
+  | "documentAnalyses"
+  | "documents"
+  | "docketEntries"
+  | "simulationTurns";
+
+type CaseSessionParentLinkState = "missing" | "cross_case" | "same_case";
+
+async function checkCaseSessionParentLink(
   ctx: QueryCtx,
-  table: string,
-  id: string,
+  table: CaseSessionParentTable,
+  id: unknown,
   caseSessionId: Id<"caseSessions">,
-): Promise<boolean> {
-  if (table === "filings") {
-    const parent = await ctx.db.get(id as Id<"filings">);
-    return parent?.caseSessionId === caseSessionId;
-  }
-  if (table === "documentAnalyses") {
-    const parent = await ctx.db.get(id as Id<"documentAnalyses">);
-    return parent?.caseSessionId === caseSessionId;
-  }
-  if (table === "documents") {
-    const parent = await ctx.db.get(id as Id<"documents">);
-    return parent?.caseSessionId === caseSessionId;
-  }
-  if (table === "docketEntries") {
-    const parent = await ctx.db.get(id as Id<"docketEntries">);
-    return parent?.caseSessionId === caseSessionId;
-  }
-  if (table === "simulationTurns") {
-    const parent = await ctx.db.get(id as Id<"simulationTurns">);
-    return parent?.caseSessionId === caseSessionId;
-  }
-  return false;
+): Promise<CaseSessionParentLinkState> {
+  if (typeof id !== "string") return "missing";
+  const normalizedId = ctx.db.normalizeId(table, id);
+  if (!normalizedId) return "missing";
+  const parent = await ctx.db.get(normalizedId);
+  if (!parent) return "missing";
+  return parent.caseSessionId === caseSessionId ? "same_case" : "cross_case";
+}
+
+function parentLinkReason(prefix: string, state: CaseSessionParentLinkState) {
+  return state === "missing"
+    ? `${prefix}_parent_missing`
+    : `${prefix}_cross_parent_conflict`;
+}
+
+async function userReferenceExists(ctx: QueryCtx, value: unknown) {
+  if (typeof value !== "string") return false;
+  const userId = ctx.db.normalizeId("users", value);
+  return userId !== null && (await ctx.db.get(userId)) !== null;
 }
 
 async function classifyAssignmentSession(
@@ -1006,6 +1018,18 @@ async function classifyAssignmentSession(
   row: Doc<"assignmentSessions">,
   now: number,
 ): Promise<RowFinding> {
+  if (
+    row.reviewerUserId &&
+    !(await userReferenceExists(ctx, row.reviewerUserId))
+  ) {
+    return { outcome: "ambiguous", reason: "assignment_reviewer_missing" };
+  }
+  if (
+    row.reopenedByUserId &&
+    !(await userReferenceExists(ctx, row.reopenedByUserId))
+  ) {
+    return { outcome: "ambiguous", reason: "assignment_reopener_missing" };
+  }
   const [assignment, session] = await Promise.all([
     ctx.db.get(row.assignmentId),
     ctx.db.get(row.caseSessionId),
@@ -1042,6 +1066,12 @@ async function classifySimulationPolicy(
   row: Doc<"simulationPolicies">,
   now: number,
 ): Promise<RowFinding> {
+  if (!(await userReferenceExists(ctx, row.createdByUserId))) {
+    return {
+      outcome: "ambiguous",
+      reason: "simulation_policy_creator_missing",
+    };
+  }
   const table =
     row.scope === "session"
       ? "caseSessions"
@@ -1144,6 +1174,30 @@ async function classifyDescendant(
         reportStorage: true,
       };
     }
+    if (table === "scenarioRecordExcerpts") {
+      for (const issueId of (row.citedByIssueIds as string[]) ?? []) {
+        const issues = await ctx.db
+          .query("scenarioIssues")
+          .withIndex("by_scenario_issue", (index) =>
+            index.eq("scenarioId", scenario._id).eq("issueId", issueId),
+          )
+          .collect();
+        if (issues.length === 0) {
+          return {
+            outcome: "ambiguous",
+            reason: "scenario_excerpt_issue_missing_or_cross_scenario",
+            reportStorage: true,
+          };
+        }
+        if (issues.length > 1) {
+          return {
+            outcome: "ambiguous",
+            reason: "scenario_excerpt_issue_ambiguous",
+            reportStorage: true,
+          };
+        }
+      }
+    }
     if (scenario.visibility === "public_template") {
       return scenario.institutionId === undefined
         ? {
@@ -1197,61 +1251,147 @@ async function classifyDescendant(
       return { outcome: unresolved.state, reason: classification.reason };
     }
 
-    const sameCase = async (childTable: string, id: unknown) =>
-      typeof id === "string" &&
-      (await checkSameCaseParent(ctx, childTable, id, caseSessionId));
+    const sameCaseReason = async (
+      childTable: CaseSessionParentTable,
+      id: unknown,
+      reasonPrefix: string,
+    ) => {
+      const state = await checkCaseSessionParentLink(
+        ctx,
+        childTable,
+        id,
+        caseSessionId,
+      );
+      return state === "same_case"
+        ? undefined
+        : parentLinkReason(reasonPrefix, state);
+    };
     let crossParentReason: string | undefined;
-    if (table === "ecfReceipts" && !(await sameCase("filings", row.filingId))) {
-      crossParentReason = "receipt_filing_cross_parent_conflict";
+    if (table === "ecfReceipts") {
+      crossParentReason = await sameCaseReason(
+        "filings",
+        row.filingId,
+        "receipt_filing",
+      );
+    }
+    if (table === "documents" && row.analysisId) {
+      crossParentReason = await sameCaseReason(
+        "documentAnalyses",
+        row.analysisId,
+        "document_analysis",
+      );
+      if (crossParentReason === undefined) {
+        const analysisId = ctx.db.normalizeId(
+          "documentAnalyses",
+          row.analysisId as string,
+        );
+        const analysis = analysisId ? await ctx.db.get(analysisId) : null;
+        if (analysis?.documentId && analysis.documentId !== row._id) {
+          crossParentReason = "document_analysis_reverse_link_conflict";
+        }
+      }
+    }
+    if (table === "documentAnalyses" && row.documentId) {
+      crossParentReason = await sameCaseReason(
+        "documents",
+        row.documentId,
+        "analysis_document",
+      );
+      if (crossParentReason === undefined) {
+        const documentId = ctx.db.normalizeId(
+          "documents",
+          row.documentId as string,
+        );
+        const document = documentId ? await ctx.db.get(documentId) : null;
+        if (document?.analysisId && document.analysisId !== row._id) {
+          crossParentReason = "analysis_document_reverse_link_conflict";
+        }
+      }
+    }
+    if (table === "actorWorkProducts") {
+      for (const id of (row.sourceDocumentAnalysisIds as string[]) ?? []) {
+        crossParentReason = await sameCaseReason(
+          "documentAnalyses",
+          id,
+          "work_product_source_analysis",
+        );
+        if (crossParentReason) break;
+      }
+      if (crossParentReason === undefined) {
+        for (const id of (row.sourceFilingIds as string[]) ?? []) {
+          crossParentReason = await sameCaseReason(
+            "filings",
+            id,
+            "work_product_source_filing",
+          );
+          if (crossParentReason) break;
+        }
+      }
     }
     if (
-      table === "documents" &&
-      row.analysisId &&
-      !(await sameCase("documentAnalyses", row.analysisId))
+      table === "caseSessionEvents" &&
+      row.actorUserId &&
+      !(await userReferenceExists(ctx, row.actorUserId))
     ) {
-      crossParentReason = "document_analysis_cross_parent_conflict";
+      crossParentReason = "case_session_event_actor_missing";
+    }
+    if (table === "aiRuns" && !(await userReferenceExists(ctx, row.userId))) {
+      crossParentReason = "ai_run_user_missing";
     }
     if (table === "filings" && crossParentReason === undefined) {
       const documentIds = (row.documentIds as string[]) ?? [];
       const analysisIds =
         (row.documentAnalysisIds as string[] | undefined) ?? [];
       for (const id of documentIds) {
-        if (!(await sameCase("documents", id))) {
-          crossParentReason = "filing_document_cross_parent_conflict";
-          break;
-        }
+        crossParentReason = await sameCaseReason(
+          "documents",
+          id,
+          "filing_document",
+        );
+        if (crossParentReason) break;
       }
       if (crossParentReason === undefined) {
         for (const id of analysisIds) {
-          if (!(await sameCase("documentAnalyses", id))) {
-            crossParentReason = "filing_analysis_cross_parent_conflict";
-            break;
-          }
+          crossParentReason = await sameCaseReason(
+            "documentAnalyses",
+            id,
+            "filing_analysis",
+          );
+          if (crossParentReason) break;
         }
       }
     }
     if (
       crossParentReason === undefined &&
       table === "docketEntries" &&
-      row.filingId &&
-      !(await sameCase("filings", row.filingId))
+      row.filingId
     ) {
-      crossParentReason = "docket_filing_cross_parent_conflict";
+      crossParentReason = await sameCaseReason(
+        "filings",
+        row.filingId,
+        "docket_filing",
+      );
     }
     if (
       crossParentReason === undefined &&
       table === "deadlines" &&
-      row.sourceEntryId &&
-      !(await sameCase("docketEntries", row.sourceEntryId))
+      row.sourceEntryId
     ) {
-      crossParentReason = "deadline_entry_cross_parent_conflict";
+      crossParentReason = await sameCaseReason(
+        "docketEntries",
+        row.sourceEntryId,
+        "deadline_entry",
+      );
     }
     if (
       crossParentReason === undefined &&
-      (table === "actorPackets" || table === "actorDecisions") &&
-      !(await sameCase("simulationTurns", row.turnId))
+      (table === "actorPackets" || table === "actorDecisions")
     ) {
-      crossParentReason = "turn_cross_parent_conflict";
+      crossParentReason = await sameCaseReason(
+        "simulationTurns",
+        row.turnId,
+        "turn",
+      );
     }
     const final = classifyDescendantParentChain({
       parentExists: true,
