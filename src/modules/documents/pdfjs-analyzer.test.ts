@@ -17,7 +17,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 
 import {
   analyzeExtractedText,
@@ -27,6 +31,8 @@ import {
   detectSections,
   pdfJsAnalyzer,
 } from './pdfjs-analyzer'
+
+const require = createRequire(import.meta.url)
 
 const sampleBriefText = `
 Jurisdictional Statement
@@ -45,7 +51,66 @@ Certificate of Compliance
 This brief contains 7,200 words.
 `
 
+function createTinyPdf(text: string) {
+  const stream = `BT\n/F1 12 Tf\n72 720 Td\n(${text}) Tj\nET\n`
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${new TextEncoder().encode(stream).length} >>\nstream\n${stream}endstream`,
+  ]
+  let pdf = '%PDF-1.7\n'
+  const offsets = [0]
+
+  for (const [index, object] of objects.entries()) {
+    offsets.push(pdf.length)
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
+  }
+
+  const crossReferenceOffset = pdf.length
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  for (const offset of offsets.slice(1)) {
+    pdf += `${offset.toString().padStart(10, '0')} 00000 n \n`
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${crossReferenceOffset}\n%%EOF\n`
+
+  return new TextEncoder().encode(pdf)
+}
+
 describe('pdf.js document analyzer helpers', () => {
+  it('extracts text from a valid PDF through the PDF.js analyzer and matching legacy worker import', async () => {
+    const sourceText = 'PDF.js legacy worker pairing successfully extracts real page text'
+    const bytes = createTinyPdf(sourceText)
+    const bundledWorkerUrl = pdfjsLib.GlobalWorkerOptions.workerSrc
+    const originalWorkerSrc = bundledWorkerUrl
+    pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
+      require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs'),
+    ).href
+
+    let analysis
+    try {
+      analysis = await pdfJsAnalyzer.analyze({
+        fileName: 'one-page-test.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: bytes.byteLength,
+        extractedSignals: [],
+        arrayBuffer: async () => bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ),
+      })
+    } finally {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = originalWorkerSrc
+    }
+
+    expect(bundledWorkerUrl).toContain('/legacy/build/pdf.worker.mjs')
+    expect(analysis.analyzerId).toBe('pdfjs-analyzer')
+    expect(analysis.textExtractionStatus).toBe('extracted')
+    expect(analysis.pageCount).toBe(1)
+    expect(analysis.extractedPageText?.[0]?.text).toContain(sourceText)
+  })
+
   it('falls back to filename and signal analysis when bytes are unavailable', async () => {
     const analysis = await pdfJsAnalyzer.analyze({
       fileName: 'opening-brief-service.pdf',

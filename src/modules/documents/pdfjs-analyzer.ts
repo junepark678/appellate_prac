@@ -18,7 +18,7 @@
  */
 
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url'
 
 import { pdfSignalAnalyzer } from './pdf-signal-analyzer'
 import type { DocumentAnalysis, DocumentAnalyzer, DocumentSection, UploadedFile } from '../types'
