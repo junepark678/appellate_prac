@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { ConvexError as ConvexValuesError, type Value } from 'convex/values'
+
 export enum AppErrorCode {
   AUTH_REQUIRED = 'AUTH_REQUIRED',
   AUTH_USER_NOT_INITIALIZED = 'AUTH_USER_NOT_INITIALIZED',
@@ -34,13 +36,32 @@ export enum AppErrorCode {
   PROVIDER_TIMEOUT = 'PROVIDER_TIMEOUT',
 }
 
-export class ConvexError extends Error {
-  code: AppErrorCode
-  metadata?: Record<string, unknown>
+export type AppErrorMetadata = Record<string, Value>
 
-  constructor(code: AppErrorCode, message: string, metadata?: Record<string, unknown>) {
-    super(message)
-    this.name = 'ConvexError'
+export type AppErrorData = {
+  code: AppErrorCode
+  message: string
+  metadata?: AppErrorMetadata
+}
+
+/**
+ * Convex's transport only preserves structured errors that extend its native
+ * ConvexError. Keep the legacy code/metadata properties while placing the
+ * complete, stable error contract in `.data` for clients and wire responses.
+ */
+export class ConvexError extends ConvexValuesError<AppErrorData> {
+  readonly code: AppErrorCode
+  readonly metadata?: AppErrorMetadata
+
+  constructor(code: AppErrorCode, message: string, metadata?: AppErrorMetadata) {
+    const data: AppErrorData = {
+      code,
+      message,
+      ...(metadata ? { metadata } : {}),
+    }
+    super(data)
+    // Preserve the pre-envelope message property for existing local callers.
+    this.message = message
     this.code = code
     if (metadata) this.metadata = metadata
   }
@@ -62,8 +83,9 @@ export function userNotInitialized() {
   return new ConvexError(AppErrorCode.AUTH_USER_NOT_INITIALIZED, 'User profile is not initialized')
 }
 
-export function notFound(entity: string, id?: string) {
-  return new ConvexError(AppErrorCode.NOT_FOUND, `${entity} not found`, { entity, ...(id ? { id } : {}) })
+export function notFound(entity: string, _id?: string) {
+  // Do not return caller-supplied identifiers or details for foreign records.
+  return new ConvexError(AppErrorCode.NOT_FOUND, `${entity} not found`)
 }
 
 export function sessionLocked() {
