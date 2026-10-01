@@ -17,52 +17,56 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { createFileRoute, Link } from '@tanstack/react-router'
-import { useMutation, useQuery } from 'convex/react'
-import { Plus, UserPlus, Users } from 'lucide-react'
-import { useState } from 'react'
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery } from "convex/react";
+import { Plus, UserPlus, Users } from "lucide-react";
+import { useState } from "react";
 
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
-import { AppFrame, EmptyState } from '../components/AppFrame'
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { AppFrame, EmptyState } from "../components/AppFrame";
 
-export const Route = createFileRoute('/instructor/cohorts/$cohortId')({
+export const Route = createFileRoute("/instructor/cohorts/$cohortId")({
   component: CohortDetail,
-})
+});
 
-type AssignmentAutonomyMode = 'paused' | 'supervised' | 'autonomous'
-type InviteRole = 'learner' | 'instructor'
+type AssignmentAutonomyMode = "paused" | "supervised" | "autonomous";
+type InviteRole = "learner" | "instructor";
 
 function CohortDetail() {
-  const { cohortId } = Route.useParams()
+  const { cohortId } = Route.useParams();
   const assignments = useQuery(api.assignments.listForCohort, {
-    cohortId: cohortId as Id<'cohorts'>,
-  })
+    cohortId: cohortId as Id<"cohorts">,
+  });
   const roster = useQuery(api.cohorts.listRoster, {
-    cohortId: cohortId as Id<'cohorts'>,
-  })
-  const scenarios = useQuery(api.scenarios.listPublishedRecords, {})
-  const createAssignment = useMutation(api.assignments.create)
-  const inviteMembers = useMutation(api.cohorts.inviteMembers)
-  const cohorts = useQuery(api.cohorts.listMine, {})
-  const cohort = cohorts?.find((candidate) => candidate.id === cohortId)
-  const activeAssignments = assignments?.filter((assignment) => !assignment.archivedAt)
-  const [title, setTitle] = useState('')
-  const [scenarioKey, setScenarioKey] = useState('')
-  const [dueAt, setDueAt] = useState('')
-  const [rubricId, setRubricId] = useState('fourth-circuit-civil-appeal')
-  const [autonomyMode, setAutonomyMode] = useState<AssignmentAutonomyMode>('paused')
-  const [budgetCapDollars, setBudgetCapDollars] = useState('')
-  const [hideAiReasoning, setHideAiReasoning] = useState(true)
-  const [publishImmediately, setPublishImmediately] = useState(false)
-  const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteRole, setInviteRole] = useState<InviteRole>('learner')
-  const [inviteToken, setInviteToken] = useState('')
+    cohortId: cohortId as Id<"cohorts">,
+  });
+  const scenarios = useQuery(api.scenarios.listPublishedRecords, {});
+  const createAssignment = useMutation(api.assignments.create);
+  const inviteMembers = useMutation(api.cohorts.inviteMembers);
+  const cohorts = useQuery(api.cohorts.listMine, {});
+  const cohort = cohorts?.find((candidate) => candidate.id === cohortId);
+  const activeAssignments = assignments?.filter(
+    (assignment) => !assignment.archivedAt,
+  );
+  const [title, setTitle] = useState("");
+  const [scenarioKey, setScenarioKey] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [rubricId, setRubricId] = useState("fourth-circuit-civil-appeal");
+  const [autonomyMode, setAutonomyMode] =
+    useState<AssignmentAutonomyMode>("paused");
+  const [budgetCapDollars, setBudgetCapDollars] = useState("");
+  const [hideAiReasoning, setHideAiReasoning] = useState(true);
+  const [publishImmediately, setPublishImmediately] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<InviteRole>("learner");
+  const [inviteToken, setInviteToken] = useState("");
 
-  const createDisabled = !title || !scenarioKey || Number(budgetCapDollars || 0) < 0
+  const createDisabled =
+    !title || !scenarioKey || Number(budgetCapDollars || 0) < 0;
 
   return (
-    <AppFrame title={cohort?.title ?? 'Cohort'}>
+    <AppFrame title={cohort?.title ?? "Cohort"}>
       <section className="mb-5 grid gap-4 lg:grid-cols-2">
         <div className="rounded border border-slate-200 bg-white p-4">
           <h2 className="font-semibold">Create assignment</h2>
@@ -113,7 +117,9 @@ function CohortDetail() {
                   className="rounded border border-slate-300 px-3 py-2"
                   value={autonomyMode}
                   onChange={(event) =>
-                    setAutonomyMode(event.target.value as AssignmentAutonomyMode)
+                    setAutonomyMode(
+                      event.target.value as AssignmentAutonomyMode,
+                    )
                   }
                 >
                   <option value="paused">Paused</option>
@@ -146,7 +152,9 @@ function CohortDetail() {
               <input
                 type="checkbox"
                 checked={publishImmediately}
-                onChange={(event) => setPublishImmediately(event.target.checked)}
+                onChange={(event) =>
+                  setPublishImmediately(event.target.checked)
+                }
               />
               Publish immediately
             </label>
@@ -155,7 +163,7 @@ function CohortDetail() {
               disabled={createDisabled}
               onClick={() =>
                 void createAssignment({
-                  cohortId: cohortId as Id<'cohorts'>,
+                  cohortId: cohortId as Id<"cohorts">,
                   scenarioKey,
                   title,
                   published: publishImmediately,
@@ -163,19 +171,23 @@ function CohortDetail() {
                   ...(dueAt ? { dueAt: new Date(dueAt).toISOString() } : {}),
                   ...(rubricId ? { rubricId } : {}),
                   ...(budgetCapDollars
-                    ? { budgetCapCents: Math.round(Number(budgetCapDollars) * 100) }
+                    ? {
+                        budgetCapCents: Math.round(
+                          Number(budgetCapDollars) * 100,
+                        ),
+                      }
                     : {}),
                   hideAiReasoning,
                 }).then(() => {
-                  setTitle('')
-                  setDueAt('')
-                  setScenarioKey('')
-                  setPublishImmediately(false)
+                  setTitle("");
+                  setDueAt("");
+                  setScenarioKey("");
+                  setPublishImmediately(false);
                 })
               }
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
-              {publishImmediately ? 'Create and publish' : 'Create draft'}
+              {publishImmediately ? "Create and publish" : "Create draft"}
             </button>
           </div>
         </div>
@@ -191,7 +203,9 @@ function CohortDetail() {
             <select
               className="rounded border border-slate-300 px-3 py-2"
               value={inviteRole}
-              onChange={(event) => setInviteRole(event.target.value as InviteRole)}
+              onChange={(event) =>
+                setInviteRole(event.target.value as InviteRole)
+              }
               aria-label="Invite role"
             >
               <option value="learner">Learner</option>
@@ -204,11 +218,11 @@ function CohortDetail() {
                 cohort
                   ? void inviteMembers({
                       institutionId: cohort.institutionId,
-                      cohortId: cohortId as Id<'cohorts'>,
+                      cohortId: cohortId as Id<"cohorts">,
                       invites: [{ email: inviteEmail, role: inviteRole }],
                     }).then((result) => {
-                      setInviteToken(result[0]?.token ?? '')
-                      setInviteEmail('')
+                      setInviteToken(result[0]?.token ?? "");
+                      setInviteEmail("");
                     })
                   : undefined
               }
@@ -217,7 +231,9 @@ function CohortDetail() {
               Create invite
             </button>
             {inviteToken ? (
-              <p className="break-all rounded bg-slate-100 p-2 text-xs">{inviteToken}</p>
+              <p className="break-all rounded bg-slate-100 p-2 text-xs">
+                {inviteToken}
+              </p>
             ) : null}
           </div>
         </div>
@@ -232,17 +248,18 @@ function CohortDetail() {
           {roster?.map((member) => (
             <div
               key={member.userId}
-              className="grid gap-2 p-4 text-sm md:grid-cols-[1fr_160px_160px]"
+              className="grid gap-2 p-4 text-sm md:grid-cols-[1fr_160px]"
             >
               <p className="font-medium">{member.displayName}</p>
-              <p className="text-slate-600">{member.cohortRole}</p>
-              <p className="text-slate-600">{member.accountRole}</p>
+              <p className="text-slate-600">{member.organizationRole}</p>
             </div>
           ))}
         </div>
       </section>
       <div className="grid gap-3">
-        {activeAssignments?.length === 0 ? <EmptyState>No assignments yet.</EmptyState> : null}
+        {activeAssignments?.length === 0 ? (
+          <EmptyState>No assignments yet.</EmptyState>
+        ) : null}
         {activeAssignments?.map((assignment) => (
           <Link
             key={assignment.id}
@@ -252,12 +269,15 @@ function CohortDetail() {
           >
             <h2 className="font-semibold">{assignment.title}</h2>
             <p className="text-sm text-slate-600">
-              {assignment.published ? 'Published' : 'Draft'} / {assignment.autonomyMode ?? 'paused'}
+              {assignment.published ? "Published" : "Draft"} /{" "}
+              {assignment.autonomyMode ?? "paused"}
             </p>
-            <p className="text-sm text-slate-600">{assignment.dueAt ?? 'No due date'}</p>
+            <p className="text-sm text-slate-600">
+              {assignment.dueAt ?? "No due date"}
+            </p>
           </Link>
         ))}
       </div>
     </AppFrame>
-  )
+  );
 }

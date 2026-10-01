@@ -18,12 +18,11 @@
  */
 
 // TODO: Import from './errors' once error module is integrated
-import { v } from 'convex/values'
+import { v } from "convex/values";
 
-import { mutation, query } from './_generated/server'
-import type { Doc } from './_generated/dataModel'
-import type { MutationCtx } from './_generated/server'
-import { requireIdentity } from './authHelpers'
+import { internalMutation, query } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import {
   courtPacks,
   moduleManifests,
@@ -31,43 +30,36 @@ import {
   ruleModules,
   rulePacks,
   scenarios,
-} from '../src/modules/registry'
-import type { CourtPack, RuleItem, RulePack, Scenario } from '../src/domain/types'
+} from "../src/modules/registry";
+import type {
+  CourtPack,
+  RuleItem,
+  RulePack,
+  Scenario,
+} from "../src/domain/types";
 
 type SeedCounts = {
-  inserted: number
-  updated: number
-  deleted: number
-}
+  inserted: number;
+  updated: number;
+  deleted: number;
+};
 
 const countValidator = v.object({
   inserted: v.number(),
   updated: v.number(),
   deleted: v.number(),
-})
+});
 
-const publishedCourtPackIds = new Set(['us-federal-ca4-civil-appeal'])
-const convexCliSeedTokenIdentifier = 'seed:convex-cli'
-
-async function requireSeedPermission(ctx: MutationCtx) {
-  const identity = await requireIdentity(ctx)
-  const user = await ctx.db
-    .query('users')
-    .withIndex('by_auth_subject', (query) =>
-      query.eq('authSubject', identity.tokenIdentifier),
-    )
-    .unique()
-  if (user?.role === 'admin') return
-  if (identity.tokenIdentifier === convexCliSeedTokenIdentifier) return
-  throw new Error('Admin role required')
-}
-
+const publishedCourtPackIds = new Set(["us-federal-ca4-civil-appeal"]);
 function emptyCounts(): SeedCounts {
-  return { inserted: 0, updated: 0, deleted: 0 }
+  return { inserted: 0, updated: 0, deleted: 0 };
 }
 
-function sameRecord(left: Record<string, unknown>, right: Record<string, unknown>) {
-  return JSON.stringify(left) === JSON.stringify(right)
+function sameRecord(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function rulePackDoc(pack: RulePack) {
@@ -82,10 +74,10 @@ function rulePackDoc(pack: RulePack) {
     sourceUrl: pack.sourceUrl,
     sourceVersionIds: pack.sourceVersionIds ?? [],
     published: true,
-  }
+  };
 }
 
-function rulePackCurrent(doc: Doc<'rulePacks'>) {
+function rulePackCurrent(doc: Doc<"rulePacks">) {
   return {
     packId: doc.packId,
     ...(doc.moduleId ? { moduleId: doc.moduleId } : {}),
@@ -97,7 +89,7 @@ function rulePackCurrent(doc: Doc<'rulePacks'>) {
     sourceUrl: doc.sourceUrl,
     sourceVersionIds: doc.sourceVersionIds ?? [],
     published: doc.published,
-  }
+  };
 }
 
 function ruleItemDoc(packId: string, item: RuleItem) {
@@ -113,10 +105,10 @@ function ruleItemDoc(packId: string, item: RuleItem) {
     plainText: item.plainText,
     simulatorNotes: item.simulatorNotes,
     constraintsJson: JSON.stringify(item.structuredConstraints),
-  }
+  };
 }
 
-function ruleItemCurrent(doc: Doc<'ruleItems'>) {
+function ruleItemCurrent(doc: Doc<"ruleItems">) {
   return {
     packId: doc.packId,
     ...(doc.jurisdiction ? { jurisdiction: doc.jurisdiction } : {}),
@@ -129,7 +121,7 @@ function ruleItemCurrent(doc: Doc<'ruleItems'>) {
     plainText: doc.plainText,
     simulatorNotes: doc.simulatorNotes,
     constraintsJson: doc.constraintsJson,
-  }
+  };
 }
 
 function courtPackDoc(pack: CourtPack) {
@@ -149,15 +141,17 @@ function courtPackDoc(pack: CourtPack) {
     aiActorsJson: JSON.stringify(pack.aiActors),
     docketNumberFormat: pack.docketNumberFormat,
     ...(pack.releaseStatus ? { releaseStatus: pack.releaseStatus } : {}),
-    ...(pack.sourceVersionIds ? { sourceVersionIds: pack.sourceVersionIds } : {}),
+    ...(pack.sourceVersionIds
+      ? { sourceVersionIds: pack.sourceVersionIds }
+      : {}),
     ...(pack.evalThresholds
       ? { evalThresholdsJson: JSON.stringify(pack.evalThresholds) }
       : {}),
     published: publishedCourtPackIds.has(pack.id),
-  }
+  };
 }
 
-function courtPackCurrent(doc: Doc<'courtPacks'>) {
+function courtPackCurrent(doc: Doc<"courtPacks">) {
   return {
     packId: doc.packId,
     ...(doc.moduleId ? { moduleId: doc.moduleId } : {}),
@@ -175,18 +169,20 @@ function courtPackCurrent(doc: Doc<'courtPacks'>) {
     docketNumberFormat: doc.docketNumberFormat,
     ...(doc.releaseStatus ? { releaseStatus: doc.releaseStatus } : {}),
     ...(doc.sourceVersionIds ? { sourceVersionIds: doc.sourceVersionIds } : {}),
-    ...(doc.evalThresholdsJson ? { evalThresholdsJson: doc.evalThresholdsJson } : {}),
+    ...(doc.evalThresholdsJson
+      ? { evalThresholdsJson: doc.evalThresholdsJson }
+      : {}),
     published: doc.published,
-  }
+  };
 }
 
 function scenarioDoc(scenario: Scenario) {
   return {
     scenarioKey: scenario.id,
-    visibility: 'public_template' as const,
+    visibility: "public_template" as const,
     scenarioFamilyKey: scenario.id,
     revision: 1,
-    revisionStatus: 'published' as const,
+    revisionStatus: "published" as const,
     title: scenario.title,
     source: scenario.source,
     courtPackId: scenario.courtPackId,
@@ -196,20 +192,30 @@ function scenarioDoc(scenario: Scenario) {
     proceduralPosture: scenario.proceduralPosture,
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
-    ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
-    ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
-    ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
+    ...(scenario.training
+      ? { trainingJson: JSON.stringify(scenario.training) }
+      : {}),
+    ...(scenario.trialDocket
+      ? { trialDocketJson: JSON.stringify(scenario.trialDocket) }
+      : {}),
+    ...(scenario.sourceCaseUrl
+      ? { sourceCaseUrl: scenario.sourceCaseUrl }
+      : {}),
     published: true,
-  }
+  };
 }
 
-function scenarioCurrent(doc: Doc<'scenarios'>) {
+function scenarioCurrent(doc: Doc<"scenarios">) {
   return {
     scenarioKey: doc.scenarioKey,
-    visibility: doc.visibility ?? (doc.ownerUserId ? 'private' as const : 'public_template' as const),
+    visibility:
+      doc.visibility ??
+      (doc.ownerUserId ? ("private" as const) : ("public_template" as const)),
     scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
     revision: doc.revision ?? 1,
-    revisionStatus: doc.revisionStatus ?? (doc.published ? 'published' as const : 'draft' as const),
+    revisionStatus:
+      doc.revisionStatus ??
+      (doc.published ? ("published" as const) : ("draft" as const)),
     title: doc.title,
     source: doc.source,
     courtPackId: doc.courtPackId,
@@ -223,117 +229,117 @@ function scenarioCurrent(doc: Doc<'scenarios'>) {
     ...(doc.trialDocketJson ? { trialDocketJson: doc.trialDocketJson } : {}),
     ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
     published: doc.published,
-  }
+  };
 }
 
 async function upsertRulePacks(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const pack of rulePacks) {
-    const doc = rulePackDoc(pack)
+    const doc = rulePackDoc(pack);
     const matches = await ctx.db
-      .query('rulePacks')
-      .withIndex('by_pack_version', (index) =>
-        index.eq('packId', pack.id).eq('version', pack.version),
+      .query("rulePacks")
+      .withIndex("by_pack_version", (index) =>
+        index.eq("packId", pack.id).eq("version", pack.version),
       )
-      .collect()
-    const existing = matches[0]
+      .collect();
+    const existing = matches[0];
 
     for (const duplicate of matches.slice(1)) {
-      await ctx.db.delete(duplicate._id)
-      counts.deleted += 1
+      await ctx.db.delete(duplicate._id);
+      counts.deleted += 1;
     }
 
     if (!existing) {
-      await ctx.db.insert('rulePacks', doc)
-      counts.inserted += 1
+      await ctx.db.insert("rulePacks", doc);
+      counts.inserted += 1;
     } else if (!sameRecord(rulePackCurrent(existing), doc)) {
-      await ctx.db.patch(existing._id, doc)
-      counts.updated += 1
+      await ctx.db.patch(existing._id, doc);
+      counts.updated += 1;
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertRuleItems(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const pack of rulePacks) {
     const existingItems = await ctx.db
-      .query('ruleItems')
-      .withIndex('by_pack', (index) => index.eq('packId', pack.id))
-      .collect()
-    const existingByRuleId = new Map<string, Array<Doc<'ruleItems'>>>()
+      .query("ruleItems")
+      .withIndex("by_pack", (index) => index.eq("packId", pack.id))
+      .collect();
+    const existingByRuleId = new Map<string, Array<Doc<"ruleItems">>>();
 
     for (const item of existingItems) {
-      const group = existingByRuleId.get(item.ruleId) ?? []
-      group.push(item)
-      existingByRuleId.set(item.ruleId, group)
+      const group = existingByRuleId.get(item.ruleId) ?? [];
+      group.push(item);
+      existingByRuleId.set(item.ruleId, group);
     }
 
-    const seededRuleIds = new Set(pack.items.map((item) => item.ruleId))
+    const seededRuleIds = new Set(pack.items.map((item) => item.ruleId));
 
     for (const item of pack.items) {
-      const doc = ruleItemDoc(pack.id, item)
-      const matches = existingByRuleId.get(item.ruleId) ?? []
-      const existing = matches[0]
+      const doc = ruleItemDoc(pack.id, item);
+      const matches = existingByRuleId.get(item.ruleId) ?? [];
+      const existing = matches[0];
 
       for (const duplicate of matches.slice(1)) {
-        await ctx.db.delete(duplicate._id)
-        counts.deleted += 1
+        await ctx.db.delete(duplicate._id);
+        counts.deleted += 1;
       }
 
       if (!existing) {
-        await ctx.db.insert('ruleItems', doc)
-        counts.inserted += 1
+        await ctx.db.insert("ruleItems", doc);
+        counts.inserted += 1;
       } else if (!sameRecord(ruleItemCurrent(existing), doc)) {
-        await ctx.db.patch(existing._id, doc)
-        counts.updated += 1
+        await ctx.db.patch(existing._id, doc);
+        counts.updated += 1;
       }
     }
 
     for (const existing of existingItems) {
       if (!seededRuleIds.has(existing.ruleId)) {
-        await ctx.db.delete(existing._id)
-        counts.deleted += 1
+        await ctx.db.delete(existing._id);
+        counts.deleted += 1;
       }
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertCourtPacks(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const pack of courtPacks) {
-    const doc = courtPackDoc(pack)
+    const doc = courtPackDoc(pack);
     const matches = await ctx.db
-      .query('courtPacks')
-      .withIndex('by_pack_id', (index) => index.eq('packId', pack.id))
-      .collect()
-    const existing = matches[0]
+      .query("courtPacks")
+      .withIndex("by_pack_id", (index) => index.eq("packId", pack.id))
+      .collect();
+    const existing = matches[0];
 
     for (const duplicate of matches.slice(1)) {
-      await ctx.db.delete(duplicate._id)
-      counts.deleted += 1
+      await ctx.db.delete(duplicate._id);
+      counts.deleted += 1;
     }
 
     if (!existing) {
-      await ctx.db.insert('courtPacks', doc)
-      counts.inserted += 1
+      await ctx.db.insert("courtPacks", doc);
+      counts.inserted += 1;
     } else if (!sameRecord(courtPackCurrent(existing), doc)) {
-      await ctx.db.patch(existing._id, doc)
-      counts.updated += 1
+      await ctx.db.patch(existing._id, doc);
+      counts.updated += 1;
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertModuleManifests(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const manifest of moduleManifests) {
     const doc = {
@@ -343,21 +349,23 @@ async function upsertModuleManifests(ctx: MutationCtx) {
       version: manifest.version,
       enabled: true,
       published: true,
-    }
+    };
     const matches = await ctx.db
-      .query('moduleManifests')
-      .withIndex('by_module_id', (index) => index.eq('moduleId', manifest.moduleId))
-      .collect()
-    const existing = matches[0]
+      .query("moduleManifests")
+      .withIndex("by_module_id", (index) =>
+        index.eq("moduleId", manifest.moduleId),
+      )
+      .collect();
+    const existing = matches[0];
 
     for (const duplicate of matches.slice(1)) {
-      await ctx.db.delete(duplicate._id)
-      counts.deleted += 1
+      await ctx.db.delete(duplicate._id);
+      counts.deleted += 1;
     }
 
     if (!existing) {
-      await ctx.db.insert('moduleManifests', doc)
-      counts.inserted += 1
+      await ctx.db.insert("moduleManifests", doc);
+      counts.inserted += 1;
     } else if (
       !sameRecord(
         {
@@ -371,16 +379,16 @@ async function upsertModuleManifests(ctx: MutationCtx) {
         doc,
       )
     ) {
-      await ctx.db.patch(existing._id, doc)
-      counts.updated += 1
+      await ctx.db.patch(existing._id, doc);
+      counts.updated += 1;
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertLegalSourceVersions(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const module of ruleModules) {
     for (const source of module.sources) {
@@ -395,23 +403,23 @@ async function upsertLegalSourceVersions(ctx: MutationCtx) {
         sourceUrl: source.sourceUrl,
         sourceSystem: source.sourceSystem,
         reviewed: source.reviewed,
-      }
+      };
       const matches = await ctx.db
-        .query('legalSourceVersions')
-        .withIndex('by_source_version', (index) =>
-          index.eq('sourceVersionId', source.id),
+        .query("legalSourceVersions")
+        .withIndex("by_source_version", (index) =>
+          index.eq("sourceVersionId", source.id),
         )
-        .collect()
-      const existing = matches[0]
+        .collect();
+      const existing = matches[0];
 
       for (const duplicate of matches.slice(1)) {
-        await ctx.db.delete(duplicate._id)
-        counts.deleted += 1
+        await ctx.db.delete(duplicate._id);
+        counts.deleted += 1;
       }
 
       if (!existing) {
-        await ctx.db.insert('legalSourceVersions', doc)
-        counts.inserted += 1
+        await ctx.db.insert("legalSourceVersions", doc);
+        counts.inserted += 1;
       } else if (
         !sameRecord(
           {
@@ -421,7 +429,9 @@ async function upsertLegalSourceVersions(ctx: MutationCtx) {
             jurisdiction: existing.jurisdiction,
             version: existing.version,
             effectiveFrom: existing.effectiveFrom,
-            ...(existing.effectiveTo ? { effectiveTo: existing.effectiveTo } : {}),
+            ...(existing.effectiveTo
+              ? { effectiveTo: existing.effectiveTo }
+              : {}),
             sourceUrl: existing.sourceUrl,
             sourceSystem: existing.sourceSystem,
             reviewed: existing.reviewed,
@@ -429,17 +439,17 @@ async function upsertLegalSourceVersions(ctx: MutationCtx) {
           doc,
         )
       ) {
-        await ctx.db.patch(existing._id, doc)
-        counts.updated += 1
+        await ctx.db.patch(existing._id, doc);
+        counts.updated += 1;
       }
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertRuleConstraints(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const module of ruleModules) {
     for (const constraint of module.constraints) {
@@ -452,23 +462,23 @@ async function upsertRuleConstraints(ctx: MutationCtx) {
         kind: constraint.kind,
         value: constraint.value,
         ruleRefs: constraint.ruleRefs,
-      }
+      };
       const matches = await ctx.db
-        .query('ruleConstraints')
-        .withIndex('by_constraint', (index) =>
-          index.eq('constraintId', constraint.id),
+        .query("ruleConstraints")
+        .withIndex("by_constraint", (index) =>
+          index.eq("constraintId", constraint.id),
         )
-        .collect()
-      const existing = matches[0]
+        .collect();
+      const existing = matches[0];
 
       for (const duplicate of matches.slice(1)) {
-        await ctx.db.delete(duplicate._id)
-        counts.deleted += 1
+        await ctx.db.delete(duplicate._id);
+        counts.deleted += 1;
       }
 
       if (!existing) {
-        await ctx.db.insert('ruleConstraints', doc)
-        counts.inserted += 1
+        await ctx.db.insert("ruleConstraints", doc);
+        counts.inserted += 1;
       } else if (
         !sameRecord(
           {
@@ -484,17 +494,17 @@ async function upsertRuleConstraints(ctx: MutationCtx) {
           doc,
         )
       ) {
-        await ctx.db.patch(existing._id, doc)
-        counts.updated += 1
+        await ctx.db.patch(existing._id, doc);
+        counts.updated += 1;
       }
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertProcedureTransitions(ctx: MutationCtx) {
-  const counts = emptyCounts()
+  const counts = emptyCounts();
 
   for (const module of procedureModules) {
     for (const transition of module.transitions) {
@@ -503,28 +513,32 @@ async function upsertProcedureTransitions(ctx: MutationCtx) {
         procedureModuleId: module.id,
         fromState: transition.fromState,
         toState: transition.toState,
-        ...(transition.filingEventId ? { filingEventId: transition.filingEventId } : {}),
-        ...(transition.actorToolName ? { actorToolName: transition.actorToolName } : {}),
+        ...(transition.filingEventId
+          ? { filingEventId: transition.filingEventId }
+          : {}),
+        ...(transition.actorToolName
+          ? { actorToolName: transition.actorToolName }
+          : {}),
         guard: transition.guard,
         effect: transition.effect,
         ruleRefs: transition.ruleRefs,
-      }
+      };
       const matches = await ctx.db
-        .query('procedureTransitions')
-        .withIndex('by_transition', (index) =>
-          index.eq('transitionId', transition.id),
+        .query("procedureTransitions")
+        .withIndex("by_transition", (index) =>
+          index.eq("transitionId", transition.id),
         )
-        .collect()
-      const existing = matches[0]
+        .collect();
+      const existing = matches[0];
 
       for (const duplicate of matches.slice(1)) {
-        await ctx.db.delete(duplicate._id)
-        counts.deleted += 1
+        await ctx.db.delete(duplicate._id);
+        counts.deleted += 1;
       }
 
       if (!existing) {
-        await ctx.db.insert('procedureTransitions', doc)
-        counts.inserted += 1
+        await ctx.db.insert("procedureTransitions", doc);
+        counts.inserted += 1;
       } else if (
         !sameRecord(
           {
@@ -532,8 +546,12 @@ async function upsertProcedureTransitions(ctx: MutationCtx) {
             procedureModuleId: existing.procedureModuleId,
             fromState: existing.fromState,
             toState: existing.toState,
-            ...(existing.filingEventId ? { filingEventId: existing.filingEventId } : {}),
-            ...(existing.actorToolName ? { actorToolName: existing.actorToolName } : {}),
+            ...(existing.filingEventId
+              ? { filingEventId: existing.filingEventId }
+              : {}),
+            ...(existing.actorToolName
+              ? { actorToolName: existing.actorToolName }
+              : {}),
             guard: existing.guard,
             effect: existing.effect,
             ruleRefs: existing.ruleRefs,
@@ -541,60 +559,65 @@ async function upsertProcedureTransitions(ctx: MutationCtx) {
           doc,
         )
       ) {
-        await ctx.db.patch(existing._id, doc)
-        counts.updated += 1
+        await ctx.db.patch(existing._id, doc);
+        counts.updated += 1;
       }
     }
   }
 
-  return counts
+  return counts;
 }
 
 async function upsertScenarios(ctx: MutationCtx) {
-  const counts = emptyCounts()
-  const seededScenarioKeys = new Set(scenarios.map((scenario) => scenario.id))
+  const counts = emptyCounts();
+  const seededScenarioKeys = new Set(scenarios.map((scenario) => scenario.id));
 
   for (const scenario of scenarios) {
-    const doc = scenarioDoc(scenario)
+    const doc = scenarioDoc(scenario);
     const matches = await ctx.db
-      .query('scenarios')
-      .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenario.id))
-      .collect()
-    const existing = matches[0]
+      .query("scenarios")
+      .withIndex("by_scenario_key", (index) =>
+        index.eq("scenarioKey", scenario.id),
+      )
+      .collect();
+    const existing = matches[0];
 
     for (const duplicate of matches.slice(1)) {
-      await ctx.db.delete(duplicate._id)
-      counts.deleted += 1
+      await ctx.db.delete(duplicate._id);
+      counts.deleted += 1;
     }
 
     if (!existing) {
-      await ctx.db.insert('scenarios', doc)
-      counts.inserted += 1
+      await ctx.db.insert("scenarios", doc);
+      counts.inserted += 1;
     } else if (!sameRecord(scenarioCurrent(existing), doc)) {
-      await ctx.db.patch(existing._id, { ...doc, documentAssetsJson: undefined })
-      counts.updated += 1
+      await ctx.db.patch(existing._id, {
+        ...doc,
+        documentAssetsJson: undefined,
+      });
+      counts.updated += 1;
     } else if (existing.documentAssetsJson) {
-      await ctx.db.patch(existing._id, { documentAssetsJson: undefined })
-      counts.updated += 1
+      await ctx.db.patch(existing._id, { documentAssetsJson: undefined });
+      counts.updated += 1;
     }
   }
 
-  const existingScenarios = await ctx.db.query('scenarios').collect()
+  const existingScenarios = await ctx.db.query("scenarios").collect();
   for (const existing of existingScenarios) {
     if (
       existing.published &&
       !existing.ownerUserId &&
       !seededScenarioKeys.has(existing.scenarioKey)
     ) {
-      await ctx.db.patch(existing._id, { published: false })
-      counts.updated += 1
+      await ctx.db.patch(existing._id, { published: false });
+      counts.updated += 1;
     }
   }
 
-  return counts
+  return counts;
 }
 
-export const all = mutation({
+export const all = internalMutation({
   args: {},
   returns: v.object({
     rulePacks: countValidator,
@@ -607,16 +630,14 @@ export const all = mutation({
     scenarios: countValidator,
   }),
   handler: async (ctx) => {
-    await requireSeedPermission(ctx)
-
-    const seededRulePacks = await upsertRulePacks(ctx)
-    const seededRuleItems = await upsertRuleItems(ctx)
-    const seededModuleManifests = await upsertModuleManifests(ctx)
-    const seededLegalSourceVersions = await upsertLegalSourceVersions(ctx)
-    const seededRuleConstraints = await upsertRuleConstraints(ctx)
-    const seededProcedureTransitions = await upsertProcedureTransitions(ctx)
-    const seededCourtPacks = await upsertCourtPacks(ctx)
-    const seededScenarios = await upsertScenarios(ctx)
+    const seededRulePacks = await upsertRulePacks(ctx);
+    const seededRuleItems = await upsertRuleItems(ctx);
+    const seededModuleManifests = await upsertModuleManifests(ctx);
+    const seededLegalSourceVersions = await upsertLegalSourceVersions(ctx);
+    const seededRuleConstraints = await upsertRuleConstraints(ctx);
+    const seededProcedureTransitions = await upsertProcedureTransitions(ctx);
+    const seededCourtPacks = await upsertCourtPacks(ctx);
+    const seededScenarios = await upsertScenarios(ctx);
 
     return {
       rulePacks: seededRulePacks,
@@ -627,9 +648,9 @@ export const all = mutation({
       procedureTransitions: seededProcedureTransitions,
       courtPacks: seededCourtPacks,
       scenarios: seededScenarios,
-    }
+    };
   },
-})
+});
 
 export const status = query({
   args: {},
@@ -656,17 +677,16 @@ export const status = query({
       procedureTransitionDocs,
       courtPackDocs,
       scenarioDocs,
-    ] =
-      await Promise.all([
-        ctx.db.query('rulePacks').collect(),
-        ctx.db.query('ruleItems').collect(),
-        ctx.db.query('moduleManifests').collect(),
-        ctx.db.query('legalSourceVersions').collect(),
-        ctx.db.query('ruleConstraints').collect(),
-        ctx.db.query('procedureTransitions').collect(),
-        ctx.db.query('courtPacks').collect(),
-        ctx.db.query('scenarios').collect(),
-      ])
+    ] = await Promise.all([
+      ctx.db.query("rulePacks").collect(),
+      ctx.db.query("ruleItems").collect(),
+      ctx.db.query("moduleManifests").collect(),
+      ctx.db.query("legalSourceVersions").collect(),
+      ctx.db.query("ruleConstraints").collect(),
+      ctx.db.query("procedureTransitions").collect(),
+      ctx.db.query("courtPacks").collect(),
+      ctx.db.query("scenarios").collect(),
+    ]);
 
     return {
       rulePacks: rulePackDocs.length,
@@ -678,8 +698,10 @@ export const status = query({
       courtPacks: courtPackDocs.length,
       scenarios: scenarioDocs.length,
       publishedRulePacks: rulePackDocs.filter((pack) => pack.published).length,
-      publishedCourtPacks: courtPackDocs.filter((pack) => pack.published).length,
-      publishedScenarios: scenarioDocs.filter((scenario) => scenario.published).length,
-    }
+      publishedCourtPacks: courtPackDocs.filter((pack) => pack.published)
+        .length,
+      publishedScenarios: scenarioDocs.filter((scenario) => scenario.published)
+        .length,
+    };
   },
-})
+});

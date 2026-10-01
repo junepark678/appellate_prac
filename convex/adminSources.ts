@@ -26,10 +26,12 @@ import {
   mutation,
   query,
 } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireCurrentUser } from "./authHelpers";
 import { writeAuditLog } from "./authz";
+import { validationError } from "./errors";
 import { fourthCircuitCivilAppealSourceManifest } from "../src/domain/rules/source-manifest";
 import {
   ca4CourtSourceVersions,
@@ -53,12 +55,9 @@ function simpleHash(value: string) {
   return hash.toString(16).padStart(8, "0");
 }
 
-async function requireAdmin(ctx: ReadCtx) {
-  const { user } = await requireCurrentUser(ctx);
-  if (user.role !== "admin") {
-    throw new Error("Admin role required");
-  }
-  return user;
+async function requireAdmin(ctx: ReadCtx): Promise<Doc<"users">> {
+  await requireCurrentUser(ctx);
+  throw validationError("Use organization membership management");
 }
 
 export const requireAdminForAction = internalQuery({

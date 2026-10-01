@@ -17,22 +17,21 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import type { Doc, Id } from './_generated/dataModel'
-import type { MutationCtx, QueryCtx } from './_generated/server'
-import { requireCurrentUser } from './authHelpers'
-import { isOrganizationMembershipActive } from './organizationContracts'
-import { AppErrorCode, ConvexError, notFound, unauthorizedRole } from './errors'
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { requireCurrentUser } from "./authHelpers";
+import { isOrganizationMembershipActive } from "./organizationContracts";
+import {
+  AppErrorCode,
+  ConvexError,
+  notFound,
+  unauthorizedRole,
+} from "./errors";
 
-export type ReadCtx = QueryCtx | MutationCtx
-export type CohortRole = Doc<'cohortMemberships'>['role']
-export type InstitutionRole = Doc<'institutionMemberships'>['role']
-export type UserRole = Doc<'users'>['role']
-
-const institutionRoleRank: Record<InstitutionRole, number> = {
-  learner: 0,
-  instructor: 1,
-  admin: 2,
-}
+export type ReadCtx = QueryCtx | MutationCtx;
+/** Legacy cohort role fields are not an authorization source. */
+export type CohortRole = InstitutionRole;
+export type InstitutionRole = Doc<"institutionMemberships">["role"];
 
 /**
  * NOT cryptographic — NEVER use for security, authentication, or tokens.
@@ -41,259 +40,166 @@ const institutionRoleRank: Record<InstitutionRole, number> = {
  * Canonical source: src/domain/auth-pure.ts — keep in sync.
  */
 export function toDeterministicId(value: string) {
-  let hash = 0
+  let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
-  return hash.toString(16).padStart(8, '0')
+  return hash.toString(16).padStart(8, "0");
 }
 
 /**
  * Canonical source: src/domain/auth-pure.ts — keep in sync.
  */
 export function normalizeEmail(value: string) {
-  return value.trim().toLowerCase()
+  return value.trim().toLowerCase();
 }
 
-export function isActiveInstitutionMembership(
-  membership: Pick<Doc<'institutionMemberships'>, 'status' | 'expiresAt'>,
-  now = new Date().toISOString(),
-) {
-  return membership.status === 'active' && (!membership.expiresAt || membership.expiresAt > now)
-}
-
-export async function requireGlobalRole(ctx: ReadCtx, roles: UserRole[]) {
-  const { user } = await requireCurrentUser(ctx)
-  const requiresAdminOnly = roles.every((role) => role === 'admin')
-  const roleAllowed =
-    roles.includes(user.role) ||
-    (!requiresAdminOnly && user.role !== 'admin' && roles.some((role) => role !== 'admin'))
-  if (!roleAllowed) {
-    throw unauthorizedRole(roles)
-  }
-  return user
-}
-
-export async function requireAdmin(ctx: ReadCtx) {
-  return requireGlobalRole(ctx, ['admin'])
-}
-
-function institutionRoleAllowed(role: InstitutionRole, roles: InstitutionRole[]) {
-  if (roles.includes(role)) return true
-  if (role === 'admin') return roles.includes('admin')
-  return roles.some((requestedRole) => requestedRole !== 'admin')
-}
-
-function cohortRoleAllowed(role: CohortRole, roles: CohortRole[]) {
-  if (roles.includes(role)) return true
-  if (role === 'admin') return roles.includes('admin')
-  return roles.some((requestedRole) => requestedRole !== 'admin')
-}
-
-async function hasActiveSupportGrant(
+/**
+ * Retained only for source compatibility. Global user roles no longer grant
+ * authority; authenticated callers must use an organization-scoped helper.
+ */
+export async function requireGlobalRole(
   ctx: ReadCtx,
-  institutionId: Id<'institutions'>,
-  userId: Id<'users'>,
-) {
-  const grants = await ctx.db
-    .query('supportAccessGrants')
-    .withIndex('by_support_user', (index) => index.eq('supportUserId', userId))
-    .collect()
-  const now = new Date().toISOString()
-  return grants.some(
-    (grant) =>
-      grant.institutionId === institutionId &&
-      !grant.revokedAt &&
-      grant.expiresAt > now,
-  )
+  _roles: string[],
+): Promise<Doc<"users">> {
+  await requireCurrentUser(ctx);
+  throw new ConvexError(
+    AppErrorCode.VALIDATION_ERROR,
+    "Use organization membership management",
+  );
 }
 
-export async function requireInstitutionRole(
-  ctx: ReadCtx,
-  institutionId: Id<'institutions'>,
-  roles: InstitutionRole[],
-  options: { allowSupportGrant?: boolean } = {},
-) {
-  const { user } = await requireCurrentUser(ctx)
-  if (user.role === 'admin') {
-    return { user, membership: null }
-  }
-
-  const memberships = await ctx.db
-    .query('institutionMemberships')
-    .withIndex('by_institution_user', (index) =>
-      index.eq('institutionId', institutionId).eq('userId', user._id),
-    )
-    .collect()
-  const now = new Date().toISOString()
-  const membership = memberships
-    .filter((candidate) => isActiveInstitutionMembership(candidate, now))
-    .filter((candidate) => institutionRoleAllowed(candidate.role, roles))
-    .sort(
-      (a, b) =>
-        institutionRoleRank[b.role] - institutionRoleRank[a.role] ||
-        a._creationTime - b._creationTime,
-    )[0]
-  if (membership) {
-    return { user, membership }
-  }
-
-  if (
-    options.allowSupportGrant &&
-    (await hasActiveSupportGrant(ctx, institutionId, user._id))
-  ) {
-    return { user, membership: null }
-  }
-
-  throw unauthorizedRole(['institution'])
-}
-
-export async function requireCohortRole(
-  ctx: ReadCtx,
-  cohortId: Id<'cohorts'>,
-  roles: CohortRole[],
-) {
-  const { user } = await requireCurrentUser(ctx)
-  const cohort = await ctx.db.get(cohortId)
-  if (!cohort) {
-    throw notFound('Cohort', cohortId)
-  }
-  if (user.role === 'admin') {
-    return { user, cohort, membership: null }
-  }
-
-  const membership = await ctx.db
-    .query('cohortMemberships')
-    .withIndex('by_cohort_user', (index) =>
-      index.eq('cohortId', cohortId).eq('userId', user._id),
-    )
-    .unique()
-  if (membership && cohortRoleAllowed(membership.role, roles)) {
-    return { user, cohort, membership }
-  }
-
-  throw unauthorizedRole(['cohort'])
+/** Legacy global administrator checks are deliberately fail-closed. */
+export async function requireAdmin(ctx: ReadCtx): Promise<Doc<"users">> {
+  return requireGlobalRole(ctx, ["admin"]);
 }
 
 const scopedRoleCapabilities: Record<InstitutionRole, InstitutionRole[]> = {
-  learner: ['learner'],
-  instructor: ['learner', 'instructor'],
-  admin: ['learner', 'instructor', 'admin'],
-}
+  learner: ["learner"],
+  instructor: ["learner", "instructor"],
+  admin: ["learner", "instructor", "admin"],
+};
 
 function scopedRoleAllowed(role: InstitutionRole, roles: InstitutionRole[]) {
   return scopedRoleCapabilities[role].some((capability) =>
     roles.includes(capability),
-  )
+  );
 }
 
 async function requireScopedInstitution(
   ctx: ReadCtx,
-  institutionId: Id<'institutions'>,
-  user: Doc<'users'>,
+  institutionId: Id<"institutions">,
+  user: Doc<"users">,
 ) {
-  const institution = await ctx.db.get(institutionId)
+  const institution = await ctx.db.get(institutionId);
   if (
     !institution ||
-    institution.status !== 'active' ||
-    ((institution.kind ?? 'shared') === 'personal' &&
+    institution.status !== "active" ||
+    ((institution.kind ?? "shared") === "personal" &&
       institution.personalOwnerUserId !== user._id)
   ) {
-    throw notFound('Organization')
+    throw notFound("Organization");
   }
-  return institution
+  return institution;
 }
 
 async function requireScopedMembership(
   ctx: ReadCtx,
-  institution: Doc<'institutions'>,
-  user: Doc<'users'>,
+  institution: Doc<"institutions">,
+  user: Doc<"users">,
 ) {
   const memberships = await ctx.db
-    .query('institutionMemberships')
-    .withIndex('by_institution_user', (index) =>
-      index.eq('institutionId', institution._id).eq('userId', user._id),
+    .query("institutionMemberships")
+    .withIndex("by_institution_user", (index) =>
+      index.eq("institutionId", institution._id).eq("userId", user._id),
     )
-    .collect()
+    .collect();
   const activeMemberships = memberships.filter((membership) =>
     isOrganizationMembershipActive(institution, membership, Date.now()),
-  )
+  );
   if (activeMemberships.length > 1) {
     throw new ConvexError(
       AppErrorCode.CONFLICT,
-      'Organization membership is ambiguous',
-    )
+      "Organization membership is ambiguous",
+    );
   }
-  const membership = activeMemberships[0]
-  if (!membership) throw notFound('Organization')
-  return membership
+  const membership = activeMemberships[0];
+  if (!membership) throw notFound("Organization");
+  return membership;
 }
 
 async function requireScopedCohortEnrollment(
   ctx: ReadCtx,
-  cohortId: Id<'cohorts'>,
-  userId: Id<'users'>,
+  cohortId: Id<"cohorts">,
+  userId: Id<"users">,
 ) {
   const enrollments = await ctx.db
-    .query('cohortMemberships')
-    .withIndex('by_cohort_user', (index) =>
-      index.eq('cohortId', cohortId).eq('userId', userId),
+    .query("cohortMemberships")
+    .withIndex("by_cohort_user", (index) =>
+      index.eq("cohortId", cohortId).eq("userId", userId),
     )
-    .collect()
+    .collect();
   if (enrollments.length > 1) {
     throw new ConvexError(
       AppErrorCode.CONFLICT,
-      'Cohort enrollment is ambiguous',
-    )
+      "Cohort enrollment is ambiguous",
+    );
   }
-  if (!enrollments[0]) throw notFound('Cohort')
+  if (!enrollments[0]) throw notFound("Cohort");
 }
 
-/**
- * Organization-scoped authorization for the next membership cutover.
- * Legacy helpers above remain available until that cutover updates their
- * existing callers. This helper never consults global roles or support grants.
- */
+/** Organization-scoped authorization. Only active organization membership
+ * supplies authority; global roles and support grants are ignored. */
 export async function requireScopedInstitutionRole(
   ctx: ReadCtx,
-  institutionId: Id<'institutions'>,
+  institutionId: Id<"institutions">,
   roles: InstitutionRole[],
 ) {
-  const { user } = await requireCurrentUser(ctx)
-  const institution = await requireScopedInstitution(ctx, institutionId, user)
-  const membership = await requireScopedMembership(ctx, institution, user)
+  const { user } = await requireCurrentUser(ctx);
+  const institution = await requireScopedInstitution(ctx, institutionId, user);
+  const membership = await requireScopedMembership(ctx, institution, user);
   if (!scopedRoleAllowed(membership.role, roles)) {
-    throw unauthorizedRole(roles)
+    throw unauthorizedRole(roles);
   }
-  return { user, institution, membership }
+  return { user, institution, membership };
+}
+
+/** Canonical helper retained under the established API name. */
+export async function requireInstitutionRole(
+  ctx: ReadCtx,
+  institutionId: Id<"institutions">,
+  roles: InstitutionRole[],
+  _legacyOptions: { allowSupportGrant?: boolean } = {},
+) {
+  return requireScopedInstitutionRole(ctx, institutionId, roles);
 }
 
 /**
  * Derive the cohort's institution from storage. The returned membership is
  * always the active organization membership; cohort membership is checked
  * only as enrollment for learner-scoped cohort operations.
- * Callers must pass the exact operation role set: learner-scoped operations
- * use ['learner']. Including 'instructor' or 'admin' gives eligible staff
+ * Callers must pass the exact operation role set. Learner-scoped operations
+ * use ['learner']; including 'instructor' or 'admin' grants eligible staff
  * teaching access without requiring cohort enrollment.
  */
 export async function requireScopedCohortRole(
   ctx: ReadCtx,
-  cohortId: Id<'cohorts'>,
+  cohortId: Id<"cohorts">,
   roles: InstitutionRole[],
 ) {
-  const { user } = await requireCurrentUser(ctx)
-  const cohort = await ctx.db.get(cohortId)
-  if (!cohort) throw notFound('Cohort')
+  const { user } = await requireCurrentUser(ctx);
+  const cohort = await ctx.db.get(cohortId);
+  if (!cohort) throw notFound("Cohort");
 
-  let institution: Doc<'institutions'>
-  let membership: Doc<'institutionMemberships'>
+  let institution: Doc<"institutions">;
+  let membership: Doc<"institutionMemberships">;
   try {
     institution = await requireScopedInstitution(
       ctx,
       cohort.institutionId,
       user,
-    )
-    membership = await requireScopedMembership(ctx, institution, user)
+    );
+    membership = await requireScopedMembership(ctx, institution, user);
   } catch (error) {
     // A cohort is visible only through an active institution membership. Keep
     // missing, inactive, and inaccessible cohort lookups indistinguishable.
@@ -301,45 +207,54 @@ export async function requireScopedCohortRole(
       error instanceof ConvexError &&
       error.data.code === AppErrorCode.NOT_FOUND
     ) {
-      throw notFound('Cohort')
+      throw notFound("Cohort");
     }
-    throw error
+    throw error;
   }
 
   // Learners can see cohort existence only through their enrollment, even if
   // the requested operation will later fail the institution-role check.
-  if (membership.role === 'learner') {
-    await requireScopedCohortEnrollment(ctx, cohortId, user._id)
+  if (membership.role === "learner") {
+    await requireScopedCohortEnrollment(ctx, cohortId, user._id);
   }
 
   if (!scopedRoleAllowed(membership.role, roles)) {
-    throw unauthorizedRole(roles)
+    throw unauthorizedRole(roles);
   }
 
   const mayUseTeachingAccess =
-    membership.role !== 'learner' &&
-    roles.some((role) => role === 'instructor' || role === 'admin')
-  if (!mayUseTeachingAccess && membership.role !== 'learner') {
-    await requireScopedCohortEnrollment(ctx, cohortId, user._id)
+    membership.role !== "learner" &&
+    roles.some((role) => role === "instructor" || role === "admin");
+  if (!mayUseTeachingAccess && membership.role !== "learner") {
+    await requireScopedCohortEnrollment(ctx, cohortId, user._id);
   }
 
-  return { user, cohort, institution, membership }
+  return { user, cohort, institution, membership };
+}
+
+/** Canonical helper retained under the established API name. */
+export async function requireCohortRole(
+  ctx: ReadCtx,
+  cohortId: Id<"cohorts">,
+  roles: InstitutionRole[],
+) {
+  return requireScopedCohortRole(ctx, cohortId, roles);
 }
 
 export async function writeAuditLog(
   ctx: MutationCtx,
   args: {
-    actorUserId?: Id<'users'>
-    institutionId?: Id<'institutions'>
-    cohortId?: Id<'cohorts'>
-    caseSessionId?: Id<'caseSessions'>
-    action: string
-    targetTable?: string
-    targetId?: string
-    metadata?: Record<string, unknown>
+    actorUserId?: Id<"users">;
+    institutionId?: Id<"institutions">;
+    cohortId?: Id<"cohorts">;
+    caseSessionId?: Id<"caseSessions">;
+    action: string;
+    targetTable?: string;
+    targetId?: string;
+    metadata?: Record<string, unknown>;
   },
 ) {
-  await ctx.db.insert('auditLog', {
+  await ctx.db.insert("auditLog", {
     ...(args.actorUserId ? { actorUserId: args.actorUserId } : {}),
     ...(args.institutionId ? { institutionId: args.institutionId } : {}),
     ...(args.cohortId ? { cohortId: args.cohortId } : {}),
@@ -349,5 +264,5 @@ export async function writeAuditLog(
     ...(args.targetId ? { targetId: args.targetId } : {}),
     ...(args.metadata ? { metadataJson: JSON.stringify(args.metadata) } : {}),
     createdAt: new Date().toISOString(),
-  })
+  });
 }

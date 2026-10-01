@@ -18,43 +18,54 @@
  */
 
 // TODO: Import from './errors' once error module is integrated
-import { v } from 'convex/values'
+import { v } from "convex/values";
 
-import { mutation, query } from './_generated/server'
-import type { Doc, Id } from './_generated/dataModel'
-import type { MutationCtx, QueryCtx } from './_generated/server'
-import { requireCurrentUser } from './authHelpers'
-import { requireCohortRole, writeAuditLog } from './authz'
-import { appendCaseSessionEvent } from './caseSessionEventLog'
-import { createInitialSession, createInitialSessionForScenario } from '../src/domain/simulation'
-import { inferProcedureState } from '../src/domain/procedure/state-machine'
-import type { Scenario } from '../src/domain/types'
-import scenarioSeed from '../src/domain/scenarios.seed.json'
+import { mutation, query } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { requireCurrentUser } from "./authHelpers";
+import { requireCohortRole, writeAuditLog } from "./authz";
+import { appendCaseSessionEvent } from "./caseSessionEventLog";
+import {
+  AppErrorCode,
+  ConvexError,
+  notFound,
+  sessionLocked,
+  validationError,
+} from "./errors";
+import { isOrganizationMembershipActive } from "./organizationContracts";
+import {
+  createInitialSession,
+  createInitialSessionForScenario,
+} from "../src/domain/simulation";
+import { inferProcedureState } from "../src/domain/procedure/state-machine";
+import type { Scenario } from "../src/domain/types";
+import scenarioSeed from "../src/domain/scenarios.seed.json";
 
-type ReadCtx = QueryCtx | MutationCtx
-type CohortRole = Doc<'cohortMemberships'>['role']
+type ReadCtx = QueryCtx | MutationCtx;
+type CohortRole = "learner" | "instructor" | "admin";
 
-function scenarioVisibility(doc: Doc<'scenarios'>) {
-  return doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template')
+function scenarioVisibility(doc: Doc<"scenarios">) {
+  return doc.visibility ?? (doc.ownerUserId ? "private" : "public_template");
 }
 
-function scenarioRevisionStatus(doc: Doc<'scenarios'>) {
-  return doc.revisionStatus ?? (doc.published ? 'published' : 'draft')
+function scenarioRevisionStatus(doc: Doc<"scenarios">) {
+  return doc.revisionStatus ?? (doc.published ? "published" : "draft");
 }
 
 const autonomyModeValidator = v.union(
-  v.literal('paused'),
-  v.literal('supervised'),
-  v.literal('autonomous'),
-)
+  v.literal("paused"),
+  v.literal("supervised"),
+  v.literal("autonomous"),
+);
 
 const assignmentStatusValidator = v.union(
-  v.literal('not_started'),
-  v.literal('in_progress'),
-  v.literal('submitted'),
-  v.literal('reviewed'),
-)
-const seedScenarios = scenarioSeed as Scenario[]
+  v.literal("not_started"),
+  v.literal("in_progress"),
+  v.literal("submitted"),
+  v.literal("reviewed"),
+);
+const seedScenarios = scenarioSeed as Scenario[];
 
 function seedScenarioDoc(scenario: Scenario) {
   return {
@@ -68,38 +79,47 @@ function seedScenarioDoc(scenario: Scenario) {
     proceduralPosture: scenario.proceduralPosture,
     issuesPresented: scenario.issuesPresented,
     meritsRecord: scenario.meritsRecord,
-    ...(scenario.training ? { trainingJson: JSON.stringify(scenario.training) } : {}),
-    ...(scenario.trialDocket ? { trialDocketJson: JSON.stringify(scenario.trialDocket) } : {}),
+    ...(scenario.training
+      ? { trainingJson: JSON.stringify(scenario.training) }
+      : {}),
+    ...(scenario.trialDocket
+      ? { trialDocketJson: JSON.stringify(scenario.trialDocket) }
+      : {}),
     ...(scenario.documentAssets
       ? { documentAssetsJson: JSON.stringify(scenario.documentAssets) }
       : {}),
-    ...(scenario.sourceCaseUrl ? { sourceCaseUrl: scenario.sourceCaseUrl } : {}),
-    visibility: 'public_template' as const,
+    ...(scenario.sourceCaseUrl
+      ? { sourceCaseUrl: scenario.sourceCaseUrl }
+      : {}),
+    visibility: "public_template" as const,
     scenarioFamilyKey: scenario.id,
     revision: 1,
-    revisionStatus: 'published' as const,
+    revisionStatus: "published" as const,
     published: true,
-  }
+  };
 }
 
-function parseOptionalJsonField<T>(json: string | undefined, label: string): T | undefined {
-  if (!json) return undefined
+function parseOptionalJsonField<T>(
+  json: string | undefined,
+  label: string,
+): T | undefined {
+  if (!json) return undefined;
   try {
-    return JSON.parse(json) as T
+    return JSON.parse(json) as T;
   } catch {
-    throw new Error(`Invalid persisted JSON for ${label}.`)
+    throw new Error(`Invalid persisted JSON for ${label}.`);
   }
 }
 
-function scenarioModelFromDoc(doc: Doc<'scenarios'>): Scenario {
-  const training = parseOptionalJsonField<Scenario['training']>(
+function scenarioModelFromDoc(doc: Doc<"scenarios">): Scenario {
+  const training = parseOptionalJsonField<Scenario["training"]>(
     doc.trainingJson,
     `scenario ${doc._id} training`,
-  )
-  const trialDocket = parseOptionalJsonField<Scenario['trialDocket']>(
+  );
+  const trialDocket = parseOptionalJsonField<Scenario["trialDocket"]>(
     doc.trialDocketJson,
     `scenario ${doc._id} trial docket`,
-  )
+  );
 
   return {
     id: doc.scenarioKey,
@@ -108,8 +128,12 @@ function scenarioModelFromDoc(doc: Doc<'scenarios'>): Scenario {
     scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
     revision: doc.revision ?? 1,
     revisionStatus: scenarioRevisionStatus(doc),
-    ...(doc.createdFromScenarioId ? { createdFromScenarioId: doc.createdFromScenarioId } : {}),
-    ...(doc.supersededByScenarioId ? { supersededByScenarioId: doc.supersededByScenarioId } : {}),
+    ...(doc.createdFromScenarioId
+      ? { createdFromScenarioId: doc.createdFromScenarioId }
+      : {}),
+    ...(doc.supersededByScenarioId
+      ? { supersededByScenarioId: doc.supersededByScenarioId }
+      : {}),
     title: doc.title,
     source: doc.source,
     courtPackId: doc.courtPackId,
@@ -122,134 +146,147 @@ function scenarioModelFromDoc(doc: Doc<'scenarios'>): Scenario {
     ...(training ? { training } : {}),
     ...(trialDocket ? { trialDocket } : {}),
     ...(doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}),
-  }
+  };
 }
 
-function createInitialSessionForScenarioDoc(doc: Doc<'scenarios'>) {
-  const bundledScenario = seedScenarios.some((scenario) => scenario.id === doc.scenarioKey)
+function createInitialSessionForScenarioDoc(doc: Doc<"scenarios">) {
+  const bundledScenario = seedScenarios.some(
+    (scenario) => scenario.id === doc.scenarioKey,
+  );
   return bundledScenario
     ? createInitialSession(doc.scenarioKey)
-    : createInitialSessionForScenario(scenarioModelFromDoc(doc))
+    : createInitialSessionForScenario(scenarioModelFromDoc(doc));
 }
 
 async function requireAssignmentRole(
   ctx: ReadCtx,
-  assignmentId: Id<'assignments'>,
+  assignmentId: Id<"assignments">,
   roles: CohortRole[],
 ) {
-  const assignment = await ctx.db.get(assignmentId)
+  const assignment = await ctx.db.get(assignmentId);
   if (!assignment || assignment.archivedAt) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Assignment not found')
+    throw notFound("Assignment");
   }
-  const access = await requireCohortRole(ctx, assignment.cohortId, roles)
-  return { assignment, ...access }
+  let access;
+  try {
+    access = await requireCohortRole(ctx, assignment.cohortId, roles);
+  } catch (error) {
+    if (
+      error instanceof ConvexError &&
+      error.data.code === AppErrorCode.NOT_FOUND
+    ) {
+      throw notFound("Assignment");
+    }
+    throw error;
+  }
+  return { assignment, ...access };
 }
 
 async function getAssignmentSession(
   ctx: ReadCtx,
-  assignmentId: Id<'assignments'>,
-  userId: Id<'users'>,
+  assignmentId: Id<"assignments">,
+  userId: Id<"users">,
 ) {
-  const sessions = await listAssignmentSessionsForUser(ctx, assignmentId, userId)
-  return sessions[0] ?? null
+  const sessions = await listAssignmentSessionsForUser(
+    ctx,
+    assignmentId,
+    userId,
+  );
+  return sessions[0] ?? null;
 }
 
 async function listAssignmentSessionsForUser(
   ctx: ReadCtx,
-  assignmentId: Id<'assignments'>,
-  userId: Id<'users'>,
+  assignmentId: Id<"assignments">,
+  userId: Id<"users">,
 ) {
   const sessions = await ctx.db
-    .query('assignmentSessions')
-    .withIndex('by_assignment_user', (index) =>
-      index.eq('assignmentId', assignmentId).eq('userId', userId),
+    .query("assignmentSessions")
+    .withIndex("by_assignment_user", (index) =>
+      index.eq("assignmentId", assignmentId).eq("userId", userId),
     )
-    .collect()
-  return sessions.sort((a, b) => a._creationTime - b._creationTime)
+    .collect();
+  return sessions.sort((a, b) => a._creationTime - b._creationTime);
 }
 
 async function requireScenarioForAssignment(
   ctx: MutationCtx,
   args: {
-    scenarioId?: Id<'scenarios'>
-    scenarioKey?: string
+    scenarioId?: Id<"scenarios">;
+    scenarioKey?: string;
   },
 ) {
   if (args.scenarioId) {
-    const scenario = await ctx.db.get(args.scenarioId)
+    const scenario = await ctx.db.get(args.scenarioId);
     if (!scenario) {
-      throw new Error('Scenario not found')
+      throw notFound("Scenario");
     }
-    return scenario
+    return scenario;
   }
 
   if (!args.scenarioKey) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Scenario not found')
+    throw notFound("Scenario");
   }
 
-  const scenarioKey = args.scenarioKey
+  const scenarioKey = args.scenarioKey;
   const existing = await ctx.db
-    .query('scenarios')
-    .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
-    .unique()
-  const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
+    .query("scenarios")
+    .withIndex("by_scenario_key", (index) =>
+      index.eq("scenarioKey", scenarioKey),
+    )
+    .unique();
+  const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey);
   if (existing) {
     if (bundled) {
-      await ctx.db.patch(existing._id, seedScenarioDoc(bundled))
-      const updated = await ctx.db.get(existing._id)
+      await ctx.db.patch(existing._id, seedScenarioDoc(bundled));
+      const updated = await ctx.db.get(existing._id);
       if (!updated) {
-        // ERROR_CODE: NOT_FOUND
-        throw new Error('Scenario not found')
+        throw notFound("Scenario");
       }
-      return updated
+      return updated;
     }
-    return existing
+    return existing;
   }
 
   if (!bundled) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Scenario not found')
+    throw notFound("Scenario");
   }
-  const scenarioId = await ctx.db.insert('scenarios', seedScenarioDoc(bundled))
-  const scenario = await ctx.db.get(scenarioId)
+  const scenarioId = await ctx.db.insert("scenarios", seedScenarioDoc(bundled));
+  const scenario = await ctx.db.get(scenarioId);
   if (!scenario) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Scenario not found')
+    throw notFound("Scenario");
   }
-  return scenario
+  return scenario;
 }
 
 function isSubmittedLockActive(
-  session: Pick<Doc<'assignmentSessions'>, 'submittedAt' | 'reopenedAt'> | null,
+  session: Pick<Doc<"assignmentSessions">, "submittedAt" | "reopenedAt"> | null,
 ) {
   return Boolean(
     session?.submittedAt &&
-      (!session.reopenedAt || session.reopenedAt <= session.submittedAt),
-  )
+    (!session.reopenedAt || session.reopenedAt <= session.submittedAt),
+  );
 }
 
-function statusForAssignmentSession(session: Doc<'assignmentSessions'> | null) {
-  if (!session) return 'not_started' as const
-  if (session.reviewedAt) return 'reviewed' as const
-  if (isSubmittedLockActive(session)) return 'submitted' as const
-  return 'in_progress' as const
+function statusForAssignmentSession(session: Doc<"assignmentSessions"> | null) {
+  if (!session) return "not_started" as const;
+  if (session.reviewedAt) return "reviewed" as const;
+  if (isSubmittedLockActive(session)) return "submitted" as const;
+  return "in_progress" as const;
 }
 
 function canViewUnpublishedAssignment(
-  user: Doc<'users'>,
-  membership: Doc<'cohortMemberships'> | null,
+  membership: Doc<"institutionMemberships">,
 ) {
-  return user.role === 'admin' || membership !== null
+  return membership.role === "instructor" || membership.role === "admin";
 }
 
 async function insertInitialSessionState(
   ctx: MutationCtx,
-  caseSessionId: Id<'caseSessions'>,
+  caseSessionId: Id<"caseSessions">,
   initialSession: ReturnType<typeof createInitialSession>,
 ) {
-  const procedureState = inferProcedureState(initialSession)
+  const procedureState = inferProcedureState(initialSession);
   await ctx.db.patch(caseSessionId, {
     status: initialSession.status,
     procedureState,
@@ -261,16 +298,16 @@ async function insertInitialSessionState(
       ? { sourceProfileId: initialSession.sourceProfileId }
       : {}),
     qualityState: initialSession.qualityState,
-  })
+  });
   for (const participant of initialSession.participants) {
-    await ctx.db.insert('participants', {
+    await ctx.db.insert("participants", {
       caseSessionId,
       displayName: participant.displayName,
       role: participant.role,
-    })
+    });
   }
   for (const entry of initialSession.docketEntries) {
-    await ctx.db.insert('docketEntries', {
+    await ctx.db.insert("docketEntries", {
       caseSessionId,
       entryNumber: entry.entryNumber,
       filedAt: entry.filedAt,
@@ -278,28 +315,33 @@ async function insertInitialSessionState(
       title: entry.title,
       text: entry.text,
       ruleRefs: entry.ruleRefs,
-    })
+    });
   }
   for (const deadline of initialSession.deadlines) {
-    await ctx.db.insert('deadlines', {
+    await ctx.db.insert("deadlines", {
       caseSessionId,
       label: deadline.label,
       dueDate: deadline.dueDate,
       targetEventId: deadline.targetEventId,
       status: deadline.status,
       sourceRuleRefs: deadline.sourceRuleRefs,
-    })
+    });
   }
-  await appendCaseSessionEvent(ctx, caseSessionId, 'assignment_session_started', {
-    scenarioKey: initialSession.scenario.id,
-    procedureState,
-  })
+  await appendCaseSessionEvent(
+    ctx,
+    caseSessionId,
+    "assignment_session_started",
+    {
+      scenarioKey: initialSession.scenario.id,
+      procedureState,
+    },
+  );
 }
 
 export const create = mutation({
   args: {
-    cohortId: v.id('cohorts'),
-    scenarioId: v.optional(v.id('scenarios')),
+    cohortId: v.id("cohorts"),
+    scenarioId: v.optional(v.id("scenarios")),
     scenarioKey: v.optional(v.string()),
     title: v.string(),
     dueAt: v.optional(v.string()),
@@ -314,81 +356,95 @@ export const create = mutation({
     hideAiReasoning: v.optional(v.boolean()),
     allowedFilingEvents: v.optional(v.array(v.string())),
   },
-  returns: v.id('assignments'),
+  returns: v.id("assignments"),
   handler: async (ctx, args) => {
-    const { user, cohort } = await requireCohortRole(ctx, args.cohortId, [
-      'instructor',
-      'admin',
-    ])
-    const scenario = await requireScenarioForAssignment(ctx, args)
-    const visibility = scenarioVisibility(scenario)
-    const revisionStatus = scenarioRevisionStatus(scenario)
+    const { user, cohort, institution } = await requireCohortRole(
+      ctx,
+      args.cohortId,
+      ["instructor", "admin"],
+    );
+    const scenario = await requireScenarioForAssignment(ctx, args);
+    const visibility = scenarioVisibility(scenario);
+    const revisionStatus = scenarioRevisionStatus(scenario);
+    if (scenario.institutionId && scenario.institutionId !== institution._id) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Scenario organization scope mismatch",
+      );
+    }
     const canAssignPrivateScenario =
-      visibility === 'private' && (scenario.ownerUserId === user._id || user.role === 'admin')
+      visibility === "private" &&
+      scenario.institutionId === institution._id &&
+      scenario.ownerUserId === user._id;
     const canAssignPublishedTemplate =
-      visibility === 'public_template' && revisionStatus === 'published' && scenario.published
-    if (!canAssignPrivateScenario && !canAssignPublishedTemplate && user.role !== 'admin') {
-      throw new Error('Scenario is not available for assignment')
+      visibility === "public_template" &&
+      revisionStatus === "published" &&
+      scenario.published;
+    if (!canAssignPrivateScenario && !canAssignPublishedTemplate) {
+      throw notFound("Scenario");
     }
 
-    let simulationPolicyId
+    let simulationPolicyId;
     if (args.autonomyMode) {
-      simulationPolicyId = await ctx.db.insert('simulationPolicies', {
-        scope: 'assignment',
-        scopeId: 'pending',
+      simulationPolicyId = await ctx.db.insert("simulationPolicies", {
+        scope: "assignment",
+        scopeId: "pending",
         autonomyMode: args.autonomyMode,
         maxTurnsPerRun: args.maxTurnsPerRun ?? 6,
-        maxCostCentsPerRun: args.maxCostCentsPerRun ?? args.budgetCapCents ?? 25,
+        maxCostCentsPerRun:
+          args.maxCostCentsPerRun ?? args.budgetCapCents ?? 25,
         requireHumanApprovalFor: args.requireHumanApprovalFor ?? [
-          'disposeCase',
-          'enterJudgment',
+          "disposeCase",
+          "enterJudgment",
         ],
         stopOnDeficiency: args.stopOnDeficiency ?? true,
         createdByUserId: user._id,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      })
+      });
     }
-    const now = new Date().toISOString()
-    const assignmentId = await ctx.db.insert('assignments', {
+    const now = new Date().toISOString();
+    const assignmentId = await ctx.db.insert("assignments", {
       cohortId: args.cohortId,
       scenarioId: scenario._id,
       title: args.title,
       ...(args.dueAt ? { dueAt: args.dueAt } : {}),
       ...(args.rubricId ? { rubricId: args.rubricId } : {}),
       published: args.published,
-      autonomyMode: args.autonomyMode ?? 'paused',
+      autonomyMode: args.autonomyMode ?? "paused",
       ...(simulationPolicyId ? { simulationPolicyId } : {}),
-      ...(typeof args.budgetCapCents === 'number'
+      ...(typeof args.budgetCapCents === "number"
         ? { budgetCapCents: args.budgetCapCents }
         : {}),
-      ...(typeof args.hideAiReasoning === 'boolean'
+      ...(typeof args.hideAiReasoning === "boolean"
         ? { hideAiReasoning: args.hideAiReasoning }
         : {}),
-      ...(args.allowedFilingEvents ? { allowedFilingEvents: args.allowedFilingEvents } : {}),
+      ...(args.allowedFilingEvents
+        ? { allowedFilingEvents: args.allowedFilingEvents }
+        : {}),
       createdByUserId: user._id,
       createdAt: now,
       updatedAt: now,
-    })
+    });
     if (simulationPolicyId) {
-      await ctx.db.patch(simulationPolicyId, { scopeId: assignmentId })
+      await ctx.db.patch(simulationPolicyId, { scopeId: assignmentId });
     }
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: args.cohortId,
-      action: 'assignment.created',
-      targetTable: 'assignments',
+      action: "assignment.created",
+      targetTable: "assignments",
       targetId: assignmentId,
       metadata: { published: args.published },
-    })
-    return assignmentId
+    });
+    return assignmentId;
   },
-})
+});
 
 export const update = mutation({
   args: {
-    assignmentId: v.id('assignments'),
+    assignmentId: v.id("assignments"),
     title: v.optional(v.string()),
     dueAt: v.optional(v.string()),
     rubricId: v.optional(v.string()),
@@ -399,102 +455,109 @@ export const update = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'instructor',
-      'admin',
-    ])
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ["instructor", "admin"],
+    );
     await ctx.db.patch(args.assignmentId, {
       ...(args.title ? { title: args.title } : {}),
       ...(args.dueAt !== undefined ? { dueAt: args.dueAt || undefined } : {}),
-      ...(args.rubricId !== undefined ? { rubricId: args.rubricId || undefined } : {}),
+      ...(args.rubricId !== undefined
+        ? { rubricId: args.rubricId || undefined }
+        : {}),
       ...(args.autonomyMode ? { autonomyMode: args.autonomyMode } : {}),
-      ...(typeof args.budgetCapCents === 'number'
+      ...(typeof args.budgetCapCents === "number"
         ? { budgetCapCents: args.budgetCapCents }
         : {}),
-      ...(typeof args.hideAiReasoning === 'boolean'
+      ...(typeof args.hideAiReasoning === "boolean"
         ? { hideAiReasoning: args.hideAiReasoning }
         : {}),
-      ...(args.allowedFilingEvents ? { allowedFilingEvents: args.allowedFilingEvents } : {}),
+      ...(args.allowedFilingEvents
+        ? { allowedFilingEvents: args.allowedFilingEvents }
+        : {}),
       updatedAt: new Date().toISOString(),
-    })
+    });
     if (assignment.simulationPolicyId && args.autonomyMode) {
       await ctx.db.patch(assignment.simulationPolicyId, {
         autonomyMode: args.autonomyMode,
         updatedAt: new Date().toISOString(),
-      })
+      });
     }
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
-      action: 'assignment.updated',
-      targetTable: 'assignments',
+      action: "assignment.updated",
+      targetTable: "assignments",
       targetId: args.assignmentId,
-    })
-    return null
+    });
+    return null;
   },
-})
+});
 
 export const publish = mutation({
   args: {
-    assignmentId: v.id('assignments'),
+    assignmentId: v.id("assignments"),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'instructor',
-      'admin',
-    ])
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ["instructor", "admin"],
+    );
     await ctx.db.patch(args.assignmentId, {
       published: true,
       updatedAt: new Date().toISOString(),
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
-      action: 'assignment.published',
-      targetTable: 'assignments',
+      action: "assignment.published",
+      targetTable: "assignments",
       targetId: args.assignmentId,
-    })
-    return null
+    });
+    return null;
   },
-})
+});
 
 export const archive = mutation({
   args: {
-    assignmentId: v.id('assignments'),
+    assignmentId: v.id("assignments"),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'instructor',
-      'admin',
-    ])
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ["instructor", "admin"],
+    );
     await ctx.db.patch(args.assignmentId, {
       published: false,
       archivedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
-      action: 'assignment.archived',
-      targetTable: 'assignments',
+      action: "assignment.archived",
+      targetTable: "assignments",
       targetId: args.assignmentId,
-    })
-    return null
+    });
+    return null;
   },
-})
+});
 
 export const listForCohort = query({
   args: {
-    cohortId: v.id('cohorts'),
+    cohortId: v.id("cohorts"),
   },
   returns: v.array(
     v.object({
-      id: v.id('assignments'),
+      id: v.id("assignments"),
       title: v.string(),
       published: v.boolean(),
       dueAt: v.optional(v.string()),
@@ -505,34 +568,46 @@ export const listForCohort = query({
     }),
   ),
   handler: async (ctx, args) => {
-    await requireCohortRole(ctx, args.cohortId, ['learner', 'instructor', 'admin'])
+    const { membership } = await requireCohortRole(ctx, args.cohortId, [
+      "learner",
+      "instructor",
+      "admin",
+    ]);
     const assignments = await ctx.db
-      .query('assignments')
-      .withIndex('by_cohort', (index) => index.eq('cohortId', args.cohortId))
-      .collect()
-    return assignments.map((assignment) => ({
-      id: assignment._id,
-      title: assignment.title,
-      published: assignment.published,
-      ...(assignment.dueAt ? { dueAt: assignment.dueAt } : {}),
-      ...(assignment.autonomyMode ? { autonomyMode: assignment.autonomyMode } : {}),
-      ...(typeof assignment.budgetCapCents === 'number'
-        ? { budgetCapCents: assignment.budgetCapCents }
-        : {}),
-      ...(typeof assignment.hideAiReasoning === 'boolean'
-        ? { hideAiReasoning: assignment.hideAiReasoning }
-        : {}),
-      ...(assignment.archivedAt ? { archivedAt: assignment.archivedAt } : {}),
-    }))
+      .query("assignments")
+      .withIndex("by_cohort", (index) => index.eq("cohortId", args.cohortId))
+      .collect();
+    return assignments
+      .filter((assignment) =>
+        membership.role === "learner"
+          ? assignment.published && !assignment.archivedAt
+          : true,
+      )
+      .map((assignment) => ({
+        id: assignment._id,
+        title: assignment.title,
+        published: assignment.published,
+        ...(assignment.dueAt ? { dueAt: assignment.dueAt } : {}),
+        ...(assignment.autonomyMode
+          ? { autonomyMode: assignment.autonomyMode }
+          : {}),
+        ...(typeof assignment.budgetCapCents === "number"
+          ? { budgetCapCents: assignment.budgetCapCents }
+          : {}),
+        ...(typeof assignment.hideAiReasoning === "boolean"
+          ? { hideAiReasoning: assignment.hideAiReasoning }
+          : {}),
+        ...(assignment.archivedAt ? { archivedAt: assignment.archivedAt } : {}),
+      }));
   },
-})
+});
 
 export const listMine = query({
   args: {},
   returns: v.array(
     v.object({
-      id: v.id('assignments'),
-      cohortId: v.id('cohorts'),
+      id: v.id("assignments"),
+      cohortId: v.id("cohorts"),
       cohortTitle: v.string(),
       institutionName: v.string(),
       title: v.string(),
@@ -540,57 +615,97 @@ export const listMine = query({
       dueAt: v.optional(v.string()),
       autonomyMode: v.optional(autonomyModeValidator),
       status: assignmentStatusValidator,
-      caseSessionId: v.optional(v.id('caseSessions')),
+      caseSessionId: v.optional(v.id("caseSessions")),
       submittedAt: v.optional(v.string()),
       reviewedAt: v.optional(v.string()),
     }),
   ),
   handler: async (ctx) => {
-    const { user } = await requireCurrentUser(ctx)
-    const memberships = await ctx.db
-      .query('cohortMemberships')
-      .withIndex('by_user', (index) => index.eq('userId', user._id))
-      .collect()
-    const rows = []
-    for (const membership of memberships) {
-      const cohort = await ctx.db.get(membership.cohortId)
-      if (!cohort || cohort.archived) continue
-      const institution = await ctx.db.get(cohort.institutionId)
+    const { user } = await requireCurrentUser(ctx);
+    const enrollments = await ctx.db
+      .query("cohortMemberships")
+      .withIndex("by_user", (index) => index.eq("userId", user._id))
+      .collect();
+    const rows = [];
+    const seenCohorts = new Set<string>();
+    for (const enrollment of enrollments) {
+      const cohort = await ctx.db.get(enrollment.cohortId);
+      if (!cohort || cohort.archived) continue;
+      const institution = await ctx.db.get(cohort.institutionId);
+      const organizationMemberships = await ctx.db
+        .query("institutionMemberships")
+        .withIndex("by_institution_user", (index) =>
+          index
+            .eq("institutionId", cohort.institutionId)
+            .eq("userId", user._id),
+        )
+        .collect();
+      const activeMemberships = organizationMemberships.filter(
+        (organizationMembership) =>
+          isOrganizationMembershipActive(
+            institution,
+            organizationMembership,
+            Date.now(),
+          ),
+      );
+      if (activeMemberships.length > 1) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Organization membership is ambiguous",
+        );
+      }
+      if (!activeMemberships[0]) continue;
+      const cohortKey = cohort._id as string;
+      if (seenCohorts.has(cohortKey)) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Cohort enrollment is ambiguous",
+        );
+      }
+      seenCohorts.add(cohortKey);
       const assignments = await ctx.db
-        .query('assignments')
-        .withIndex('by_cohort', (index) => index.eq('cohortId', cohort._id))
-        .collect()
+        .query("assignments")
+        .withIndex("by_cohort", (index) => index.eq("cohortId", cohort._id))
+        .collect();
       for (const assignment of assignments) {
-        if (!assignment.published || assignment.archivedAt) continue
-        const session = await getAssignmentSession(ctx, assignment._id, user._id)
+        if (!assignment.published || assignment.archivedAt) continue;
+        const session = await getAssignmentSession(
+          ctx,
+          assignment._id,
+          user._id,
+        );
         rows.push({
           id: assignment._id,
           cohortId: cohort._id,
           cohortTitle: cohort.title,
-          institutionName: institution?.name ?? 'Institution',
+          institutionName: institution?.name ?? "Institution",
           title: assignment.title,
           published: assignment.published,
           ...(assignment.dueAt ? { dueAt: assignment.dueAt } : {}),
-          ...(assignment.autonomyMode ? { autonomyMode: assignment.autonomyMode } : {}),
+          ...(assignment.autonomyMode
+            ? { autonomyMode: assignment.autonomyMode }
+            : {}),
           status: statusForAssignmentSession(session),
-          ...(session?.caseSessionId ? { caseSessionId: session.caseSessionId } : {}),
+          ...(session?.caseSessionId
+            ? { caseSessionId: session.caseSessionId }
+            : {}),
           ...(session?.submittedAt ? { submittedAt: session.submittedAt } : {}),
           ...(session?.reviewedAt ? { reviewedAt: session.reviewedAt } : {}),
-        })
+        });
       }
     }
-    return rows.sort((a, b) => (a.dueAt ?? '').localeCompare(b.dueAt ?? ''))
+    return rows.sort((a, b) => (a.dueAt ?? "").localeCompare(b.dueAt ?? ""));
   },
-})
+});
 
 export const get = query({
   args: {
-    assignmentId: v.id('assignments'),
+    assignmentId: v.id("assignments"),
   },
   returns: v.union(
     v.object({
-      id: v.id('assignments'),
-      cohortId: v.id('cohorts'),
+      id: v.id("assignments"),
+      cohortId: v.id("cohorts"),
       title: v.string(),
       dueAt: v.optional(v.string()),
       rubricId: v.optional(v.string()),
@@ -602,7 +717,7 @@ export const get = query({
       scenarioTitle: v.string(),
       scenarioKey: v.string(),
       status: assignmentStatusValidator,
-      caseSessionId: v.optional(v.id('caseSessions')),
+      caseSessionId: v.optional(v.id("caseSessions")),
       submittedAt: v.optional(v.string()),
       reviewedAt: v.optional(v.string()),
       instructorNote: v.optional(v.string()),
@@ -613,11 +728,12 @@ export const get = query({
     const { assignment, user, membership } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
-      ['learner', 'instructor', 'admin'],
-    )
-    if (!assignment.published && !canViewUnpublishedAssignment(user, membership)) return null
-    const scenario = await ctx.db.get(assignment.scenarioId)
-    const session = await getAssignmentSession(ctx, assignment._id, user._id)
+      ["learner", "instructor", "admin"],
+    );
+    if (!assignment.published && !canViewUnpublishedAssignment(membership))
+      return null;
+    const scenario = await ctx.db.get(assignment.scenarioId);
+    const session = await getAssignmentSession(ctx, assignment._id, user._id);
     return {
       id: assignment._id,
       cohortId: assignment.cohortId,
@@ -625,59 +741,63 @@ export const get = query({
       ...(assignment.dueAt ? { dueAt: assignment.dueAt } : {}),
       ...(assignment.rubricId ? { rubricId: assignment.rubricId } : {}),
       published: assignment.published,
-      ...(assignment.autonomyMode ? { autonomyMode: assignment.autonomyMode } : {}),
-      ...(typeof assignment.budgetCapCents === 'number'
+      ...(assignment.autonomyMode
+        ? { autonomyMode: assignment.autonomyMode }
+        : {}),
+      ...(typeof assignment.budgetCapCents === "number"
         ? { budgetCapCents: assignment.budgetCapCents }
         : {}),
-      ...(typeof assignment.hideAiReasoning === 'boolean'
+      ...(typeof assignment.hideAiReasoning === "boolean"
         ? { hideAiReasoning: assignment.hideAiReasoning }
         : {}),
       ...(assignment.allowedFilingEvents
         ? { allowedFilingEvents: assignment.allowedFilingEvents }
         : {}),
-      scenarioTitle: scenario?.title ?? 'Scenario',
-      scenarioKey: scenario?.scenarioKey ?? '',
+      scenarioTitle: scenario?.title ?? "Scenario",
+      scenarioKey: scenario?.scenarioKey ?? "",
       status: statusForAssignmentSession(session),
-      ...(session?.caseSessionId ? { caseSessionId: session.caseSessionId } : {}),
+      ...(session?.caseSessionId
+        ? { caseSessionId: session.caseSessionId }
+        : {}),
       ...(session?.submittedAt ? { submittedAt: session.submittedAt } : {}),
       ...(session?.reviewedAt ? { reviewedAt: session.reviewedAt } : {}),
-      ...(session?.instructorNote ? { instructorNote: session.instructorNote } : {}),
-    }
+      ...(session?.instructorNote
+        ? { instructorNote: session.instructorNote }
+        : {}),
+    };
   },
-})
+});
 
 export const startSession = mutation({
   args: {
-    assignmentId: v.id('assignments'),
+    assignmentId: v.id("assignments"),
   },
-  returns: v.id('caseSessions'),
+  returns: v.id("caseSessions"),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'learner',
-      'instructor',
-      'admin',
-    ])
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ["learner"],
+    );
     if (!assignment.published) {
-      // ERROR_CODE: VALIDATION_ERROR
-      throw new Error('Assignment is not published')
+      throw validationError("Assignment is not published");
     }
-    const existing = await getAssignmentSession(ctx, assignment._id, user._id)
+    const existing = await getAssignmentSession(ctx, assignment._id, user._id);
     if (existing) {
-      return existing.caseSessionId
+      return existing.caseSessionId;
     }
-    const scenario = await ctx.db.get(assignment.scenarioId)
+    const scenario = await ctx.db.get(assignment.scenarioId);
     if (!scenario) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Scenario not found')
+      throw notFound("Scenario");
     }
-    const initialSession = createInitialSessionForScenarioDoc(scenario)
-    const caseSessionId = await ctx.db.insert('caseSessions', {
+    const initialSession = createInitialSessionForScenarioDoc(scenario);
+    const caseSessionId = await ctx.db.insert("caseSessions", {
       scenarioId: assignment.scenarioId,
       userId: user._id,
       courtPackId: initialSession.courtPackId,
       status: initialSession.status,
       procedureState: inferProcedureState(initialSession),
-      autonomyMode: assignment.autonomyMode ?? 'paused',
+      autonomyMode: assignment.autonomyMode ?? "paused",
       turnPolicy: initialSession.turnPolicy,
       ...(initialSession.sourceProfileId
         ? { sourceProfileId: initialSession.sourceProfileId }
@@ -685,10 +805,10 @@ export const startSession = mutation({
       qualityState: initialSession.qualityState,
       simulatedDate: initialSession.simulatedDate,
       nextEventSequence: 1,
-    })
-    await insertInitialSessionState(ctx, caseSessionId, initialSession)
+    });
+    await insertInitialSessionState(ctx, caseSessionId, initialSession);
     if (assignment.simulationPolicyId) {
-      const policy = await ctx.db.get(assignment.simulationPolicyId)
+      const policy = await ctx.db.get(assignment.simulationPolicyId);
       if (policy) {
         await ctx.db.patch(caseSessionId, {
           autonomyMode: policy.autonomyMode,
@@ -697,73 +817,81 @@ export const startSession = mutation({
             requireHumanApprovalFor: policy.requireHumanApprovalFor,
             stopOnDeficiency: policy.stopOnDeficiency,
           },
-        })
+        });
       }
     }
-    await ctx.db.insert('assignmentSessions', {
+    await ctx.db.insert("assignmentSessions", {
       assignmentId: assignment._id,
       caseSessionId,
       userId: user._id,
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
       caseSessionId,
-      action: 'assignment_session.started',
-      targetTable: 'assignments',
+      action: "assignment_session.started",
+      targetTable: "assignments",
       targetId: assignment._id,
-    })
-    return caseSessionId
+    });
+    return caseSessionId;
   },
-})
+});
 
 export const attachSession = mutation({
   args: {
-    assignmentId: v.id('assignments'),
-    caseSessionId: v.id('caseSessions'),
+    assignmentId: v.id("assignments"),
+    caseSessionId: v.id("caseSessions"),
   },
-  returns: v.id('caseSessions'),
+  returns: v.id("caseSessions"),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(ctx, args.assignmentId, [
-      'learner',
-      'instructor',
-      'admin',
-    ])
+    const { assignment, user, cohort } = await requireAssignmentRole(
+      ctx,
+      args.assignmentId,
+      ["learner"],
+    );
     if (!assignment.published) {
-      // ERROR_CODE: VALIDATION_ERROR
-      throw new Error('Assignment is not published')
+      throw validationError("Assignment is not published");
     }
-    const caseSession = await ctx.db.get(args.caseSessionId)
+    const caseSession = await ctx.db.get(args.caseSessionId);
     if (!caseSession || caseSession.userId !== user._id) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Case session not found')
+      throw notFound("Case session");
     }
     if (caseSession.scenarioId !== assignment.scenarioId) {
-      throw new Error('Case session scenario does not match assignment')
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Case session scenario mismatch",
+      );
     }
-    const existing = await getAssignmentSession(ctx, assignment._id, user._id)
+    const existing = await getAssignmentSession(ctx, assignment._id, user._id);
     if (existing) {
       if (existing.caseSessionId !== args.caseSessionId) {
-        // ERROR_CODE: VALIDATION_ERROR
-        throw new Error('Assignment already has a different case session')
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Assignment session already exists",
+        );
       }
-      return existing.caseSessionId
+      return existing.caseSessionId;
     }
     const linkedAssignmentSessions = await ctx.db
-      .query('assignmentSessions')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .collect()
+      .query("assignmentSessions")
+      .withIndex("by_case", (index) =>
+        index.eq("caseSessionId", args.caseSessionId),
+      )
+      .collect();
     const linkedToAnotherAssignment = linkedAssignmentSessions.some(
-      (assignmentSession) => assignmentSession.assignmentId !== args.assignmentId,
-    )
+      (assignmentSession) =>
+        assignmentSession.assignmentId !== args.assignmentId,
+    );
     if (linkedToAnotherAssignment) {
-      // ERROR_CODE: VALIDATION_ERROR
-      throw new Error('Case session is already attached to another assignment')
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Case session is already attached",
+      );
     }
     const policy = assignment.simulationPolicyId
       ? await ctx.db.get(assignment.simulationPolicyId)
-      : null
+      : null;
     if (policy) {
       await ctx.db.patch(args.caseSessionId, {
         autonomyMode: policy.autonomyMode,
@@ -772,98 +900,95 @@ export const attachSession = mutation({
           requireHumanApprovalFor: policy.requireHumanApprovalFor,
           stopOnDeficiency: policy.stopOnDeficiency,
         },
-      })
+      });
     }
-    await ctx.db.insert('assignmentSessions', {
+    await ctx.db.insert("assignmentSessions", {
       assignmentId: args.assignmentId,
       caseSessionId: args.caseSessionId,
       userId: user._id,
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
       caseSessionId: args.caseSessionId,
-      action: 'assignment_session.attached',
-      targetTable: 'assignments',
+      action: "assignment_session.attached",
+      targetTable: "assignments",
       targetId: args.assignmentId,
-    })
-    return args.caseSessionId
+    });
+    return args.caseSessionId;
   },
-})
+});
 
 export const submitSession = mutation({
   args: {
-    assignmentId: v.id('assignments'),
-    caseSessionId: v.id('caseSessions'),
+    assignmentId: v.id("assignments"),
+    caseSessionId: v.id("caseSessions"),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
     const { assignment, user, cohort } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
-      ['learner', 'instructor', 'admin'],
-    )
+      ["learner"],
+    );
     const assignmentSessions = await listAssignmentSessionsForUser(
       ctx,
       assignment._id,
       user._id,
-    )
+    );
     const assignmentSession = assignmentSessions.find(
       (candidate) => candidate.caseSessionId === args.caseSessionId,
-    )
+    );
     if (!assignmentSession) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Assignment session not found')
+      throw notFound("Assignment session");
     }
     if (isSubmittedLockActive(assignmentSession)) {
-      // ERROR_CODE: SESSION_LOCKED
-      throw new Error('Assignment session is already submitted')
+      throw sessionLocked();
     }
-    const submittedAt = new Date().toISOString()
-    await ctx.db.patch(assignmentSession._id, { submittedAt })
+    const submittedAt = new Date().toISOString();
+    await ctx.db.patch(assignmentSession._id, { submittedAt });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
       caseSessionId: args.caseSessionId,
-      action: 'assignment_session.submitted',
-      targetTable: 'assignmentSessions',
+      action: "assignment_session.submitted",
+      targetTable: "assignmentSessions",
       targetId: assignmentSession._id,
-    })
-    return null
+    });
+    return null;
   },
-})
+});
 
 export const reopenSession = mutation({
   args: {
-    assignmentSessionId: v.id('assignmentSessions'),
+    assignmentSessionId: v.id("assignmentSessions"),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const assignmentSession = await ctx.db.get(args.assignmentSessionId)
+    const assignmentSession = await ctx.db.get(args.assignmentSessionId);
     if (!assignmentSession) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Assignment session not found')
+      throw notFound("Assignment session");
     }
     const { assignment, user, cohort } = await requireAssignmentRole(
       ctx,
       assignmentSession.assignmentId,
-      ['instructor', 'admin'],
-    )
+      ["instructor", "admin"],
+    );
     await ctx.db.patch(args.assignmentSessionId, {
       reopenedAt: new Date().toISOString(),
       reopenedByUserId: user._id,
-    })
+    });
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: assignment.cohortId,
       caseSessionId: assignmentSession.caseSessionId,
-      action: 'assignment_session.reopened',
-      targetTable: 'assignmentSessions',
+      action: "assignment_session.reopened",
+      targetTable: "assignmentSessions",
       targetId: args.assignmentSessionId,
-    })
-    return null
+    });
+    return null;
   },
-})
+});

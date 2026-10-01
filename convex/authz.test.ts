@@ -51,7 +51,7 @@ const inspectInstitution = query({
     return {
       institutionId: institution._id,
       membershipRole: membership.role,
-      globalRole: user.role,
+      globalRole: user.role ?? "unset",
     };
   },
 });

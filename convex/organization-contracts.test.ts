@@ -137,13 +137,16 @@ const seedFixture = mutation({
       status: "active",
       monthlyAiBudgetCents: 0,
     });
-    await ctx.db.insert("institutionMemberships", {
-      institutionId,
-      userId,
-      role: "admin",
-      status: "active",
-      createdAt: now,
-    });
+    const institutionMembershipId = await ctx.db.insert(
+      "institutionMemberships",
+      {
+        institutionId,
+        userId,
+        role: "admin",
+        status: "active",
+        createdAt: now,
+      },
+    );
     const cohortId = await ctx.db.insert("cohorts", {
       institutionId,
       title: "Cohort",
@@ -377,6 +380,7 @@ const seedFixture = mutation({
       institutionId,
       legacyOrgId,
       userId,
+      institutionMembershipId,
       cohortId,
       caseSessionId,
       versionId,
@@ -393,6 +397,7 @@ type FixtureIds = {
   institutionId: Id<"institutions">;
   legacyOrgId: Id<"institutions">;
   userId: Id<"users">;
+  institutionMembershipId: Id<"institutionMemberships">;
   cohortId: Id<"cohorts">;
   caseSessionId: Id<"caseSessions">;
   versionId: Id<"organizationDatasetVersions">;
@@ -434,7 +439,7 @@ const acceptScope = mutation({
 const scopeRef = makeFunctionReference<"mutation">("scope:acceptScope");
 
 describe("additive schema and real registered fixture transactions", () => {
-  it("round-trips every new table and index while preserving required legacy roles", async () => {
+  it("keeps institution membership roles required and permits optional legacy roles", async () => {
     const t = convexTest(schema, modules);
     const ids = await seed(t);
     await t.run(async (ctx) => {
@@ -815,13 +820,18 @@ describe("additive schema and real registered fixture transactions", () => {
     });
     await expect(
       t.run((ctx) => ctx.db.patch(ids.userId, { role: undefined })),
+    ).resolves.toBeNull();
+    await expect(
+      t.run((ctx) =>
+        ctx.db.patch(ids.institutionMembershipId, { role: undefined }),
+      ),
     ).rejects.toThrow();
     await expect(
       t.run(async (ctx) => {
         const row = await ctx.db.query("cohortMemberships").first();
         if (row) await ctx.db.patch(row._id, { role: undefined });
       }),
-    ).rejects.toThrow();
+    ).resolves.toBeNull();
     await expect(
       t.run((ctx) =>
         ctx.db.patch(ids.versionId, {
