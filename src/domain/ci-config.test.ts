@@ -51,3 +51,42 @@ describe("continuous integration configuration", () => {
     expect(security).toContain("uses: gitleaks/gitleaks-action@v2");
   });
 });
+
+describe("blocking dependency audit workflow", () => {
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const security =
+    workflow.match(/\n  security:\n([\s\S]*?)(?=\n  \w+:|$)/)?.[1] ?? "";
+
+  it("runs the bounded audit gate unconditionally without masking failures", () => {
+    expect(security).toContain(
+      "- name: Audit dependencies\n        timeout-minutes: 3\n        run: bun scripts/dependency-audit.ts\n",
+    );
+    expect(security).not.toMatch(
+      /continue-on-error|\|\||\bif:|bun pm audit|--ignore|--audit-level|--prod/,
+    );
+    expect(security).toContain("bun-version: 1.3.11");
+    expect(security).toContain("run: bun install --frozen-lockfile");
+    expect(security.indexOf("bun install --frozen-lockfile")).toBeLessThan(
+      security.indexOf("bun scripts/dependency-audit.ts"),
+    );
+  });
+
+  it("preserves standard runners, triggers, and the existing verification/scanner steps", () => {
+    expect(workflow.match(/runs-on: .+/g)).toEqual([
+      "runs-on: ubuntu-latest",
+      "runs-on: ubuntu-latest",
+      "runs-on: ubuntu-latest",
+    ]);
+    expect(workflow).toContain("  pull_request:");
+    expect(workflow).toContain("      - main");
+    expect(workflow).toContain("      - master");
+    for (const command of [
+      "bun run typecheck",
+      "bun run test",
+      "bun run build",
+    ])
+      expect(workflow).toContain(`- run: ${command}`);
+    expect(workflow).toContain("uses: gitleaks/gitleaks-action@v2");
+    expect(workflow).toContain("uses: github/codeql-action/analyze@v3");
+  });
+});

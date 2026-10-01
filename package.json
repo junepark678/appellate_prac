@@ -23,6 +23,7 @@
     "preview": "vite preview",
     "preview:cloudflare": "DEPLOY_TARGET=cloudflare vite dev --port 3000",
     "test": "vitest run",
+    "test:cloudflare-preview": "bun scripts/cloudflare-preview-smoke.ts",
     "prepare": "husky",
     "lint": "lint-staged",
     "format": "prettier --write 'src/**/*.{ts,tsx}' 'convex/**/*.ts'"
@@ -44,9 +45,9 @@
     "@tanstack/react-router-ssr-query": "1.167.0",
     "@tanstack/react-start": "1.168.10",
     "@tanstack/router-plugin": "1.168.10",
-    "convex": "^1.39.1",
+    "convex": "^1.42.1",
     "lucide-react": "^0.545.0",
-    "pdfjs-dist": "^5.7.284",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwindcss": "^4.1.18"
@@ -62,13 +63,14 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "convex-test": "0.0.54",
     "husky": "^9.0.0",
     "jsdom": "^28.1.0",
     "lint-staged": "^15.0.0",
     "prettier": "^3.0.0",
-    "nitro": "^3.0.260522-beta",
+    "nitro": "^3.0.260903-beta",
     "typescript": "^6.0.2",
-    "vite": "^8.0.0",
+    "vite": "^8.0.16",
     "vitest": "^4.1.5",
     "wrangler": "^4.94.0"
   }

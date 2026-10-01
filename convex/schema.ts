@@ -19,6 +19,7 @@
 
 import { defineSchema, defineTable } from 'convex/server'
 import { v } from 'convex/values'
+import { organizationRecordValidators, organizationKindValidator } from './organizationContracts'
 
 import {
   caseStatusValidator,
@@ -52,6 +53,9 @@ export default defineSchema({
   }).index('by_auth_subject', ['authSubject']),
 
   institutions: defineTable({
+    kind: v.optional(organizationKindValidator),
+    personalOwnerUserId: v.optional(v.id('users')),
+    createdAt: v.optional(v.string()),
     name: v.string(),
     slug: v.string(),
     clerkOrganizationId: v.optional(v.string()),
@@ -59,7 +63,8 @@ export default defineSchema({
     monthlyAiBudgetCents: v.number(),
   })
     .index('by_slug', ['slug'])
-    .index('by_clerk_org', ['clerkOrganizationId']),
+    .index('by_clerk_org', ['clerkOrganizationId'])
+    .index('by_personal_owner', ['personalOwnerUserId']),
 
   institutionMemberships: defineTable({
     institutionId: v.id('institutions'),
@@ -344,6 +349,7 @@ export default defineSchema({
     .index('by_status', ['status']),
 
   scenarios: defineTable({
+    institutionId: v.optional(v.id('institutions')),
     scenarioKey: v.string(),
     visibility: v.optional(v.union(v.literal('public_template'), v.literal('private'))),
     scenarioFamilyKey: v.optional(v.string()),
@@ -378,7 +384,8 @@ export default defineSchema({
     .index('by_published', ['published'])
     .index('by_visibility', ['visibility'])
     .index('by_owner', ['ownerUserId'])
-    .index('by_family_revision', ['scenarioFamilyKey', 'revision']),
+    .index('by_family_revision', ['scenarioFamilyKey', 'revision'])
+    .index('by_institution', ['institutionId']),
 
   scenarioDocumentAssets: defineTable({
     scenarioId: v.id('scenarios'),
@@ -423,6 +430,7 @@ export default defineSchema({
   }).index('by_scenario', ['scenarioId']),
 
   sourceCases: defineTable({
+    caseSessionId: v.optional(v.id('caseSessions')),
     scenarioId: v.id('scenarios'),
     sourceSystem: v.union(v.literal('courtlistener'), v.literal('recap'), v.literal('manual')),
     externalId: v.string(),
@@ -432,6 +440,7 @@ export default defineSchema({
   }).index('by_scenario', ['scenarioId']),
 
   caseSessions: defineTable({
+    institutionId: v.optional(v.id('institutions')),
     scenarioId: v.id('scenarios'),
     userId: v.id('users'),
     courtPackId: v.string(),
@@ -446,7 +455,8 @@ export default defineSchema({
     nextEventSequence: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
-    .index('by_scenario', ['scenarioId']),
+    .index('by_scenario', ['scenarioId'])
+    .index('by_institution', ['institutionId']),
 
   participants: defineTable({
     caseSessionId: v.id('caseSessions'),
@@ -717,6 +727,7 @@ export default defineSchema({
     .index('by_turn', ['turnId']),
 
   integrationEvents: defineTable({
+    institutionId: v.optional(v.id('institutions')),
     userId: v.id('users'),
     caseSessionId: v.optional(v.id('caseSessions')),
     provider: v.union(v.literal('openrouter'), v.literal('courtlistener')),
@@ -971,4 +982,52 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_user_version', ['userId', 'version']),
+
+  organizationDatasets: defineTable(organizationRecordValidators.organizationDatasets)
+    .index('by_institution', ['institutionId'])
+    .index('by_institution_kind', ['institutionId', 'kind']),
+
+  organizationDatasetVersions: defineTable(organizationRecordValidators.organizationDatasetVersions)
+    .index('by_dataset_version', ['datasetId', 'version'])
+    .index('by_dataset_state', ['datasetId', 'state'])
+    .index('by_institution', ['institutionId']),
+
+  organizationDatasetAssets: defineTable(organizationRecordValidators.organizationDatasetAssets)
+    .index('by_version', ['versionId'])
+    .index('by_version_name', ['versionId', 'normalizedFileName'])
+    .index('by_storage', ['storageId']),
+
+  publicCatalogEntries: defineTable(organizationRecordValidators.publicCatalogEntries)
+    .index('by_dataset', ['datasetId'])
+    .index('by_published', ['publishedAt'])
+    .searchIndex('by_search', { searchField: 'searchText', filterFields: ['kind'] }),
+
+  organizationDatasetImports: defineTable(organizationRecordValidators.organizationDatasetImports)
+    .index('by_institution', ['institutionId'])
+    .index('by_institution_version', ['institutionId', 'upstreamVersionId']),
+
+  organizationImportedAssets: defineTable(organizationRecordValidators.organizationImportedAssets)
+    .index('by_import', ['importId'])
+    .index('by_import_name', ['importId', 'fileName']),
+
+  documentUploadIntents: defineTable(organizationRecordValidators.documentUploadIntents)
+    .index('by_user', ['userId'])
+    .index('by_case', ['caseSessionId'])
+    .index('by_dataset_version', ['datasetVersionId'])
+    .index('by_expiry', ['expiresAt']),
+
+  documentUploadChunks: defineTable(organizationRecordValidators.documentUploadChunks)
+    .index('by_intent_index', ['intentId', 'index']),
+
+  organizationMigrationFindings: defineTable(organizationRecordValidators.organizationMigrationFindings)
+    .index('by_key_record', ['migrationKey', 'tableName', 'recordId']),
+
+  organizationCatalogSubscriptions: defineTable(organizationRecordValidators.organizationCatalogSubscriptions)
+    .index('by_org_dataset', ['institutionId', 'upstreamDatasetId'])
+    .index('by_dataset_mode', ['upstreamDatasetId', 'mode']),
+
+  organizationCatalogUpdateEvents: defineTable(organizationRecordValidators.organizationCatalogUpdateEvents)
+    .index('by_subscription', ['subscriptionId'])
+    .index('by_institution', ['institutionId'])
+    .index('by_attempt_event', ['subscriptionId', 'subscriptionRevision', 'versionId', 'event']),
 })
