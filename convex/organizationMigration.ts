@@ -2494,32 +2494,19 @@ export const applyBatch = internalMutation({
       };
 
       if (outcome === "ready" && row.classification.writePlan) {
-        try {
-          write = await applyWritePlan(
-            ctx,
-            prepared.work,
-            row.row,
-            row.classification.writePlan,
-            Date.now(),
-            ensuredPersonal,
-          );
-          if (write.outcome === "skipped") {
-            outcome = "ambiguous";
-            reason = write.reason;
-          } else if (write.outcome === "updated") {
-            changed += 1;
-          }
-        } catch (error) {
-          if (!(error instanceof InspectionWorkBudgetExceeded)) throw error;
+        write = await applyWritePlan(
+          ctx,
+          prepared.work,
+          row.row,
+          row.classification.writePlan,
+          Date.now(),
+          ensuredPersonal,
+        );
+        if (write.outcome === "skipped") {
           outcome = "ambiguous";
-          reason = "apply_work_budget_exhausted";
-          write = {
-            outcome: "skipped",
-            reason,
-            field: row.classification.writePlan.field,
-            before: null,
-            after: null,
-          };
+          reason = write.reason;
+        } else if (write.outcome === "updated") {
+          changed += 1;
         }
       }
 

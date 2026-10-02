@@ -21,6 +21,7 @@ import { makeFunctionReference } from "convex/server";
 import { convexTest } from "convex-test";
 import { describe, expect, it } from "vitest";
 import type { TestConvex } from "convex-test";
+import type { Id } from "./_generated/dataModel";
 import {
   classifyAssignmentSessionOwnership,
   classifyAuditLogOwnership,
@@ -1867,7 +1868,150 @@ describe("organization migration inspection contract", () => {
     ).toHaveLength(0);
   });
 
-  it("reclassifies changed assignment parents and never overwrites a conflicting scope", async () => {
+  it("rolls back a page when apply exhausts its shared budget, then resumes smaller pages", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await t.run(async (ctx) => {
+      const ownerIds: Id<"users">[] = [];
+      const sessionIds: Id<"caseSessions">[] = [];
+      for (let index = 0; index < 98; index += 1) {
+        ownerIds.push(
+          await ctx.db.insert("users", {
+            authSubject: `test|budget-owner-${index}`,
+            displayName: `Budget owner ${index}`,
+            role: "admin",
+            monthlyAiBudgetCents: 17,
+          }),
+        );
+      }
+      const scenarioId = await ctx.db.insert("scenarios", {
+        scenarioKey: "budget-private-scenario",
+        visibility: "private",
+        title: "Budget fixture",
+        source: "synthetic",
+        courtPackId: "ca4",
+        shortCaption: "Fixture v. Fixture",
+        lowerTribunal: "district court",
+        natureOfSuit: "civil",
+        proceduralPosture: "appeal",
+        issuesPresented: [],
+        meritsRecord: [],
+        ownerUserId: ownerIds[0]!,
+        published: false,
+      });
+      for (const userId of ownerIds) {
+        sessionIds.push(
+          await ctx.db.insert("caseSessions", {
+            scenarioId,
+            userId,
+            courtPackId: "ca4",
+            status: "active",
+            simulatedDate: "2026-09-30T00:00:00.000Z",
+          }),
+        );
+      }
+      const institutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Budget assignment organization",
+        slug: "budget-assignment-organization",
+        status: "active",
+        monthlyAiBudgetCents: 0,
+      });
+      const cohortId = await ctx.db.insert("cohorts", {
+        institutionId,
+        title: "Budget cohort",
+        term: "2026",
+        startsAt: "2026-09-30T00:00:00.000Z",
+        endsAt: "2027-01-01T00:00:00.000Z",
+        archived: false,
+      });
+      const assignmentId = await ctx.db.insert("assignments", {
+        cohortId,
+        scenarioId,
+        title: "Budget assignment",
+        published: true,
+        createdByUserId: ownerIds[0]!,
+        createdAt: "2026-09-30T00:00:00.000Z",
+      });
+      await ctx.db.insert("assignmentSessions", {
+        assignmentId,
+        caseSessionId: sessionIds[97]!,
+        userId: ownerIds[97]!,
+      });
+      return { ownerIds, sessionIds, institutionId };
+    });
+
+    await expect(
+      t.mutation(applyRef, { table: "caseSessions", limit: 100 }),
+    ).rejects.toThrow();
+
+    const afterRollback = await t.run(async (ctx) => ({
+      institutions: await ctx.db.query("institutions").collect(),
+      memberships: await ctx.db.query("institutionMemberships").collect(),
+      sessions: await Promise.all(
+        fixture.sessionIds.map((sessionId) => ctx.db.get(sessionId)),
+      ),
+      findings: await ctx.db.query("organizationMigrationFindings").collect(),
+    }));
+    expect(afterRollback.institutions).toHaveLength(1);
+    expect(afterRollback.institutions[0]?._id).toBe(fixture.institutionId);
+    expect(afterRollback.memberships).toHaveLength(0);
+    expect(afterRollback.sessions).toHaveLength(98);
+    expect(
+      afterRollback.sessions.every((session) => !session?.institutionId),
+    ).toBe(true);
+    expect(afterRollback.findings).toHaveLength(0);
+
+    const pages: ApplyResult[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const page: ApplyResult = await t.mutation(applyRef, {
+        table: "caseSessions",
+        cursor,
+        limit: 1,
+      });
+      pages.push(page);
+      if (page.isDone) break;
+      cursor = page.nextCursor;
+    }
+    expect(pages).toHaveLength(98);
+    expect(pages.reduce((total, page) => total + page.changed, 0)).toBe(98);
+
+    const afterResume = await t.run(async (ctx) => ({
+      institutions: await ctx.db.query("institutions").collect(),
+      memberships: await ctx.db.query("institutionMemberships").collect(),
+      sessions: await Promise.all(
+        fixture.sessionIds.map((sessionId) => ctx.db.get(sessionId)),
+      ),
+      findings: await ctx.db.query("organizationMigrationFindings").collect(),
+    }));
+    const personalInstitutions = afterResume.institutions.filter(
+      ({ kind }) => kind === "personal",
+    );
+    expect(personalInstitutions).toHaveLength(97);
+    expect(
+      new Set(
+        personalInstitutions.map(
+          ({ personalOwnerUserId }) => personalOwnerUserId,
+        ),
+      ).size,
+    ).toBe(97);
+    expect(afterResume.memberships).toHaveLength(97);
+    expect(
+      new Set(afterResume.memberships.map(({ userId }) => userId)).size,
+    ).toBe(97);
+    expect(
+      afterResume.memberships.every(
+        ({ role, status }) => role === "admin" && status === "active",
+      ),
+    ).toBe(true);
+    expect(
+      afterResume.sessions.every((session) => session?.institutionId),
+    ).toBe(true);
+    expect(afterResume.sessions[97]?.institutionId).toBe(fixture.institutionId);
+    expect(afterResume.findings).toHaveLength(0);
+  });
+
+  it("reclassifies changed assignment parents before apply and preserves conflicting scope", async () => {
     const t = convexTest(schema, modules);
     const owner = await seedLegacyDocument(t, "test|parent-race-owner");
     const parents = await t.run(async (ctx) => {
@@ -1933,33 +2077,21 @@ describe("organization migration inspection contract", () => {
       ),
     ).toMatchObject({ outcome: "ready" });
 
-    await Promise.all([
-      t.mutation(applyRef, { table: "caseSessions", limit: 100 }),
-      t.run((ctx) =>
-        ctx.db.patch(parents.cohortId, {
-          institutionId: parents.institutionB,
-        }),
-      ),
-    ]);
-    const sessionAfterConcurrentWork = await t.run((ctx) =>
+    await t.run((ctx) =>
+      ctx.db.patch(parents.cohortId, {
+        institutionId: parents.institutionB,
+      }),
+    );
+    const afterParentChange = await t.mutation(applyRef, {
+      table: "caseSessions",
+      limit: 100,
+    });
+    expect(afterParentChange.changed).toBe(1);
+    expect(afterParentChange.ambiguous).toBe(1);
+    const sessionAfterParentChange = await t.run((ctx) =>
       ctx.db.get(owner.caseSessionId),
     );
-    expect(sessionAfterConcurrentWork?.institutionId).toBeTruthy();
-
-    if (sessionAfterConcurrentWork?.institutionId === parents.institutionA) {
-      const verification = await t.mutation(applyRef, {
-        table: "caseSessions",
-        limit: 100,
-      });
-      expect(verification.ambiguous).toBeGreaterThan(0);
-      expect(
-        await t.run((ctx) => ctx.db.get(owner.caseSessionId)),
-      ).toMatchObject({ institutionId: parents.institutionA });
-    } else {
-      expect(sessionAfterConcurrentWork?.institutionId).toBe(
-        parents.institutionB,
-      );
-    }
+    expect(sessionAfterParentChange?.institutionId).toBe(parents.institutionB);
 
     const conflict = await t.mutation(applyRef, {
       table: "caseSessions",
