@@ -17,13 +17,18 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import type { UserIdentity } from 'convex/server'
+import type { UserIdentity } from "convex/server";
 
-import type { Doc } from './_generated/dataModel'
-import type { ActionCtx, MutationCtx, QueryCtx } from './_generated/server'
-import { authRequired, providerError, userNotInitialized } from './errors'
+import type { Doc } from "./_generated/dataModel";
+import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
+import {
+  authRequired,
+  providerError,
+  userNotInitialized,
+  validationError,
+} from "./errors";
 
-type AuthenticatedCtx = Pick<ActionCtx | QueryCtx | MutationCtx, 'auth'>
+type AuthenticatedCtx = Pick<ActionCtx | QueryCtx | MutationCtx, "auth">;
 
 function displayNameFromIdentity(identity: UserIdentity) {
   return (
@@ -31,79 +36,79 @@ function displayNameFromIdentity(identity: UserIdentity) {
     identity.email ??
     identity.preferredUsername ??
     identity.nickname ??
-    'Account'
-  )
+    "Account"
+  );
 }
 
 export async function requireIdentity(ctx: AuthenticatedCtx) {
-  const identity = await ctx.auth.getUserIdentity()
+  const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
-    throw authRequired()
+    throw authRequired();
   }
-  return identity
+  return identity;
 }
 
 export async function getCurrentUser(ctx: QueryCtx | MutationCtx) {
-  const identity = await requireIdentity(ctx)
+  const identity = await requireIdentity(ctx);
   const user = await ctx.db
-    .query('users')
-    .withIndex('by_auth_subject', (query) =>
-      query.eq('authSubject', identity.tokenIdentifier),
+    .query("users")
+    .withIndex("by_auth_subject", (query) =>
+      query.eq("authSubject", identity.tokenIdentifier),
     )
-    .unique()
+    .unique();
 
-  return { identity, user }
+  return { identity, user };
 }
 
 export async function requireCurrentUser(ctx: QueryCtx | MutationCtx) {
-  const { identity, user } = await getCurrentUser(ctx)
+  const { identity, user } = await getCurrentUser(ctx);
   if (!user) {
-    throw userNotInitialized()
+    throw userNotInitialized();
   }
-  return { identity, user }
+  return { identity, user };
 }
 
 /** Resolve an initialized account without exposing its legacy global role. */
 export async function requireOrganizationUser(ctx: QueryCtx | MutationCtx) {
-  const { user } = await requireCurrentUser(ctx)
-  return { userId: user._id }
+  const { user } = await requireCurrentUser(ctx);
+  return { userId: user._id };
 }
 
-export async function requireAdminUser(ctx: QueryCtx | MutationCtx) {
-  const result = await requireCurrentUser(ctx)
-  if (result.user.role !== 'admin') {
-    throw new Error('Admin role required')
-  }
-  return result
+export async function requireAdminUser(
+  ctx: QueryCtx | MutationCtx,
+): Promise<never> {
+  await requireCurrentUser(ctx);
+  throw validationError("Use organization membership management");
 }
 
-export async function upsertCurrentUserDoc(ctx: MutationCtx): Promise<Doc<'users'>> {
-  const identity = await requireIdentity(ctx)
+export async function upsertCurrentUserDoc(
+  ctx: MutationCtx,
+): Promise<Doc<"users">> {
+  const identity = await requireIdentity(ctx);
   const existing = await ctx.db
-    .query('users')
-    .withIndex('by_auth_subject', (query) =>
-      query.eq('authSubject', identity.tokenIdentifier),
+    .query("users")
+    .withIndex("by_auth_subject", (query) =>
+      query.eq("authSubject", identity.tokenIdentifier),
     )
-    .unique()
-  const displayName = displayNameFromIdentity(identity)
+    .unique();
+  const displayName = displayNameFromIdentity(identity);
 
   if (existing) {
     if (existing.displayName !== displayName) {
-      await ctx.db.patch(existing._id, { displayName })
-      return { ...existing, displayName }
+      await ctx.db.patch(existing._id, { displayName });
+      return { ...existing, displayName };
     }
-    return existing
+    return existing;
   }
 
-  const userId = await ctx.db.insert('users', {
+  const userId = await ctx.db.insert("users", {
     authSubject: identity.tokenIdentifier,
     displayName,
-    role: 'student',
     monthlyAiBudgetCents: 250,
-  })
-  const user = await ctx.db.get(userId)
+  });
+  const user = await ctx.db.get(userId);
   if (!user) {
-    throw providerError('convex', 500)
+    throw providerError("convex", 500);
   }
-  return user
+  return user;
 }

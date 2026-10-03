@@ -19,12 +19,12 @@
 
 import { v } from 'convex/values'
 
-import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
+import { internalAction, internalMutation, internalQuery, mutation, query } from './_generated/server'
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
-import { requireAdminUser, requireCurrentUser } from './authHelpers'
+import { requireCurrentUser } from './authHelpers'
 import { createSyntheticPdf, wrapPdfWords } from '../src/domain/synthetic-pdf'
 import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
@@ -565,14 +565,13 @@ export const listPublishedRecords = query({
   },
 })
 
-export const seedPublished = mutation({
+export const seedPublished = internalMutation({
   args: {},
   returns: v.object({
     inserted: v.number(),
     updated: v.number(),
   }),
   handler: async (ctx) => {
-    await requireAdminUser(ctx)
     let inserted = 0
     let updated = 0
 
@@ -700,25 +699,15 @@ async function syntheticScenarioAssetBlob(scenario: Scenario, asset: ScenarioDoc
   return { blob, buffer }
 }
 
-export const requireAdminForAction = internalQuery({
-  args: {},
-  returns: v.null(),
-  handler: async (ctx) => {
-    await requireAdminUser(ctx)
-    return null
-  },
-})
-
 const maxScenarioAssetBytes = 30 * 1024 * 1024
 
-export const migrateBundledScenarioPdfAssets = action({
+export const migrateBundledScenarioPdfAssets = internalAction({
   args: {},
   returns: v.object({
     uploaded: v.number(),
     skipped: v.number(),
   }),
   handler: async (ctx) => {
-    await ctx.runQuery(internal.scenarios.requireAdminForAction, {})
     let uploaded = 0
     let skipped = 0
     for (const scenario of seedScenarios) {

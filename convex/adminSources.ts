@@ -20,16 +20,17 @@
 import { v } from "convex/values";
 
 import {
-  action,
+  internalAction,
   internalMutation,
-  internalQuery,
   mutation,
   query,
 } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireCurrentUser } from "./authHelpers";
 import { writeAuditLog } from "./authz";
+import { validationError } from "./errors";
 import { fourthCircuitCivilAppealSourceManifest } from "../src/domain/rules/source-manifest";
 import {
   ca4CourtSourceVersions,
@@ -53,22 +54,10 @@ function simpleHash(value: string) {
   return hash.toString(16).padStart(8, "0");
 }
 
-async function requireAdmin(ctx: ReadCtx) {
-  const { user } = await requireCurrentUser(ctx);
-  if (user.role !== "admin") {
-    throw new Error("Admin role required");
-  }
-  return user;
+async function requireAdmin(ctx: ReadCtx): Promise<Doc<"users">> {
+  await requireCurrentUser(ctx);
+  throw validationError("Use organization membership management");
 }
-
-export const requireAdminForAction = internalQuery({
-  args: {},
-  returns: v.null(),
-  handler: async (ctx) => {
-    await requireAdmin(ctx);
-    return null;
-  },
-});
 
 export const seedSourceManifest = mutation({
   args: {},
@@ -243,7 +232,7 @@ async function sha256Hex(buffer: ArrayBuffer) {
     .join("");
 }
 
-export const storeCa4FormPdfArtifacts = action({
+export const storeCa4FormPdfArtifacts = internalAction({
   args: {},
   returns: v.object({
     stored: v.number(),
@@ -256,7 +245,6 @@ export const storeCa4FormPdfArtifacts = action({
     ),
   }),
   handler: async (ctx) => {
-    await ctx.runQuery(internal.adminSources.requireAdminForAction, {});
     let stored = 0;
     const failed: Array<{ label: string; sourceUrl: string; reason: string }> =
       [];
@@ -672,14 +660,18 @@ export const listSourceFreshness = query({
   },
 });
 
-export const promoteCourtPackRelease = mutation({
+/**
+ * Trusted internal path retains production evidence gates for a future
+ * organization-scoped caller. The legacy public mutation below stays closed.
+ */
+export const promoteCourtPackReleaseInternal = internalMutation({
   args: {
+    actorUserId: v.id("users"),
     courtPackId: v.string(),
     simulationEvalSnapshotJson: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const user = await requireAdmin(ctx);
     const snapshot: unknown = JSON.parse(args.simulationEvalSnapshotJson);
     const evalIssues = validateEvalFreshness(snapshot);
     if (evalIssues.length) {
@@ -701,12 +693,24 @@ export const promoteCourtPackRelease = mutation({
       published: true,
     });
     await writeAuditLog(ctx, {
-      actorUserId: user._id,
+      actorUserId: args.actorUserId,
       action: "court_pack.promoted_to_production",
       targetTable: "courtPacks",
       targetId: courtPack._id,
       metadata: { courtPackId: args.courtPackId },
     });
+    return null;
+  },
+});
+
+export const promoteCourtPackRelease = mutation({
+  args: {
+    courtPackId: v.string(),
+    simulationEvalSnapshotJson: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
     return null;
   },
 });

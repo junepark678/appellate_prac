@@ -19,7 +19,15 @@
 
 import { describe, expect, it } from 'vitest'
 
+import { internal } from './_generated/api'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
+import { convexTest } from 'convex-test'
+import schema from './schema'
+
+const scenarioModules = {
+  './_generated/server.ts': () => import('./_generated/server'),
+  './scenarios.ts': () => import('./scenarios'),
+}
 
 describe('seed scenario assets', () => {
   it('does not expose bundled synthetic trial-record PDFs as public static URLs', () => {
@@ -30,5 +38,22 @@ describe('seed scenario assets', () => {
         expect(assetWithLegacyUrls.publicUrl).toBeUndefined()
       }
     }
+  })
+
+  it('keeps bundled scenario publishing and PDF migration behind internal entrypoints', async () => {
+    // convexTest uses only ephemeral in-memory database and storage state.
+    const t = convexTest(schema, scenarioModules)
+    const seeded = await t.mutation(internal.scenarios.seedPublished, {})
+    expect(seeded.inserted + seeded.updated).toBeGreaterThan(0)
+
+    const migrated = await t.action(
+      internal.scenarios.migrateBundledScenarioPdfAssets,
+      {},
+    )
+    expect(migrated.uploaded + migrated.skipped).toBeGreaterThan(0)
+    const storedAssets = await t.run((ctx) =>
+      ctx.db.query('scenarioDocumentAssets').collect(),
+    )
+    expect(storedAssets).toHaveLength(migrated.uploaded)
   })
 })

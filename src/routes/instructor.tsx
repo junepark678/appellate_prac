@@ -30,18 +30,37 @@ export const Route = createFileRoute('/instructor')({ component: InstructorHome 
 
 function InstructorHome() {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
+  if (pathname !== '/instructor') {
+    return <Outlet />
+  }
+  return <InstructorDashboard />
+}
+
+export function InstructorDashboard() {
   const cohorts = useQuery(api.cohorts.listMine, {})
-  const institutions = useQuery(api.cohorts.listInstitutions, {})
+  const organizations = useQuery(api.organizations.listMine, {})
+  const teachingInstitutionIds = new Set(
+    (organizations ?? [])
+      .filter((organization) =>
+        organization.role === 'instructor' || organization.role === 'admin',
+      )
+      .map((organization) => organization.institutionId),
+  )
+  const canCreateCohort = teachingInstitutionIds.size > 0
+  const institutions = useQuery(
+    api.cohorts.listInstitutions,
+    canCreateCohort ? {} : 'skip',
+  )
+  const manageableInstitutions = institutions?.filter((institution) =>
+    teachingInstitutionIds.has(institution.id),
+  )
   const createCohort = useMutation(api.cohorts.createCohort)
   const [title, setTitle] = useState('')
   const [institutionId, setInstitutionId] = useState('')
 
-  if (pathname !== '/instructor') {
-    return <Outlet />
-  }
-
   return (
     <AppFrame title="Course Dashboard">
+      {canCreateCohort && (
       <section className="mb-5 rounded border border-slate-200 bg-white p-4">
         <h2 className="font-semibold">Create cohort</h2>
         <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]">
@@ -52,7 +71,7 @@ function InstructorHome() {
             aria-label="Institution"
           >
             <option value="">Institution</option>
-            {institutions?.map((institution) => (
+            {manageableInstitutions?.map((institution) => (
               <option key={institution.id} value={institution.id}>
                 {institution.name}
               </option>
@@ -82,6 +101,7 @@ function InstructorHome() {
           </button>
         </div>
       </section>
+      )}
       <div className="grid gap-3">
         {cohorts?.length === 0 ? <EmptyState>No cohorts available.</EmptyState> : null}
         {cohorts?.map((cohort) => (
