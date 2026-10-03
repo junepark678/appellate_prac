@@ -66,7 +66,7 @@
     "convex-test": "0.0.54",
     "husky": "^9.0.0",
     "jsdom": "^28.1.0",
-    "lint-staged": "^15.0.0",
+    "lint-staged": "17.6.0",
     "prettier": "^3.0.0",
     "nitro": "^3.0.260903-beta",
     "typescript": "^6.0.2",
