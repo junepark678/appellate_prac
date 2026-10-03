@@ -341,6 +341,22 @@ describe("cohort and organization membership cutover", () => {
         .unique(),
     );
     expect(learnerEnrollment?.role).toBeUndefined();
+    const enrollmentAudit = await t.run((ctx) =>
+      ctx.db
+        .query("auditLog")
+        .withIndex("by_action", (index) =>
+          index.eq("action", "cohort.member_enrolled"),
+        )
+        .collect()
+        .then((events) =>
+          events.find(
+            (event) =>
+              event.cohortId === fixture.cohortA &&
+              event.targetTable === "cohortMemberships",
+          ),
+        ),
+    );
+    expect(enrollmentAudit?.targetId).toBe(learnerEnrollment?._id);
     await expectCode(
       t.withIdentity(identity("organization-admin")).mutation(addMemberRef, {
         cohortId: fixture.cohortA,

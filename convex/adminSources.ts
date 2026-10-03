@@ -20,9 +20,8 @@
 import { v } from "convex/values";
 
 import {
-  action,
+  internalAction,
   internalMutation,
-  internalQuery,
   mutation,
   query,
 } from "./_generated/server";
@@ -59,15 +58,6 @@ async function requireAdmin(ctx: ReadCtx): Promise<Doc<"users">> {
   await requireCurrentUser(ctx);
   throw validationError("Use organization membership management");
 }
-
-export const requireAdminForAction = internalQuery({
-  args: {},
-  returns: v.null(),
-  handler: async (ctx) => {
-    await requireAdmin(ctx);
-    return null;
-  },
-});
 
 export const seedSourceManifest = mutation({
   args: {},
@@ -242,7 +232,7 @@ async function sha256Hex(buffer: ArrayBuffer) {
     .join("");
 }
 
-export const storeCa4FormPdfArtifacts = action({
+export const storeCa4FormPdfArtifacts = internalAction({
   args: {},
   returns: v.object({
     stored: v.number(),
@@ -255,7 +245,6 @@ export const storeCa4FormPdfArtifacts = action({
     ),
   }),
   handler: async (ctx) => {
-    await ctx.runQuery(internal.adminSources.requireAdminForAction, {});
     let stored = 0;
     const failed: Array<{ label: string; sourceUrl: string; reason: string }> =
       [];

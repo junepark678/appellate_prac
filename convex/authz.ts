@@ -114,15 +114,15 @@ async function requireScopedMembership(
       index.eq("institutionId", institution._id).eq("userId", user._id),
     )
     .collect();
-  const activeMemberships = memberships.filter((membership) =>
-    isOrganizationMembershipActive(institution, membership, Date.now()),
-  );
-  if (activeMemberships.length > 1) {
+  if (memberships.length > 1) {
     throw new ConvexError(
       AppErrorCode.CONFLICT,
       "Organization membership is ambiguous",
     );
   }
+  const activeMemberships = memberships.filter((membership) =>
+    isOrganizationMembershipActive(institution, membership, Date.now()),
+  );
   const membership = activeMemberships[0];
   if (!membership) throw notFound("Organization");
   return membership;

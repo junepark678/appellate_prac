@@ -632,6 +632,13 @@ export const listMine = query({
       const cohort = await ctx.db.get(enrollment.cohortId);
       if (!cohort || cohort.archived) continue;
       const institution = await ctx.db.get(cohort.institutionId);
+      if (
+        institution &&
+        (institution.kind ?? "shared") === "personal" &&
+        institution.personalOwnerUserId !== user._id
+      ) {
+        continue;
+      }
       const organizationMemberships = await ctx.db
         .query("institutionMemberships")
         .withIndex("by_institution_user", (index) =>
@@ -640,6 +647,12 @@ export const listMine = query({
             .eq("userId", user._id),
         )
         .collect();
+      if (organizationMemberships.length > 1) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Organization membership is ambiguous",
+        );
+      }
       const activeMemberships = organizationMemberships.filter(
         (organizationMembership) =>
           isOrganizationMembershipActive(
@@ -648,12 +661,6 @@ export const listMine = query({
             Date.now(),
           ),
       );
-      if (activeMemberships.length > 1) {
-        throw new ConvexError(
-          AppErrorCode.CONFLICT,
-          "Organization membership is ambiguous",
-        );
-      }
       if (!activeMemberships[0]) continue;
       const cohortKey = cohort._id as string;
       if (seenCohorts.has(cohortKey)) {

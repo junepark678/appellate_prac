@@ -174,16 +174,16 @@ export const listInstitutions = query({
     for (const entries of byInstitution.values()) {
       const firstMembership = entries[0];
       if (!firstMembership) continue;
-      const institution = await ctx.db.get(firstMembership.institutionId);
-      const active = entries.filter((membership) =>
-        isOrganizationMembershipActive(institution, membership, now),
-      );
-      if (active.length > 1) {
+      if (entries.length > 1) {
         throw new ConvexError(
           AppErrorCode.CONFLICT,
           "Organization membership is ambiguous",
         );
       }
+      const institution = await ctx.db.get(firstMembership.institutionId);
+      const active = entries.filter((membership) =>
+        isOrganizationMembershipActive(institution, membership, now),
+      );
       if (!active[0] || !institution) continue;
       if (
         (institution.kind ?? "shared") === "personal" &&
@@ -286,7 +286,7 @@ export const addMember = mutation({
     const activeTargetMemberships = targetMemberships.filter((membership) =>
       isOrganizationMembershipActive(institution, membership, Date.now()),
     );
-    if (activeTargetMemberships.length > 1) {
+    if (targetMemberships.length > 1) {
       throw new ConvexError(
         AppErrorCode.CONFLICT,
         "Organization membership is ambiguous",
@@ -306,19 +306,19 @@ export const addMember = mutation({
         "Cohort enrollment is ambiguous",
       );
     }
-    if (!existing[0]) {
-      await ctx.db.insert("cohortMemberships", {
+    const enrollmentId =
+      existing[0]?._id ??
+      (await ctx.db.insert("cohortMemberships", {
         cohortId: args.cohortId,
         userId: args.userId,
-      });
-    }
+      }));
     await writeAuditLog(ctx, {
       actorUserId: user._id,
       institutionId: cohort.institutionId,
       cohortId: args.cohortId,
       action: "cohort.member_enrolled",
       targetTable: "cohortMemberships",
-      targetId: args.userId,
+      targetId: enrollmentId,
     });
     return null;
   },
@@ -640,15 +640,15 @@ export const listMine = query({
       const firstMembership = entries[0];
       if (!firstMembership) continue;
       const institution = await ctx.db.get(firstMembership.institutionId);
-      const activeMemberships = entries.filter((membership) =>
-        isOrganizationMembershipActive(institution, membership, now),
-      );
-      if (activeMemberships.length > 1) {
+      if (entries.length > 1) {
         throw new ConvexError(
           AppErrorCode.CONFLICT,
           "Organization membership is ambiguous",
         );
       }
+      const activeMemberships = entries.filter((membership) =>
+        isOrganizationMembershipActive(institution, membership, now),
+      );
       const membership = activeMemberships[0];
       if (!institution || !membership) continue;
       if (
@@ -757,6 +757,12 @@ export const listRoster = query({
             .eq("userId", user._id),
         )
         .collect();
+      if (organizationMemberships.length > 1) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Organization membership is ambiguous",
+        );
+      }
       const activeMemberships = organizationMemberships.filter(
         (organizationMembership) =>
           isOrganizationMembershipActive(
@@ -765,12 +771,6 @@ export const listRoster = query({
             Date.now(),
           ),
       );
-      if (activeMemberships.length > 1) {
-        throw new ConvexError(
-          AppErrorCode.CONFLICT,
-          "Organization membership is ambiguous",
-        );
-      }
       const organizationMembership = activeMemberships[0];
       if (!organizationMembership) continue;
       rows.push({

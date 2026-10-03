@@ -35,17 +35,31 @@ type InviteRole = "learner" | "instructor";
 
 function CohortDetail() {
   const { cohortId } = Route.useParams();
-  const assignments = useQuery(api.assignments.listForCohort, {
-    cohortId: cohortId as Id<"cohorts">,
-  });
-  const roster = useQuery(api.cohorts.listRoster, {
-    cohortId: cohortId as Id<"cohorts">,
-  });
-  const scenarios = useQuery(api.scenarios.listPublishedRecords, {});
-  const createAssignment = useMutation(api.assignments.create);
-  const inviteMembers = useMutation(api.cohorts.inviteMembers);
+  return <CohortDetailPage cohortId={cohortId as Id<"cohorts">} />;
+}
+
+export function CohortDetailPage({
+  cohortId,
+}: {
+  cohortId: Id<"cohorts">;
+}) {
   const cohorts = useQuery(api.cohorts.listMine, {});
   const cohort = cohorts?.find((candidate) => candidate.id === cohortId);
+  const canManageCohort =
+    cohort?.role === "instructor" || cohort?.role === "admin";
+  const assignments = useQuery(api.assignments.listForCohort, {
+    cohortId,
+  });
+  const roster = useQuery(
+    api.cohorts.listRoster,
+    canManageCohort ? { cohortId } : "skip",
+  );
+  const scenarios = useQuery(
+    api.scenarios.listPublishedRecords,
+    canManageCohort ? {} : "skip",
+  );
+  const createAssignment = useMutation(api.assignments.create);
+  const inviteMembers = useMutation(api.cohorts.inviteMembers);
   const activeAssignments = assignments?.filter(
     (assignment) => !assignment.archivedAt,
   );
@@ -69,6 +83,7 @@ function CohortDetail() {
 
   return (
     <AppFrame title={cohort?.title ?? "Cohort"}>
+      {canManageCohort && (
       <section className="mb-5 grid gap-4 lg:grid-cols-2">
         <div className="rounded border border-slate-200 bg-white p-4">
           <h2 className="font-semibold">Create assignment</h2>
@@ -244,6 +259,8 @@ function CohortDetail() {
           </div>
         </div>
       </section>
+      )}
+      {canManageCohort && (
       <section className="mb-5 rounded border border-slate-200 bg-white">
         <div className="flex items-center gap-2 border-b border-slate-200 p-4">
           <Users className="h-4 w-4" aria-hidden="true" />
@@ -262,6 +279,7 @@ function CohortDetail() {
           ))}
         </div>
       </section>
+      )}
       <div className="grid gap-3">
         {activeAssignments?.length === 0 ? (
           <EmptyState>No assignments yet.</EmptyState>

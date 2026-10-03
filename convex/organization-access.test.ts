@@ -77,6 +77,11 @@ const listMineRef = makeFunctionReference<
     archived: boolean;
   }[]
 >("cohorts:listMine");
+const listInstitutionsRef = makeFunctionReference<
+  "query",
+  Record<string, never>,
+  { id: Id<"institutions">; name: string; slug: string; status: string }[]
+>("cohorts:listInstitutions");
 const listForCohortRef = makeFunctionReference<
   "query",
   { cohortId: Id<"cohorts"> },
@@ -504,6 +509,38 @@ describe("registered organization-scoped authorization", () => {
     }
   });
 
+  it("fails closed on duplicate membership rows even when only one is active", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await seedAccessFixture(t);
+    await t.run((ctx) =>
+      Promise.all(
+        [fixture.organizationA, fixture.organizationB].map((institutionId) =>
+          ctx.db.insert("institutionMemberships", {
+            institutionId,
+            userId: fixture.actor,
+            role: "instructor",
+            status: "suspended",
+            createdAt: new Date().toISOString(),
+          }),
+        ),
+      ),
+    );
+
+    const actor = t.withIdentity(identity("matrix-actor"));
+    for (const request of [
+      actor.query(listRosterRef, { cohortId: fixture.cohortA }),
+      actor.query(listMineRef, {}),
+      actor.query(listInstitutionsRef, {}),
+      actor.query(listMyAssignmentsRef, {}),
+    ]) {
+      const errorData = await expectError(request, AppErrorCode.CONFLICT);
+      expect(errorData).toEqual({
+        code: AppErrorCode.CONFLICT,
+        message: "Organization membership is ambiguous",
+      });
+    }
+  });
+
   it("enforces the two-organization operation matrix and separates teaching from enrollment", async () => {
     const t = convexTest(schema, modules);
     const fixture = await seedAccessFixture(t);
@@ -610,6 +647,148 @@ describe("registered organization-scoped authorization", () => {
       }),
       AppErrorCode.SESSION_LOCKED,
     );
+  });
+
+  it("keeps personal assignments owner-only even with stale non-owner membership rows", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await t.run(async (ctx) => {
+      const addUser = (subject: string) =>
+        ctx.db.insert("users", {
+          authSubject: identity(subject).tokenIdentifier,
+          displayName: subject,
+          monthlyAiBudgetCents: 0,
+        });
+      const [ownerId, outsiderId, sharedLearnerId] = await Promise.all([
+        addUser("personal-owner"),
+        addUser("personal-outsider"),
+        addUser("shared-learner"),
+      ]);
+      const personalInstitutionId = await ctx.db.insert("institutions", {
+        kind: "personal",
+        personalOwnerUserId: ownerId,
+        createdAt: new Date().toISOString(),
+        name: "Owner Personal Workspace Secret",
+        slug: "owner-personal-workspace",
+        status: "active",
+        monthlyAiBudgetCents: 0,
+      });
+      const sharedInstitutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        createdAt: new Date().toISOString(),
+        name: "Shared Organization",
+        slug: "shared-organization",
+        status: "active",
+        monthlyAiBudgetCents: 0,
+      });
+      const addOrganizationMembership = (
+        institutionId: Id<"institutions">,
+        userId: Id<"users">,
+        role: "learner" | "instructor" | "admin",
+      ) =>
+        ctx.db.insert("institutionMemberships", {
+          institutionId,
+          userId,
+          role,
+          status: "active",
+          createdAt: new Date().toISOString(),
+        });
+      await Promise.all([
+        addOrganizationMembership(personalInstitutionId, ownerId, "admin"),
+        // Legacy/stale access rows must not override personal workspace ownership.
+        addOrganizationMembership(personalInstitutionId, outsiderId, "admin"),
+        addOrganizationMembership(sharedInstitutionId, sharedLearnerId, "learner"),
+      ]);
+      const addCohort = (
+        institutionId: Id<"institutions">,
+        title: string,
+      ) =>
+        ctx.db.insert("cohorts", {
+          institutionId,
+          title,
+          term: "Fall 2026",
+          startsAt: "2026-09-01T00:00:00.000Z",
+          endsAt: "2026-12-31T00:00:00.000Z",
+          archived: false,
+        });
+      const [personalCohortId, sharedCohortId] = await Promise.all([
+        addCohort(personalInstitutionId, "Personal Cohort Secret"),
+        addCohort(sharedInstitutionId, "Shared Cohort"),
+      ]);
+      await Promise.all([
+        ctx.db.insert("cohortMemberships", {
+          cohortId: personalCohortId,
+          userId: ownerId,
+          role: "admin",
+        }),
+        ctx.db.insert("cohortMemberships", {
+          cohortId: personalCohortId,
+          userId: outsiderId,
+          role: "admin",
+        }),
+        ctx.db.insert("cohortMemberships", {
+          cohortId: sharedCohortId,
+          userId: sharedLearnerId,
+          role: "learner",
+        }),
+      ]);
+      const scenarioId = await ctx.db.insert("scenarios", {
+        scenarioKey: "personal-organization-scope",
+        title: "Synthetic Ownership Scenario",
+        source: "synthetic",
+        courtPackId: "synthetic-ownership-scope",
+        shortCaption: "Owner v. Intruder",
+        lowerTribunal: "U.S. District Court",
+        natureOfSuit: "Civil",
+        proceduralPosture: "Appeal",
+        issuesPresented: ["Ownership scope"],
+        meritsRecord: ["Synthetic record"],
+        published: true,
+      });
+      const personalAssignmentId = await ctx.db.insert("assignments", {
+        cohortId: personalCohortId,
+        scenarioId,
+        title: "Personal Assignment Secret",
+        published: true,
+        createdByUserId: ownerId,
+        createdAt: new Date().toISOString(),
+      });
+      const sharedAssignmentId = await ctx.db.insert("assignments", {
+        cohortId: sharedCohortId,
+        scenarioId,
+        title: "Shared Learner Assignment",
+        published: true,
+        createdByUserId: sharedLearnerId,
+        createdAt: new Date().toISOString(),
+      });
+      return { personalAssignmentId, sharedAssignmentId };
+    });
+
+    const ownerRows = await t
+      .withIdentity(identity("personal-owner"))
+      .query(listMyAssignmentsRef, {});
+    expect(ownerRows.map((row) => row.id)).toContain(
+      fixture.personalAssignmentId,
+    );
+
+    const outsiderRows = await t
+      .withIdentity(identity("personal-outsider"))
+      .query(listMyAssignmentsRef, {});
+    expect(outsiderRows).toEqual([]);
+    expect(JSON.stringify(outsiderRows)).not.toContain("Personal Workspace");
+    expect(JSON.stringify(outsiderRows)).not.toContain("Personal Cohort");
+    expect(JSON.stringify(outsiderRows)).not.toContain("Personal Assignment");
+
+    const sharedLearnerRows = await t
+      .withIdentity(identity("shared-learner"))
+      .query(listMyAssignmentsRef, {});
+    expect(sharedLearnerRows.map((row) => row.id)).toEqual([
+      fixture.sharedAssignmentId,
+    ]);
+    expect(sharedLearnerRows[0]).toMatchObject({
+      cohortTitle: "Shared Cohort",
+      institutionName: "Shared Organization",
+      title: "Shared Learner Assignment",
+    });
   });
 
   it("preserves AUTH_REQUIRED and does not return foreign cohort metadata", async () => {
