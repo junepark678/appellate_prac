@@ -1251,7 +1251,12 @@ describe('organization isolation for sessions and scenarios', () => {
     })
   })
 
-  it.each(['foreign_analysis', 'missing_analysis'] as const)(
+  it.each([
+    'foreign_analysis',
+    'missing_analysis',
+    'document_pointer_only',
+    'analysis_pointer_only',
+  ] as const)(
     'rejects a session document with a %s pointer',
     async (pointerKind) => {
       const t = convexTest(schema, modules)
@@ -1274,43 +1279,35 @@ describe('organization isolation for sessions and scenarios', () => {
           extractedSignals: [],
         })
         let analysisId: Id<'documentAnalyses'>
+        let analysisCaseSessionId = sessionAId
+        let analysisDocumentId: Id<'documents'> | undefined = documentId
         if (pointerKind === 'foreign_analysis') {
-          const foreignDocumentId = await ctx.db.insert('documents', {
+          analysisCaseSessionId = sessionBId
+          analysisDocumentId = await ctx.db.insert('documents', {
             caseSessionId: sessionBId,
             fileName: 'session-b.pdf',
             mimeType: 'application/pdf',
             sizeBytes: 1200,
             extractedSignals: [],
           })
-          analysisId = await ctx.db.insert('documentAnalyses', {
-            caseSessionId: sessionBId,
-            documentId: foreignDocumentId,
-            analyzerId: 'fixture-analyzer',
-            fileSizeBytes: 1200,
-            mimeType: 'application/pdf',
-            searchableText: true,
-            certificateOfServiceDetected: false,
-            certificateOfComplianceDetected: false,
-            sealedOrRedactionWarning: false,
-            warnings: [],
-            createdAt: '2026-10-03T00:00:00.000Z',
-          })
-        } else {
-          analysisId = await ctx.db.insert('documentAnalyses', {
-            caseSessionId: sessionAId,
-            documentId,
-            analyzerId: 'fixture-analyzer',
-            fileSizeBytes: 1200,
-            mimeType: 'application/pdf',
-            searchableText: true,
-            certificateOfServiceDetected: false,
-            certificateOfComplianceDetected: false,
-            sealedOrRedactionWarning: false,
-            warnings: [],
-            createdAt: '2026-10-03T00:00:00.000Z',
-          })
         }
-        await ctx.db.patch(documentId, { analysisId })
+        if (pointerKind === 'document_pointer_only') analysisDocumentId = undefined
+        analysisId = await ctx.db.insert('documentAnalyses', {
+          caseSessionId: analysisCaseSessionId,
+          ...(analysisDocumentId ? { documentId: analysisDocumentId } : {}),
+          analyzerId: 'fixture-analyzer',
+          fileSizeBytes: 1200,
+          mimeType: 'application/pdf',
+          searchableText: true,
+          certificateOfServiceDetected: false,
+          certificateOfComplianceDetected: false,
+          sealedOrRedactionWarning: false,
+          warnings: [],
+          createdAt: '2026-10-03T00:00:00.000Z',
+        })
+        if (pointerKind !== 'analysis_pointer_only') {
+          await ctx.db.patch(documentId, { analysisId })
+        }
         if (pointerKind === 'missing_analysis') await ctx.db.delete(analysisId)
         await ctx.db.insert('filings', {
           caseSessionId: sessionAId,
