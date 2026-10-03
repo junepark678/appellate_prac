@@ -20,8 +20,8 @@
 import { v } from "convex/values";
 
 import type { Doc, Id, TableNames } from "./_generated/dataModel";
-import type { QueryCtx } from "./_generated/server";
-import { internalQuery } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 import { isOrganizationMembershipActive } from "./organizationContracts";
 import { validationError } from "./errors";
 
@@ -114,6 +114,25 @@ const CLASSIFICATION_RELATION_PROBE_LIMIT =
   MAX_CLASSIFICATION_RELATION_ROWS + 1;
 const MAX_INSPECTION_WORK_UNITS = 900;
 type ClassificationState = "ready" | "ambiguous";
+type MigrationWritePlan =
+  | { field: "kind"; value: "shared" }
+  | {
+      field: "institutionId";
+      value: Id<"institutions">;
+    }
+  | {
+      field: "institutionId";
+      ensurePersonalFor: Id<"users">;
+    }
+  | {
+      field: "caseSessionId";
+      value: Id<"caseSessions">;
+    };
+
+type OwnershipDecision = OwnershipClassification & {
+  targetInstitutionId?: Id<"institutions">;
+  ensurePersonalFor?: Id<"users">;
+};
 
 export type OwnershipClassification = {
   state: ClassificationState;
@@ -310,6 +329,7 @@ type PersonalOrganizationEvidence = {
   personalOwnerUserId?: string;
   status: "active" | "paused" | "archived";
   ownerMembershipActive: boolean;
+  ownerMembershipRole?: "learner" | "instructor" | "admin";
 };
 
 /** Pure rule used by both inspection and its focused fixtures. */
@@ -520,18 +540,21 @@ export type ProvenanceMatchEvidence = {
   docketNumberMatches: boolean;
 };
 
+function isExactProvenanceMatch(match: ProvenanceMatchEvidence): boolean {
+  return (
+    match.externalIdMatches &&
+    match.sourceUrlMatches &&
+    match.importTimestampMatches &&
+    match.scenarioMatches &&
+    match.docketNumberMatches
+  );
+}
+
 /** A source import is safe only when every recorded provenance key agrees. */
 export function classifySourceProvenanceMatches(
   matches: ProvenanceMatchEvidence[],
 ): OwnershipClassification {
-  const exact = matches.filter(
-    (match) =>
-      match.externalIdMatches &&
-      match.sourceUrlMatches &&
-      match.importTimestampMatches &&
-      match.scenarioMatches &&
-      match.docketNumberMatches,
-  );
+  const exact = matches.filter(isExactProvenanceMatch);
   if (exact.length === 1) {
     return { state: "ready", reason: "one_provenance_match" };
   }
@@ -567,6 +590,32 @@ const inspectionResultValidator = v.object({
   findings: v.array(findingValidator),
 });
 
+const applyBatchResultValidator = v.object({
+  nextCursor: v.union(v.string(), v.null()),
+  isDone: v.boolean(),
+  scanned: v.number(),
+  ready: v.number(),
+  ambiguous: v.number(),
+  changed: v.number(),
+  skipped: v.number(),
+  writes: v.array(
+    v.object({
+      tableName: v.string(),
+      recordId: v.string(),
+      outcome: v.union(
+        v.literal("updated"),
+        v.literal("unchanged"),
+        v.literal("skipped"),
+      ),
+      reason: v.string(),
+      field: v.optional(v.string()),
+      before: v.optional(v.union(v.string(), v.null())),
+      after: v.optional(v.union(v.string(), v.null())),
+    }),
+  ),
+  findings: v.array(findingValidator),
+});
+
 type MigrationRow = Doc<MigrationTable> & Record<string, unknown>;
 type BoundedInspectionWork = {
   remaining: number;
@@ -583,6 +632,7 @@ type RowFinding = {
   outcome: "ready" | "ambiguous";
   reason: string;
   reportStorage?: boolean;
+  writePlan?: MigrationWritePlan;
 };
 
 class InspectionWorkBudgetExceeded extends Error {
@@ -592,7 +642,7 @@ class InspectionWorkBudgetExceeded extends Error {
   }
 }
 
-function createInspectionContext(ctx: QueryCtx): InspectionContext {
+function createInspectionContext(ctx: Pick<QueryCtx, "db">): InspectionContext {
   return {
     db: ctx.db,
     work: {
@@ -756,6 +806,8 @@ async function personalOrganizationEvidence(
               memberships[0] ?? null,
               now,
             ),
+          ownerMembershipRole:
+            memberships.length === 1 ? memberships[0]?.role : undefined,
         });
       }
       return evidence;
@@ -831,7 +883,7 @@ async function classifyCaseSession(
   ctx: InspectionContext,
   session: Doc<"caseSessions">,
   now: number,
-): Promise<OwnershipClassification> {
+): Promise<OwnershipDecision> {
   return memoizeInspectionWork(
     ctx,
     `case-session-classification:${session._id}`,
@@ -846,7 +898,7 @@ async function classifyCaseSession(
       const existingInstitution = session.institutionId
         ? await readDocument(ctx, session.institutionId)
         : null;
-      return classifyCaseSessionOwnership({
+      const classification = classifyCaseSessionOwnership({
         userId: session.userId,
         ownerExists: owner !== null,
         institutionId: session.institutionId,
@@ -860,6 +912,20 @@ async function classifyCaseSession(
         assignmentLinks: links,
         personalOrganizations,
       });
+      if (classification.state !== "ready" || session.institutionId) {
+        return classification;
+      }
+      if (links.length > 0) {
+        return {
+          ...classification,
+          targetInstitutionId: links[0]?.institutionId as
+            | Id<"institutions">
+            | undefined,
+        };
+      }
+      // Preserve the foundation's ensurePersonal idempotence checks even when
+      // an eligible personal organization already exists.
+      return { ...classification, ensurePersonalFor: session.userId };
     },
   );
 }
@@ -895,7 +961,7 @@ async function classifyScenario(
   now: number,
   assignments: Doc<"assignments">[],
   assignmentScanTruncated: boolean,
-): Promise<OwnershipClassification> {
+): Promise<OwnershipDecision> {
   return memoizeInspectionWork(
     ctx,
     `scenario-classification:${scenario._id}`,
@@ -916,7 +982,7 @@ async function computeScenarioClassification(
   now: number,
   assignments: Doc<"assignments">[],
   assignmentScanTruncated: boolean,
-): Promise<OwnershipClassification> {
+): Promise<OwnershipDecision> {
   if (scenario.visibility === "public_template") {
     return scenario.institutionId === undefined
       ? { state: "ready", reason: "public_template_remains_catalog" }
@@ -1020,7 +1086,7 @@ async function computeScenarioClassification(
   const existingInstitution = scenario.institutionId
     ? await readDocument(ctx, scenario.institutionId)
     : null;
-  return classifyPrivateScenarioOwnership({
+  const classification = classifyPrivateScenarioOwnership({
     visibility: scenario.visibility,
     ownerUserId: scenario.ownerUserId,
     ownerExists: owner !== null,
@@ -1030,6 +1096,27 @@ async function computeScenarioClassification(
     ownerMembershipActiveForInstitutionIds: ownerMembershipIds,
     personalOrganizations,
   });
+  if (classification.state !== "ready" || scenario.institutionId) {
+    return classification;
+  }
+  if (references.length > 0) {
+    const targetInstitutionIds = new Set(
+      references
+        .map((reference) => reference.institutionId)
+        .filter((id): id is string => id !== undefined),
+    );
+    return {
+      ...classification,
+      targetInstitutionId: [...targetInstitutionIds][0] as Id<"institutions">,
+    };
+  }
+  const personal = personalOrganizations[0];
+  return personal
+    ? {
+        ...classification,
+        targetInstitutionId: personal.institutionId as Id<"institutions">,
+      }
+    : { ...classification, ensurePersonalFor: scenario.ownerUserId };
 }
 
 function sourceUrlFromProvenance(value: Record<string, unknown>): string {
@@ -1051,7 +1138,9 @@ function sourceUrlFromProvenance(value: Record<string, unknown>): string {
 async function classifySourceCase(
   ctx: InspectionContext,
   sourceCase: Doc<"sourceCases">,
-): Promise<OwnershipClassification> {
+): Promise<
+  OwnershipClassification & { targetCaseSessionId?: Id<"caseSessions"> }
+> {
   if (sourceCase.caseSessionId) {
     const session = await readDocument(ctx, sourceCase.caseSessionId);
     if (!session)
@@ -1135,7 +1224,13 @@ async function classifySourceCase(
       docketNumberMatches: trialImport.docketNumber === docketNumber,
     });
   }
-  return classifySourceProvenanceMatches(evidence);
+  const classification = classifySourceProvenanceMatches(evidence);
+  if (classification.state !== "ready") return classification;
+  const matchingIndex = evidence.findIndex(isExactProvenanceMatch);
+  const matchedImport = imports[matchingIndex];
+  return matchedImport
+    ? { ...classification, targetCaseSessionId: matchedImport.caseSessionId }
+    : { state: "ambiguous", reason: "provenance_match_missing" };
 }
 
 async function classifyIntegrationEvent(
@@ -1168,7 +1263,20 @@ async function classifyIntegrationEvent(
     sessionInstitutionIds: [...scopes],
     existingInstitutionId: row.institutionId,
   });
-  return { outcome: classification.state, reason: classification.reason };
+  const targetInstitutionId = [...scopes][0];
+  return {
+    outcome: classification.state,
+    reason: classification.reason,
+    writePlan:
+      classification.state === "ready" &&
+      row.institutionId === undefined &&
+      targetInstitutionId
+        ? {
+            field: "institutionId",
+            value: targetInstitutionId as Id<"institutions">,
+          }
+        : undefined,
+  };
 }
 
 async function classifyAuditLog(
@@ -1219,7 +1327,20 @@ async function classifyAuditLog(
     sessionScopeUnresolved,
     institutionIds: scopes,
   });
-  return { outcome: classification.state, reason: classification.reason };
+  const targetInstitutionIds = new Set(scopes);
+  return {
+    outcome: classification.state,
+    reason: classification.reason,
+    writePlan:
+      classification.state === "ready" &&
+      row.institutionId === undefined &&
+      targetInstitutionIds.size === 1
+        ? {
+            field: "institutionId",
+            value: [...targetInstitutionIds][0] as Id<"institutions">,
+          }
+        : undefined,
+  };
 }
 
 const CASE_SESSION_TABLES = new Set([
@@ -1750,7 +1871,14 @@ async function classifyRow(
   if (table === "institutions") {
     const institution = row as Doc<"institutions">;
     const classification = classifyInstitutionKind(institution);
-    return { outcome: classification.state, reason: classification.reason };
+    return {
+      outcome: classification.state,
+      reason: classification.reason,
+      writePlan:
+        classification.state === "ready" && institution.kind === undefined
+          ? { field: "kind", value: "shared" }
+          : undefined,
+    };
   }
   if (table === "users") {
     const classification = classifyLegacyUser();
@@ -1762,7 +1890,24 @@ async function classifyRow(
       row as Doc<"caseSessions">,
       now,
     );
-    return { outcome: classification.state, reason: classification.reason };
+    return {
+      outcome: classification.state,
+      reason: classification.reason,
+      writePlan:
+        classification.state !== "ready" || row.institutionId !== undefined
+          ? undefined
+          : classification.targetInstitutionId
+            ? {
+                field: "institutionId",
+                value: classification.targetInstitutionId,
+              }
+            : classification.ensurePersonalFor
+              ? {
+                  field: "institutionId",
+                  ensurePersonalFor: classification.ensurePersonalFor,
+                }
+              : undefined,
+    };
   }
   if (table === "scenarios") {
     const classification = await classifyScenario(
@@ -1772,14 +1917,43 @@ async function classifyRow(
       allAssignments,
       assignmentScanTruncated,
     );
-    return { outcome: classification.state, reason: classification.reason };
+    return {
+      outcome: classification.state,
+      reason: classification.reason,
+      writePlan:
+        classification.state !== "ready" || row.institutionId !== undefined
+          ? undefined
+          : classification.targetInstitutionId
+            ? {
+                field: "institutionId",
+                value: classification.targetInstitutionId,
+              }
+            : classification.ensurePersonalFor
+              ? {
+                  field: "institutionId",
+                  ensurePersonalFor: classification.ensurePersonalFor,
+                }
+              : undefined,
+    };
   }
   if (table === "sourceCases") {
     const classification = await classifySourceCase(
       ctx,
       row as Doc<"sourceCases">,
     );
-    return { outcome: classification.state, reason: classification.reason };
+    return {
+      outcome: classification.state,
+      reason: classification.reason,
+      writePlan:
+        classification.state === "ready" &&
+        row.caseSessionId === undefined &&
+        classification.targetCaseSessionId
+          ? {
+              field: "caseSessionId",
+              value: classification.targetCaseSessionId,
+            }
+          : undefined,
+    };
   }
   if (table === "integrationEvents") {
     return classifyIntegrationEvent(ctx, row as Doc<"integrationEvents">, now);
@@ -1839,6 +2013,419 @@ function parseCursor(table: MigrationTable, cursor: string | null | undefined) {
   }
 }
 
+type BatchArgs = {
+  table: string;
+  cursor?: string | null;
+  limit: number;
+};
+type BatchFinding = {
+  id: string;
+  tableName: string;
+  recordId: string;
+  outcome: "ready" | "ambiguous" | "warning";
+  reason: string;
+  storageField?: string;
+  historicalConfidentiality?: "UNVERIFIED";
+};
+type ClassifiedBatchRow = {
+  row: MigrationRow;
+  classification: RowFinding;
+  finding: BatchFinding;
+  findingReserve: number;
+};
+type PreparedBatch = {
+  table: MigrationTable;
+  nextCursor: string | null;
+  isDone: boolean;
+  rows: ClassifiedBatchRow[];
+  findings: BatchFinding[];
+  work: InspectionContext;
+};
+
+function validateBatchArgs(args: BatchArgs): MigrationTable {
+  if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100) {
+    throw validationError("Limit must be an integer from 1 to 100", "limit");
+  }
+  if (!INSPECTABLE_TABLES.includes(args.table as MigrationTable)) {
+    throw validationError("Table is outside the migration inventory", "table");
+  }
+  return args.table as MigrationTable;
+}
+
+/**
+ * Both the read-only inspector and apply mutation use this one bounded
+ * classifier. Apply reserves four units per row for its indexed finding
+ * lookup and possible insert/patch; classification and all extra apply reads
+ * and writes still share the same 900-unit transaction budget.
+ */
+async function prepareMigrationBatch(
+  ctx: Pick<QueryCtx, "db">,
+  args: BatchArgs,
+  reserveFindingWrites: boolean,
+): Promise<PreparedBatch> {
+  const table = validateBatchArgs(args);
+  const inspectionCtx = createInspectionContext(ctx);
+  const cursor = parseCursor(table, args.cursor);
+  const query = ctx.db.query(table) as unknown as {
+    order: (direction: "asc") => {
+      paginate: (options: {
+        numItems: number;
+        cursor: string | null;
+      }) => Promise<{
+        page: MigrationRow[];
+        continueCursor: string;
+        isDone: boolean;
+      }>;
+    };
+  };
+  chargeInspectionWork(inspectionCtx, args.limit + 1);
+  const page = await query.order("asc").paginate({
+    numItems: args.limit,
+    cursor,
+  });
+  releaseInspectionWork(inspectionCtx, args.limit - page.page.length);
+
+  const findingReserve = reserveFindingWrites ? 4 : 0;
+  const rowFindingReserve = page.page.length * findingReserve;
+  if (rowFindingReserve > inspectionCtx.work.remaining) {
+    throw new Error("Migration batch could not reserve finding work");
+  }
+  inspectionCtx.work.remaining -= rowFindingReserve;
+
+  const inspectsScenarioOwnership =
+    table === "scenarios" ||
+    table === "scenarioDocumentAssets" ||
+    table === "scenarioIssues" ||
+    table === "scenarioRecordExcerpts";
+  const assignmentProbe = inspectsScenarioOwnership
+    ? await readQueryRows(
+        inspectionCtx,
+        `assignments/inspection-prefix:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
+        CLASSIFICATION_RELATION_PROBE_LIMIT,
+        (limit) => ctx.db.query("assignments").take(limit),
+      )
+    : [];
+  const assignmentScanTruncated =
+    assignmentProbe.length > MAX_CLASSIFICATION_RELATION_ROWS;
+  const allAssignments = assignmentScanTruncated ? [] : assignmentProbe;
+  const now = Date.now();
+  const findings: BatchFinding[] = [];
+  const rows: ClassifiedBatchRow[] = [];
+  for (const row of page.page) {
+    const recordId = String(row._id);
+    let classification: RowFinding;
+    if (inspectionCtx.work.exhausted || inspectionCtx.work.remaining === 0) {
+      inspectionCtx.work.exhausted = true;
+      classification = {
+        outcome: "ambiguous",
+        reason: "inspection_work_budget_exhausted",
+      };
+    } else {
+      try {
+        classification = await classifyRow(
+          inspectionCtx,
+          table,
+          row,
+          now,
+          allAssignments,
+          assignmentScanTruncated,
+        );
+      } catch (error) {
+        if (!(error instanceof InspectionWorkBudgetExceeded)) throw error;
+        classification = {
+          outcome: "ambiguous",
+          reason: "inspection_work_budget_exhausted",
+        };
+      }
+    }
+    const finding: BatchFinding = {
+      id: reportId(table, recordId, "classification"),
+      tableName: table,
+      recordId,
+      outcome: classification.outcome,
+      reason: classification.reason,
+    };
+    findings.push(finding);
+    rows.push({
+      row,
+      classification,
+      finding,
+      findingReserve,
+    });
+
+    const storageFields =
+      classification.reportStorage === false
+        ? []
+        : storageReferenceFields(table, row);
+    for (const storageField of storageFields) {
+      findings.push({
+        id: reportId(
+          table,
+          recordId,
+          `legacy_storage_url_unverified/${storageField}`,
+        ),
+        tableName: table,
+        recordId,
+        outcome: "warning",
+        reason: "legacy_storage_object_may_have_had_a_bearer_url",
+        storageField,
+        historicalConfidentiality: LEGACY_STORAGE_CONFIDENTIALITY,
+      });
+    }
+  }
+  return {
+    table,
+    nextCursor: page.isDone
+      ? null
+      : JSON.stringify({ table, cursor: page.continueCursor }),
+    isDone: page.isDone,
+    rows,
+    findings,
+    work: inspectionCtx,
+  };
+}
+
+function chargeReservedOrSharedWork(
+  work: InspectionContext,
+  reserve: { remaining: number },
+  units: number,
+) {
+  const fromReserve = Math.min(reserve.remaining, units);
+  reserve.remaining -= fromReserve;
+  const fromShared = units - fromReserve;
+  if (fromShared > work.work.remaining) {
+    work.work.exhausted = true;
+    throw new InspectionWorkBudgetExceeded();
+  }
+  work.work.remaining -= fromShared;
+}
+
+type PersonalWorkspaceResult =
+  | { institutionId: Id<"institutions"> }
+  | { reason: string };
+
+async function ensurePersonalForMigration(
+  ctx: MutationCtx,
+  work: InspectionContext,
+  userId: Id<"users">,
+  now: number,
+  ensured: Map<string, Id<"institutions">>,
+): Promise<PersonalWorkspaceResult> {
+  const cacheKey = String(userId);
+  const cached = ensured.get(cacheKey);
+  if (cached) return { institutionId: cached };
+
+  const user = await readDocument(work, userId);
+  if (!user) return { reason: "personal_owner_missing" };
+  const personalOrganizations = await personalOrganizationEvidence(
+    work,
+    userId,
+    now,
+  );
+  if (personalOrganizations.length > 1) {
+    return { reason: "personal_organization_duplicate" };
+  }
+  const existing = personalOrganizations[0];
+  if (existing) {
+    if (
+      existing.kind !== "personal" ||
+      existing.personalOwnerUserId !== userId
+    ) {
+      return { reason: "personal_owner_conflict" };
+    }
+    if (!existing.ownerMembershipActive) {
+      return { reason: "owner_membership_inactive" };
+    }
+    if (existing.ownerMembershipRole !== "admin") {
+      return { reason: "personal_membership_requires_repair" };
+    }
+    const institutionId = existing.institutionId as Id<"institutions">;
+    ensured.set(cacheKey, institutionId);
+    return { institutionId };
+  }
+
+  const slug = `personal-${userId}`;
+  const slugMatches = await readQueryRows(
+    work,
+    `institutions/by-slug:${slug}:2`,
+    2,
+    (limit) =>
+      ctx.db
+        .query("institutions")
+        .withIndex("by_slug", (index) => index.eq("slug", slug))
+        .take(limit),
+  );
+  if (slugMatches.length > 0) {
+    return { reason: "personal_workspace_slug_conflict" };
+  }
+
+  const createdAt = new Date().toISOString();
+  chargeInspectionWork(work, 1);
+  const institutionId = await ctx.db.insert("institutions", {
+    kind: "personal",
+    personalOwnerUserId: userId,
+    createdAt,
+    name: "Personal workspace",
+    slug,
+    status: "active",
+    monthlyAiBudgetCents: 0,
+  });
+  chargeInspectionWork(work, 1);
+  await ctx.db.insert("institutionMemberships", {
+    institutionId,
+    userId,
+    role: "admin",
+    status: "active",
+    createdAt,
+  });
+  ensured.set(cacheKey, institutionId);
+  return { institutionId };
+}
+
+type WriteApplication = {
+  outcome: "updated" | "unchanged" | "skipped";
+  reason: string;
+  field?: string;
+  before?: string | null;
+  after?: string | null;
+};
+
+async function applyWritePlan(
+  ctx: MutationCtx,
+  work: InspectionContext,
+  row: MigrationRow,
+  plan: MigrationWritePlan,
+  now: number,
+  ensuredPersonal: Map<string, Id<"institutions">>,
+): Promise<WriteApplication> {
+  chargeInspectionWork(work, 2);
+  const current = await ctx.db.get(row._id);
+  if (!current) {
+    return {
+      outcome: "skipped",
+      reason: "conditional_write_record_missing",
+      field: plan.field,
+      before: null,
+      after: null,
+    };
+  }
+  const currentValue = (current as Record<string, unknown>)[plan.field];
+  if (currentValue !== undefined) {
+    const expectedValue =
+      plan.field === "institutionId" && "value" in plan
+        ? plan.value
+        : plan.field === "kind"
+          ? "shared"
+          : undefined;
+    if (expectedValue !== undefined && currentValue === expectedValue) {
+      return {
+        outcome: "unchanged",
+        reason: "field_already_matches",
+        field: plan.field,
+        before: String(currentValue),
+        after: String(currentValue),
+      };
+    }
+    return {
+      outcome: "skipped",
+      reason: "conditional_write_conflict",
+      field: plan.field,
+      before: String(currentValue),
+      after: null,
+    };
+  }
+
+  let targetValue: string;
+  if (plan.field === "kind") {
+    targetValue = plan.value;
+  } else if ("value" in plan) {
+    targetValue = plan.value;
+  } else {
+    const personal = await ensurePersonalForMigration(
+      ctx,
+      work,
+      plan.ensurePersonalFor,
+      now,
+      ensuredPersonal,
+    );
+    if (!("institutionId" in personal)) {
+      return {
+        outcome: "skipped",
+        reason: personal.reason,
+        field: plan.field,
+        before: null,
+        after: null,
+      };
+    }
+    targetValue = personal.institutionId;
+  }
+
+  chargeInspectionWork(work, 1);
+  if (plan.field === "kind") {
+    await ctx.db.patch(row._id, { kind: "shared" });
+  } else if (plan.field === "institutionId") {
+    await ctx.db.patch(row._id, {
+      institutionId: targetValue as Id<"institutions">,
+    });
+  } else {
+    await ctx.db.patch(row._id, {
+      caseSessionId: targetValue as Id<"caseSessions">,
+    });
+  }
+  return {
+    outcome: "updated",
+    reason: "conditional_absent_field_write",
+    field: plan.field,
+    before: null,
+    after: targetValue,
+  };
+}
+
+async function persistClassificationFinding(
+  ctx: MutationCtx,
+  work: InspectionContext,
+  row: ClassifiedBatchRow,
+  reserve: { remaining: number },
+  outcome: "ready" | "ambiguous",
+  reason: string,
+  now: string,
+) {
+  chargeReservedOrSharedWork(work, reserve, 3);
+  const matches = await ctx.db
+    .query("organizationMigrationFindings")
+    .withIndex("by_key_record", (index) =>
+      index
+        .eq("migrationKey", ORGANIZATION_MIGRATION_KEY)
+        .eq("tableName", row.finding.tableName)
+        .eq("recordId", row.finding.recordId),
+    )
+    .take(2);
+  reserve.remaining += 2 - matches.length;
+  if (matches.length > 1) {
+    throw new Error("Duplicate organization migration findings");
+  }
+  const existing = matches[0];
+  if (outcome === "ambiguous") {
+    if (!existing) {
+      chargeReservedOrSharedWork(work, reserve, 1);
+      await ctx.db.insert("organizationMigrationFindings", {
+        migrationKey: ORGANIZATION_MIGRATION_KEY,
+        tableName: row.finding.tableName,
+        recordId: row.finding.recordId,
+        reason,
+        status: "open",
+        createdAt: now,
+      });
+    } else if (existing.status !== "open" || existing.reason !== reason) {
+      chargeReservedOrSharedWork(work, reserve, 1);
+      await ctx.db.patch(existing._id, { reason, status: "open" });
+    }
+  } else if (existing?.status === "open") {
+    chargeReservedOrSharedWork(work, reserve, 1);
+    await ctx.db.patch(existing._id, { status: "resolved" });
+  }
+}
+
 /**
  * Read-only internal inventory page. It never changes rows, calls storage APIs,
  * creates findings, or emits storage IDs/URLs. The `table` is table-bound in the
@@ -1852,136 +2439,120 @@ export const inspectBatch = internalQuery({
   },
   returns: inspectionResultValidator,
   handler: async (ctx, args) => {
-    if (
-      !Number.isSafeInteger(args.limit) ||
-      args.limit < 1 ||
-      args.limit > 100
-    ) {
-      throw validationError("Limit must be an integer from 1 to 100", "limit");
-    }
-    if (!INSPECTABLE_TABLES.includes(args.table as MigrationTable)) {
-      throw validationError(
-        "Table is outside the migration inventory",
-        "table",
-      );
-    }
-    const table = args.table as MigrationTable;
-    const inspectionCtx = createInspectionContext(ctx);
-    const cursor = parseCursor(table, args.cursor);
-    const query = ctx.db.query(table) as unknown as {
-      order: (direction: "asc") => {
-        paginate: (options: {
-          numItems: number;
-          cursor: string | null;
-        }) => Promise<{
-          page: MigrationRow[];
-          continueCursor: string;
-          isDone: boolean;
-        }>;
-      };
+    const prepared = await prepareMigrationBatch(ctx, args, false);
+    const ready = prepared.rows.filter(
+      ({ classification }) => classification.outcome === "ready",
+    ).length;
+    return {
+      nextCursor: prepared.nextCursor,
+      isDone: prepared.isDone,
+      scanned: prepared.rows.length,
+      ready,
+      ambiguous: prepared.rows.length - ready,
+      findings: prepared.findings,
     };
-    // Count the page query and reserve for the requested number of row documents.
-    chargeInspectionWork(inspectionCtx, args.limit + 1);
-    const page = await query.order("asc").paginate({
-      numItems: args.limit,
-      cursor,
-    });
-    releaseInspectionWork(inspectionCtx, args.limit - page.page.length);
-    const inspectsScenarioOwnership =
-      table === "scenarios" ||
-      table === "scenarioDocumentAssets" ||
-      table === "scenarioIssues" ||
-      table === "scenarioRecordExcerpts";
-    const assignmentProbe = inspectsScenarioOwnership
-      ? await readQueryRows(
-          inspectionCtx,
-          `assignments/inspection-prefix:${CLASSIFICATION_RELATION_PROBE_LIMIT}`,
-          CLASSIFICATION_RELATION_PROBE_LIMIT,
-          (limit) => ctx.db.query("assignments").take(limit),
-        )
-      : [];
-    const assignmentScanTruncated =
-      assignmentProbe.length > MAX_CLASSIFICATION_RELATION_ROWS;
-    const allAssignments = assignmentScanTruncated ? [] : assignmentProbe;
-    const now = Date.now();
-    const findings: Array<{
-      id: string;
+  },
+});
+
+/**
+ * Internal, resumable apply page. It calls the exact same bounded classifier
+ * as inspectBatch, writes only absent fields, and persists one idempotent
+ * finding per migration key/table/record transaction.
+ */
+export const applyBatch = internalMutation({
+  args: {
+    table: v.string(),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    limit: v.number(),
+  },
+  returns: applyBatchResultValidator,
+  handler: async (ctx, args) => {
+    const prepared = await prepareMigrationBatch(ctx, args, true);
+    const now = new Date().toISOString();
+    const ensuredPersonal = new Map<string, Id<"institutions">>();
+    const writes: Array<{
       tableName: string;
       recordId: string;
-      outcome: "ready" | "ambiguous" | "warning";
+      outcome: "updated" | "unchanged" | "skipped";
       reason: string;
-      storageField?: string;
-      historicalConfidentiality?: "UNVERIFIED";
+      field?: string;
+      before?: string | null;
+      after?: string | null;
     }> = [];
+    let changed = 0;
+    let skipped = 0;
     let ready = 0;
     let ambiguous = 0;
-    for (const row of page.page) {
-      const recordId = String(row._id);
-      let classification: RowFinding;
-      if (inspectionCtx.work.exhausted || inspectionCtx.work.remaining === 0) {
-        inspectionCtx.work.exhausted = true;
-        classification = {
-          outcome: "ambiguous",
-          reason: "inspection_work_budget_exhausted",
-        };
-      } else {
-        try {
-          classification = await classifyRow(
-            inspectionCtx,
-            table,
-            row,
-            now,
-            allAssignments,
-            assignmentScanTruncated,
-          );
-        } catch (error) {
-          if (!(error instanceof InspectionWorkBudgetExceeded)) throw error;
-          classification = {
-            outcome: "ambiguous",
-            reason: "inspection_work_budget_exhausted",
-          };
+
+    for (const row of prepared.rows) {
+      const reserve = { remaining: row.findingReserve };
+      let outcome = row.classification.outcome;
+      let reason = row.classification.reason;
+      let write: WriteApplication = {
+        outcome: outcome === "ready" ? "unchanged" : "skipped",
+        reason,
+      };
+
+      if (outcome === "ready" && row.classification.writePlan) {
+        write = await applyWritePlan(
+          ctx,
+          prepared.work,
+          row.row,
+          row.classification.writePlan,
+          Date.now(),
+          ensuredPersonal,
+        );
+        if (write.outcome === "skipped") {
+          outcome = "ambiguous";
+          reason = write.reason;
+        } else if (write.outcome === "updated") {
+          changed += 1;
         }
       }
-      const base: (typeof findings)[number] = {
-        id: reportId(table, recordId, "classification"),
-        tableName: table,
-        recordId,
-        outcome: classification.outcome,
-        reason: classification.reason,
-      };
-      findings.push(base);
-      if (classification.outcome === "ready") ready += 1;
-      else ambiguous += 1;
 
-      const storageFields =
-        classification.reportStorage === false
-          ? []
-          : storageReferenceFields(table, row);
-      for (const storageField of storageFields) {
-        findings.push({
-          id: reportId(
-            table,
-            recordId,
-            `legacy_storage_url_unverified/${storageField}`,
-          ),
-          tableName: table,
-          recordId,
-          outcome: "warning",
-          reason: "legacy_storage_object_may_have_had_a_bearer_url",
-          storageField,
-          historicalConfidentiality: LEGACY_STORAGE_CONFIDENTIALITY,
-        });
+      if (write.outcome !== "updated") skipped += 1;
+      try {
+        await persistClassificationFinding(
+          ctx,
+          prepared.work,
+          row,
+          reserve,
+          outcome,
+          reason,
+          now,
+        );
+      } catch (error) {
+        if (!(error instanceof InspectionWorkBudgetExceeded)) throw error;
+        // A finding lookup/write is reserved for every row before classifying;
+        // reaching this branch indicates a budget-accounting defect.
+        throw new Error("Reserved migration finding budget was exhausted");
       }
+
+      row.finding.outcome = outcome;
+      row.finding.reason = reason;
+      if (outcome === "ready") ready += 1;
+      else ambiguous += 1;
+      writes.push({
+        tableName: prepared.table,
+        recordId: String(row.row._id),
+        outcome: write.outcome,
+        reason,
+        ...(write.field ? { field: write.field } : {}),
+        ...(write.field ? { before: write.before ?? null } : {}),
+        ...(write.field ? { after: write.after ?? null } : {}),
+      });
     }
+
     return {
-      nextCursor: page.isDone
-        ? null
-        : JSON.stringify({ table, cursor: page.continueCursor }),
-      isDone: page.isDone,
-      scanned: page.page.length,
+      nextCursor: prepared.nextCursor,
+      isDone: prepared.isDone,
+      scanned: prepared.rows.length,
       ready,
       ambiguous,
-      findings,
+      changed,
+      skipped,
+      writes,
+      findings: prepared.findings,
     };
   },
 });
