@@ -1120,6 +1120,50 @@ describe('organization isolation for sessions and scenarios', () => {
     expect(after).toEqual(before)
   })
 
+  it('does not expose a foreign private scenario through a legacy assignment without a session link', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    const foreignScenario = await t
+      .withIdentity(identity('outsider'))
+      .mutation(createPrivateScenarioRef, {
+        institutionId: fixture.orgB,
+        ...scenarioInput('Organization B private scenario'),
+      })
+    const foreignScenarioDoc = await t.run((ctx) =>
+      ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) =>
+          index.eq('scenarioKey', foreignScenario.id),
+        )
+        .unique(),
+    )
+    if (!foreignScenarioDoc) throw new Error('private scenario fixture missing')
+    const assignment = await seedCohortAssignment(t, {
+      institutionId: fixture.orgA,
+      scenarioId: foreignScenarioDoc._id,
+      createdByUserId: fixture.instructor,
+      learners: [fixture.dual],
+      title: 'Legacy foreign-scenario assignment',
+    })
+
+    await expectAppError(
+      t.withIdentity(identity('dual')).query(getAssignmentRef, {
+        assignmentId: assignment.assignmentId,
+      }),
+      AppErrorCode.NOT_FOUND,
+    )
+    expect(
+      await t.run((ctx) =>
+        ctx.db
+          .query('assignmentSessions')
+          .withIndex('by_assignment_user', (index) =>
+            index.eq('assignmentId', assignment.assignmentId).eq('userId', fixture.dual),
+          )
+          .collect(),
+      ),
+    ).toEqual([])
+  })
+
   it('preserves valid learner and instructor assignment-session projections', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedIsolationFixture(t)

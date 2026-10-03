@@ -897,7 +897,7 @@ export const get = query({
     v.null(),
   ),
   handler: async (ctx, args) => {
-    const { assignment, user, membership } = await requireAssignmentRole(
+    const { assignment, user, membership, institution } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
       ["learner", "instructor", "admin"],
@@ -905,6 +905,28 @@ export const get = query({
     if (!assignment.published && !canViewUnpublishedAssignment(membership))
       return null;
     const scenario = await ctx.db.get(assignment.scenarioId);
+    if (
+      !scenario ||
+      (scenario.institutionId && scenario.institutionId !== institution._id)
+    ) {
+      throw notFound("Assignment");
+    }
+    try {
+      await requireAssignableScenario(
+        ctx,
+        scenario,
+        institution,
+        assignment.createdByUserId,
+      );
+    } catch (error) {
+      if (
+        error instanceof ConvexError &&
+        error.data.code === AppErrorCode.NOT_FOUND
+      ) {
+        throw notFound("Assignment");
+      }
+      throw error;
+    }
     const session = await getAssignmentSession(ctx, assignment._id, user._id);
     return {
       id: assignment._id,
@@ -925,8 +947,8 @@ export const get = query({
       ...(assignment.allowedFilingEvents
         ? { allowedFilingEvents: assignment.allowedFilingEvents }
         : {}),
-      scenarioTitle: scenario?.title ?? "Scenario",
-      scenarioKey: scenario?.scenarioKey ?? "",
+      scenarioTitle: scenario.title,
+      scenarioKey: scenario.scenarioKey,
       status: statusForAssignmentSession(session),
       ...(session?.caseSessionId
         ? { caseSessionId: session.caseSessionId }
