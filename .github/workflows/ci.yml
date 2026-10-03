@@ -40,6 +40,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
+      - name: Smoke test the Husky staged-file hook in a temporary repository
+        run: bun scripts/lint-staged-hook-smoke.ts
       - run: bun run typecheck
       - run: bun run test
       - run: bun run build
