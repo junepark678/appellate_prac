@@ -24,8 +24,17 @@ import { action, internalMutation, internalQuery, mutation, query } from './_gen
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
-import { getCurrentUser, requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
+import { requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
+import { requireInstitutionRole } from './authz'
 import { appendCaseSessionEvent } from './caseSessionEventLog'
+import {
+  AppErrorCode,
+  ConvexError,
+  notFound,
+  sessionLocked,
+  validationError,
+} from './errors'
+import { isOrganizationMembershipActive } from './organizationContracts'
 import {
   actorWorkProductKindValidator,
   actorWorkProductValidator,
@@ -119,11 +128,12 @@ const openRouterCooldownMs = 10_000
 const estimatedOpenRouterCostCents = 1
 const AI_CALL_TIMEOUT_MS = 30_000
 const seedScenarios = scenarioSeed as Scenario[]
-const maxUploadedPdfBytes = 25 * 1024 * 1024
-const maxExtractedTextChars = 200_000
-const maxDocumentAnalysisJsonChars = 900_000
-const maxDocumentFileNameChars = 200
-const maxDocumentSignals = 80
+
+function rejectClientStorageClaims(documents: UploadedDocument[]) {
+  if (documents.some((document) => document.storageId !== undefined)) {
+    throw validationError('Use document upload intents')
+  }
+}
 
 // TODO: Wrap in withTimeout() from ai-resilience once module is integrated
 function withAiTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -278,7 +288,12 @@ function scenarioFromDoc(
   }
 }
 
-async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<'users'>) {
+async function ensureScenarioDoc(
+  ctx: WriteCtx,
+  scenarioKey: string,
+  userId: Id<'users'>,
+  institutionId: Id<'institutions'>,
+) {
   const existing = await ctx.db
     .query('scenarios')
     .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
@@ -286,85 +301,27 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<
 
   if (existing) {
     const visibility = existing.visibility ?? (existing.ownerUserId ? 'private' : 'public_template')
-    if (visibility === 'private' && existing.ownerUserId !== userId) {
-      throw new Error(`Unknown scenario: ${scenarioKey}`)
+    if (
+      visibility === 'private' &&
+      (existing.ownerUserId !== userId || existing.institutionId !== institutionId)
+    ) {
+      throw notFound('Scenario')
     }
     if (
       visibility === 'public_template' &&
       (existing.revisionStatus ?? (existing.published ? 'published' : 'draft')) !== 'published'
     ) {
-      throw new Error(`Unknown scenario: ${scenarioKey}`)
+      throw notFound('Scenario')
     }
+
+    // A public template is an immutable catalog entry. Deployment-only seed
+    // utilities own reconciliation; a learner session must never rewrite it.
+    return existing
   }
 
   const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey)
   if (!bundled) {
-    if (existing) return existing
-    // ERROR_CODE: NOT_FOUND
-    throw new Error(`Unknown scenario: ${scenarioKey}`)
-  }
-
-  if (existing) {
-    await ctx.db.patch(existing._id, {
-      visibility: 'public_template',
-      scenarioFamilyKey: bundled.id,
-      revision: existing.revision ?? 1,
-      revisionStatus: 'published',
-      title: bundled.title,
-      source: bundled.source,
-      courtPackId: bundled.courtPackId,
-      shortCaption: bundled.shortCaption,
-      lowerTribunal: bundled.lowerTribunal,
-      natureOfSuit: bundled.natureOfSuit,
-      proceduralPosture: bundled.proceduralPosture,
-      issuesPresented: bundled.issuesPresented,
-      meritsRecord: bundled.meritsRecord,
-      ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
-      ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
-      documentAssetsJson: undefined,
-      ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
-      published: true,
-    })
-    const [existingIssues, existingExcerpts] = await Promise.all([
-      ctx.db
-        .query('scenarioIssues')
-        .withIndex('by_scenario', (index) => index.eq('scenarioId', existing._id))
-        .collect(),
-      ctx.db
-        .query('scenarioRecordExcerpts')
-        .withIndex('by_scenario', (index) => index.eq('scenarioId', existing._id))
-        .collect(),
-    ])
-    if (existingIssues.length !== (bundled.issues?.length ?? 0)) {
-      await Promise.all(existingIssues.map((issue) => ctx.db.delete(issue._id)))
-      for (const issue of bundled.issues ?? []) {
-        await ctx.db.insert('scenarioIssues', {
-          scenarioId: existing._id,
-          issueId: issue.id,
-          label: issue.label,
-          standardOfReview: issue.standardOfReview,
-          preservationFacts: issue.preservationFacts,
-          recordSupportFacts: issue.recordSupportFacts,
-          likelyArgumentsForAppellant: issue.likelyArgumentsForAppellant,
-          likelyArgumentsForAppellee: issue.likelyArgumentsForAppellee,
-          possibleRelief: issue.possibleRelief,
-        })
-      }
-    }
-    if (existingExcerpts.length !== (bundled.recordExcerpts?.length ?? 0)) {
-      await Promise.all(existingExcerpts.map((excerpt) => ctx.db.delete(excerpt._id)))
-      for (const excerpt of bundled.recordExcerpts ?? []) {
-        await ctx.db.insert('scenarioRecordExcerpts', {
-          scenarioId: existing._id,
-          excerptId: excerpt.id,
-          label: excerpt.label,
-          source: excerpt.source,
-          text: excerpt.text,
-          citedByIssueIds: excerpt.citedByIssueIds,
-        })
-      }
-    }
-    return (await ctx.db.get(existing._id)) ?? existing
+    throw notFound('Scenario')
   }
 
   const scenarioId = await ctx.db.insert('scenarios', {
@@ -418,17 +375,132 @@ async function ensureScenarioDoc(ctx: WriteCtx, scenarioKey: string, userId: Id<
   return scenario
 }
 
+async function requireSessionScenarioLink(
+  ctx: ReadCtx,
+  session: Doc<'caseSessions'>,
+  userId: Id<'users'>,
+) {
+  const scenario = await ctx.db.get(session.scenarioId)
+  if (!scenario) throw notFound('Case session')
+  const visibility = scenario.visibility ?? (scenario.ownerUserId ? 'private' : 'public_template')
+  if (visibility === 'private') {
+    if (
+      !scenario.ownerUserId ||
+      !session.institutionId ||
+      scenario.institutionId !== session.institutionId
+    ) {
+      throw notFound('Case session')
+    }
+    if (scenario.ownerUserId !== userId) {
+      const links = await ctx.db
+        .query('assignmentSessions')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', session._id))
+        .collect()
+      const authorizedAssignment = await Promise.all(links.map(async (link) => {
+        if (link.userId !== userId) return false
+        const assignment = await ctx.db.get(link.assignmentId)
+        const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null
+        return Boolean(
+          assignment &&
+          cohort &&
+          assignment.scenarioId === scenario._id &&
+          cohort.institutionId === session.institutionId,
+        )
+      }))
+      if (!authorizedAssignment.some(Boolean)) throw notFound('Case session')
+      const institution = await ctx.db.get(session.institutionId)
+      if (
+        !institution ||
+        institution.status !== 'active' ||
+        ((institution.kind ?? 'shared') === 'personal' &&
+          institution.personalOwnerUserId !== scenario.ownerUserId)
+      ) {
+        throw notFound('Case session')
+      }
+      const ownerMemberships = await ctx.db
+        .query('institutionMemberships')
+        .withIndex('by_institution_user', (index) =>
+          index.eq('institutionId', session.institutionId!).eq('userId', scenario.ownerUserId!),
+        )
+        .collect()
+      if (ownerMemberships.length > 1) {
+        throw new ConvexError(AppErrorCode.CONFLICT, 'Organization membership is ambiguous')
+      }
+      if (!isOrganizationMembershipActive(institution, ownerMemberships[0] ?? null, Date.now())) {
+        throw notFound('Case session')
+      }
+    }
+    return scenario
+  }
+  if (
+    (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published'
+  ) {
+    throw notFound('Case session')
+  }
+  return scenario
+}
+
+function sessionLinkConflict(): never {
+  throw new ConvexError(AppErrorCode.CONFLICT, 'Session linkage is inconsistent')
+}
+
+async function requireSessionAssignmentLinks(
+  ctx: ReadCtx,
+  session: Doc<'caseSessions'>,
+) {
+  const links = await ctx.db
+    .query('assignmentSessions')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', session._id))
+    .collect()
+  for (const link of links) {
+    if (link.caseSessionId !== session._id || link.userId !== session.userId) {
+      sessionLinkConflict()
+    }
+    const assignment = await ctx.db.get(link.assignmentId)
+    const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null
+    if (
+      !assignment ||
+      !cohort ||
+      assignment.scenarioId !== session.scenarioId ||
+      cohort.institutionId !== session.institutionId
+    ) {
+      sessionLinkConflict()
+    }
+  }
+}
+
+/** Resolve the caller's own session and its active organization context. */
+export async function requireOwnedSession(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  const { user } = await requireCurrentUser(ctx)
+  const session = await ctx.db.get(caseSessionId)
+  if (
+    !session ||
+    session.userId !== user._id ||
+    !session.institutionId
+  ) {
+    throw notFound('Case session')
+  }
+  const { institution, membership } = await requireInstitutionRole(
+    ctx,
+    session.institutionId,
+    ['learner'],
+  )
+  await requireSessionScenarioLink(ctx, session, user._id)
+  await requireSessionAssignmentLinks(ctx, session)
+  return { user, session, institution, membership }
+}
+
 async function requireAuthorizedSessionDoc(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
   userId: Id<'users'>,
 ) {
-  const caseSession = await ctx.db.get(caseSessionId)
-  if (!caseSession || caseSession.userId !== userId) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Case session not found')
-  }
-  return caseSession
+  const { user, session } = await requireOwnedSession(ctx, caseSessionId)
+  if (user._id !== userId) throw notFound('Case session')
+  return session
 }
 
 async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseSessions'>) {
@@ -443,8 +515,7 @@ async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseS
         assignmentSession.reopenedAt <= assignmentSession.submittedAt),
   )
   if (isLocked) {
-    // ERROR_CODE: SESSION_LOCKED
-    throw new Error('Submitted assignment sessions are locked until reopened by an instructor')
+    throw sessionLocked()
   }
 }
 
@@ -586,14 +657,33 @@ function simulationTurnFromDoc(turn: Doc<'simulationTurns'>): SimulationTurnReco
   }
 }
 
+async function requireActorWorkProductSources(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+  sourceDocumentAnalysisIds: string[],
+  sourceFilingIds: string[],
+) {
+  for (const rawId of sourceDocumentAnalysisIds) {
+    const analysis = await ctx.db.get(rawId as Id<'documentAnalyses'>)
+    if (!analysis || analysis.caseSessionId !== caseSessionId) {
+      throw notFound('Document analysis')
+    }
+  }
+  for (const rawId of sourceFilingIds) {
+    const filing = await ctx.db.get(rawId as Id<'filings'>)
+    if (!filing || filing.caseSessionId !== caseSessionId) throw notFound('Filing')
+  }
+}
+
 async function assembleCaseSession(
   ctx: ReadCtx,
   caseSession: Doc<'caseSessions'>,
 ): Promise<CaseSession> {
+  if (!caseSession.institutionId) throw notFound('Case session')
+  await requireSessionScenarioLink(ctx, caseSession, caseSession.userId)
   const scenarioDoc = await ctx.db.get(caseSession.scenarioId)
   if (!scenarioDoc) {
-    // ERROR_CODE: NOT_FOUND
-    throw new Error('Scenario not found for case session')
+    throw notFound('Case session')
   }
 
   const [
@@ -679,6 +769,57 @@ async function assembleCaseSession(
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
       .collect(),
   ])
+  const filingIds = new Set(filings.map((filing) => filing._id))
+  const docketEntryIds = new Set(docketEntries.map((entry) => entry._id))
+
+  for (const analysis of documentAnalyses) {
+    if (!analysis.documentId) continue
+    const document = await ctx.db.get(analysis.documentId)
+    if (!document || document.caseSessionId !== caseSession._id) {
+      throw notFound('Document analysis')
+    }
+  }
+  for (const filing of filings) {
+    const documents = await Promise.all(filing.documentIds.map((id) => ctx.db.get(id)))
+    if (documents.some((document) => !document || document.caseSessionId !== caseSession._id)) {
+      throw notFound('Filing')
+    }
+    for (const analysisId of filing.documentAnalysisIds ?? []) {
+      const analysis = await ctx.db.get(analysisId)
+      if (
+        !analysis ||
+        analysis.caseSessionId !== caseSession._id ||
+        (analysis.documentId && !filing.documentIds.includes(analysis.documentId))
+      ) {
+        throw notFound('Filing')
+      }
+    }
+  }
+  for (const receipt of receipts) {
+    const filing = await ctx.db.get(receipt.filingId)
+    if (!filing || filing.caseSessionId !== caseSession._id) {
+      throw notFound('ECF receipt')
+    }
+  }
+  for (const entry of docketEntries) {
+    if (entry.filingId && !filingIds.has(entry.filingId)) throw notFound('Docket entry')
+  }
+  for (const deadline of deadlines) {
+    if (deadline.sourceEntryId && !docketEntryIds.has(deadline.sourceEntryId)) {
+      throw notFound('Deadline')
+    }
+  }
+  for (const product of actorWorkProducts) {
+    await requireActorWorkProductSources(
+      ctx,
+      caseSession._id,
+      product.sourceDocumentAnalysisIds,
+      product.sourceFilingIds,
+    )
+  }
+  if (simulationTurns.some((turn) => turn.caseSessionId !== caseSession._id)) {
+    throw notFound('Simulation turn')
+  }
   const analysisByDocumentId = new Map(
     documentAnalyses
       .filter((analysis): analysis is Doc<'documentAnalyses'> & { documentId: Id<'documents'> } =>
@@ -734,6 +875,7 @@ async function assembleCaseSession(
 
   return {
     id: caseSession._id,
+    institutionId: caseSession.institutionId,
     scenario: scenarioFromDoc(
       scenarioDoc,
       scenarioIssues.map((issue) => ({
@@ -1383,77 +1525,29 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function assertMaxLength(value: string | undefined, max: number, label: string) {
-  if (value && value.length > max) {
-    throw new Error(`${label} exceeds the simulator storage limit.`)
-  }
-}
-
-async function verifyUploadedPdfDocument(
-  ctx: WriteCtx,
-  document: UploadedDocument,
-  analysis: DocumentAnalysis,
-) {
-  if (!document.storageId) {
-    throw new Error('Uploaded PDF storage is required.')
-  }
-  if (document.mimeType !== 'application/pdf' || analysis.mimeType !== 'application/pdf') {
-    throw new Error('Only PDF uploads can be persisted.')
-  }
-  assertMaxLength(document.fileName, maxDocumentFileNameChars, 'File name')
-  assertMaxLength(analysis.normalizedText, maxExtractedTextChars, 'Extracted PDF text')
-  if (document.extractedSignals.length > maxDocumentSignals) {
-    throw new Error('Document signal count exceeds the simulator storage limit.')
-  }
-  if (typeof analysis.pageCount === 'number' && analysis.pageCount > 500) {
-    throw new Error('PDF page count exceeds the simulator storage limit.')
-  }
-  const storageId = document.storageId as Id<'_storage'>
-  const metadata = await ctx.db.system.get('_storage', storageId)
-  if (!metadata) {
-    throw new Error('Uploaded PDF storage was not found.')
-  }
-  if (metadata.size > maxUploadedPdfBytes) {
-    throw new Error('PDF exceeds the simulator upload size limit.')
-  }
-  if (
-    metadata.contentType &&
-    !metadata.contentType.toLowerCase().startsWith('application/pdf')
-  ) {
-    throw new Error('Uploaded file storage is not a PDF.')
-  }
-  if (document.sizeBytes !== metadata.size || analysis.fileSizeBytes !== metadata.size) {
-    throw new Error('Uploaded PDF metadata does not match stored file metadata.')
-  }
-  if (document.sha256 && metadata.sha256 && document.sha256 !== metadata.sha256) {
-    throw new Error('Uploaded PDF checksum does not match stored file metadata.')
-  }
-  const existingDocument = await ctx.db
-    .query('documents')
-    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-    .first()
-  if (existingDocument) {
-    throw new Error('Uploaded PDF storage is already associated with a document.')
-  }
-  if (JSON.stringify(analysis).length > maxDocumentAnalysisJsonChars) {
-    throw new Error('PDF analysis exceeds the simulator storage limit.')
-  }
-  return {
-    storageId,
-    sizeBytes: metadata.size,
-    sha256: metadata.sha256 ?? document.sha256,
-  }
-}
-
 export const create = mutation({
   args: {
     scenarioId: v.optional(v.string()),
+    institutionId: v.optional(v.id('institutions')),
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
-    const user = await upsertCurrentUserDoc(ctx)
+    const user = args.institutionId
+      ? (await requireCurrentUser(ctx)).user
+      : await upsertCurrentUserDoc(ctx)
+    if (args.institutionId) {
+      await requireInstitutionRole(ctx, args.institutionId, ['learner'])
+    }
+    const institutionId = args.institutionId ?? (
+      await ctx.runMutation(internal.organizations.ensurePersonalForTrustedUser, {
+        userId: user._id,
+      })
+    ).institutionId
+    if (!args.institutionId) {
+      await requireInstitutionRole(ctx, institutionId, ['learner'])
+    }
     const scenarioKey = args.scenarioId ?? defaultScenarioKey
-    const scenario = await ensureScenarioDoc(ctx, scenarioKey, user._id)
+    const scenario = await ensureScenarioDoc(ctx, scenarioKey, user._id, institutionId)
     const [scenarioIssues, scenarioRecordExcerpts, scenarioDocumentAssets] = await Promise.all([
       ctx.db
         .query('scenarioIssues')
@@ -1495,6 +1589,7 @@ export const create = mutation({
       : createInitialSessionForScenario(scenarioModel)
     const initialProcedureState = inferProcedureState(initialSession)
     const caseSessionId = await ctx.db.insert('caseSessions', {
+      institutionId,
       scenarioId: scenario._id,
       userId: user._id,
       courtPackId: initialSession.courtPackId,
@@ -1525,26 +1620,58 @@ export const create = mutation({
 export const getForCurrentUser = query({
   args: {
     caseSessionId: v.optional(v.id('caseSessions')),
+    institutionId: v.optional(v.id('institutions')),
   },
   returns: v.union(caseSessionValidator, v.null()),
   handler: async (ctx, args) => {
-    const { user } = await getCurrentUser(ctx)
-    if (!user) return null
-
     if (args.caseSessionId) {
-      const caseSession = await ctx.db.get(args.caseSessionId)
-      if (!caseSession || caseSession.userId !== user._id) return null
-      return assembleCaseSession(ctx, caseSession)
+      const { session } = await requireOwnedSession(ctx, args.caseSessionId)
+      if (args.institutionId && session.institutionId !== args.institutionId) {
+        throw notFound('Case session')
+      }
+      return assembleCaseSession(ctx, session)
     }
-
-    const sessions = await ctx.db
-      .query('caseSessions')
-      .withIndex('by_user', (index) => index.eq('userId', user._id))
-      .collect()
+    const { sessions } = await readableSessionsForCurrentUser(ctx, args.institutionId)
     const latest = sessions.sort((a, b) => b._creationTime - a._creationTime)[0]
     return latest ? assembleCaseSession(ctx, latest) : null
   },
 })
+
+async function readableSessionsForCurrentUser(
+  ctx: ReadCtx,
+  institutionId?: Id<'institutions'>,
+) {
+  const { user } = await requireCurrentUser(ctx)
+  if (institutionId) await requireInstitutionRole(ctx, institutionId, ['learner'])
+  const candidates = institutionId
+    ? await ctx.db
+        .query('caseSessions')
+        .withIndex('by_institution', (index) => index.eq('institutionId', institutionId))
+        .collect()
+    : await ctx.db
+        .query('caseSessions')
+        .withIndex('by_user', (index) => index.eq('userId', user._id))
+        .collect()
+  const sessions: Doc<'caseSessions'>[] = []
+  for (const candidate of candidates) {
+    if (candidate.userId !== user._id) continue
+    try {
+      const { session } = await requireOwnedSession(ctx, candidate._id)
+      if (!institutionId || session.institutionId === institutionId) {
+        sessions.push(session)
+      }
+    } catch (error) {
+      if (
+        error instanceof ConvexError &&
+        error.data.code === AppErrorCode.NOT_FOUND
+      ) {
+        continue
+      }
+      throw error
+    }
+  }
+  return { user, sessions }
+}
 
 export const getWritableForCurrentUser = internalQuery({
   args: {
@@ -1566,8 +1693,8 @@ export const acceptLegalTrainingDisclaimer = mutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const { user, session: caseSessionDoc } = await requireOwnedSession(ctx, args.caseSessionId)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const acceptedAt = new Date().toISOString()
     const existing = await ctx.db
       .query('userDisclaimers')
@@ -1603,16 +1730,12 @@ export const acceptLegalTrainingDisclaimer = mutation({
 })
 
 export const listForCurrentUser = query({
-  args: {},
+  args: {
+    institutionId: v.optional(v.id('institutions')),
+  },
   returns: v.array(caseSessionSummaryValidator),
-  handler: async (ctx) => {
-    const { user } = await getCurrentUser(ctx)
-    if (!user) return []
-
-    const sessions = await ctx.db
-      .query('caseSessions')
-      .withIndex('by_user', (index) => index.eq('userId', user._id))
-      .collect()
+  handler: async (ctx, args) => {
+    const { sessions } = await readableSessionsForCurrentUser(ctx, args.institutionId)
     const scenarioIds = new Set(sessions.map((session) => session.scenarioId))
     const scenarios = new Map<Id<'scenarios'>, Doc<'scenarios'>>()
     await Promise.all(
@@ -1627,8 +1750,10 @@ export const listForCurrentUser = query({
       .sort((a, b) => b._creationTime - a._creationTime)
       .map((session) => {
         const scenario = scenarios.get(session.scenarioId)
+        if (!session.institutionId) throw notFound('Case session')
         return {
           id: session._id,
+          institutionId: session.institutionId,
           scenarioTitle: scenario?.title ?? 'Untitled scenario',
           shortCaption: scenario?.shortCaption ?? 'Untitled case',
           status: session.status,
@@ -1649,6 +1774,7 @@ export const submitFiling = mutation({
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     await requireWritableCaseSession(ctx, args.caseSessionId)
+    rejectClientStorageClaims(args.draft.documents)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const nextSession = transitionAfterFiling(
       withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft)),
@@ -1678,6 +1804,10 @@ export const preflightFiling = query({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    rejectClientStorageClaims([
+      args.submission.mainDocument,
+      ...args.submission.attachments.map((attachment) => attachment.document),
+    ])
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     return preflightEcfFiling(session, args.submission as FilingSubmission)
   },
@@ -1705,7 +1835,7 @@ export const generateDocumentUploadUrl = mutation({
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     await requireWritableCaseSession(ctx, args.caseSessionId)
-    return ctx.storage.generateUploadUrl()
+    throw validationError('Use document upload intents')
   },
 })
 
@@ -1723,75 +1853,7 @@ export const persistDocumentAnalysis = mutation({
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     await requireWritableCaseSession(ctx, args.caseSessionId)
-    const verifiedDocument = await verifyUploadedPdfDocument(
-      ctx,
-      args.document as UploadedDocument,
-      args.analysis as DocumentAnalysis,
-    )
-    const analysisJson = JSON.stringify(args.analysis)
-    const documentId = await ctx.db.insert('documents', {
-      caseSessionId: args.caseSessionId,
-      storageId: verifiedDocument.storageId,
-      sha256: verifiedDocument.sha256,
-      fileName: args.document.fileName,
-      mimeType: args.document.mimeType,
-      sizeBytes: verifiedDocument.sizeBytes,
-      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
-      ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
-      ...(args.analysis.textExtractionStatus
-        ? { textExtractionStatus: args.analysis.textExtractionStatus }
-        : {}),
-      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
-      extractedSignals: args.document.extractedSignals,
-      validationJson: analysisJson,
-    })
-    const analysisId = await ctx.db.insert('documentAnalyses', {
-      caseSessionId: args.caseSessionId,
-      documentId,
-      analyzerId: args.analysis.analyzerId,
-      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
-      fileSizeBytes: args.analysis.fileSizeBytes,
-      mimeType: args.analysis.mimeType,
-      searchableText: args.analysis.searchableText,
-      certificateOfServiceDetected: args.analysis.certificateOfServiceDetected,
-      certificateOfComplianceDetected: args.analysis.certificateOfComplianceDetected,
-      sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
-      warnings: args.analysis.warnings,
-      analysisJson,
-      ...(args.analysis.normalizedText
-        ? { extractedTextHash: hashText(args.analysis.normalizedText) }
-        : {}),
-      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
-      ...(args.analysis.legalCitations
-        ? { citationCount: args.analysis.legalCitations.length }
-        : {}),
-      ...(args.analysis.recordCitations
-        ? { recordCitationCount: args.analysis.recordCitations.length }
-        : {}),
-      ...(args.analysis.appendixCitations
-        ? { appendixCitationCount: args.analysis.appendixCitations.length }
-        : {}),
-      createdAt: new Date().toISOString(),
-    })
-    await ctx.db.patch(documentId, { analysisId })
-
-    const document: UploadedDocument = {
-      ...args.document,
-      id: documentId,
-      storageId: verifiedDocument.storageId,
-      sha256: verifiedDocument.sha256,
-      sizeBytes: verifiedDocument.sizeBytes,
-      ...(typeof args.analysis.pageCount === 'number' ? { pageCount: args.analysis.pageCount } : {}),
-      ...(args.analysis.normalizedText ? { extractedText: args.analysis.normalizedText } : {}),
-      ...(args.analysis.textExtractionStatus
-        ? { textExtractionStatus: args.analysis.textExtractionStatus }
-        : {}),
-      ...(typeof args.analysis.wordCount === 'number' ? { wordCount: args.analysis.wordCount } : {}),
-      analysisId,
-      analysis: args.analysis,
-    }
-
-    return { document, analysisId }
+    throw validationError('Use document upload intents')
   },
 })
 
@@ -1801,14 +1863,20 @@ export const getDocumentAnalysesForCurrentUser = query({
   },
   returns: v.array(documentAnalysisRecordValidator),
   handler: async (ctx, args) => {
-    const { user } = await getCurrentUser(ctx)
-    if (!user) return []
-
+    const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const analyses = await ctx.db
       .query('documentAnalyses')
       .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
       .collect()
+
+    for (const analysis of analyses) {
+      if (!analysis.documentId) continue
+      const document = await ctx.db.get(analysis.documentId)
+      if (!document || document.caseSessionId !== args.caseSessionId) {
+        throw notFound('Document analysis')
+      }
+    }
 
     return analyses.map((analysis) => ({
       id: analysis._id,
@@ -1834,6 +1902,10 @@ export const submitEcfFiling = mutation({
     const { user } = await requireCurrentUser(ctx)
     const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     await requireWritableCaseSession(ctx, args.caseSessionId)
+    rejectClientStorageClaims([
+      args.submission.mainDocument,
+      ...args.submission.attachments.map((attachment) => attachment.document),
+    ])
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = submitEcfFilingDomain(session, args.submission as FilingSubmission)
     const nextSession = transitionAfterFiling(result.session)
@@ -2034,6 +2106,7 @@ export const importCourtListenerSource = mutation({
     const importedAt = new Date().toISOString()
 
     await ctx.db.insert('sourceCases', {
+      caseSessionId: caseSessionDoc._id,
       scenarioId: caseSessionDoc.scenarioId,
       sourceSystem: 'courtlistener',
       externalId: String(args.result.docket_id ?? args.result.id),
@@ -2090,9 +2163,7 @@ export const getTrialDocketForCurrentUser = query({
   },
   returns: v.union(trialDocketValidator, v.null()),
   handler: async (ctx, args) => {
-    const { user } = await getCurrentUser(ctx)
-    if (!user) return null
-
+    const { user } = await requireCurrentUser(ctx)
     const caseSession = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
     const imports = await ctx.db
       .query('trialDocketImports')
@@ -2116,6 +2187,7 @@ export const getTrialDocketForCurrentUser = query({
 
 export const getAiGateForCurrentUser = internalQuery({
   args: {
+    caseSessionId: v.id('caseSessions'),
     nowIso: v.string(),
     cooldownMs: v.number(),
   },
@@ -2126,7 +2198,8 @@ export const getAiGateForCurrentUser = internalQuery({
     spentCents: v.number(),
   }),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
+    const { user } = await requireOwnedSession(ctx, args.caseSessionId)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const month = createdMonth(args.nowIso)
     const runs = await ctx.db
       .query('aiRuns')
@@ -2186,8 +2259,8 @@ export const reserveAiRunForCurrentUser = internalMutation({
     spentCents: v.number(),
   }),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
-    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const { user } = await requireOwnedSession(ctx, args.caseSessionId)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
     const month = createdMonth(args.nowIso)
     const runs = await ctx.db
       .query('aiRuns')
@@ -2264,7 +2337,13 @@ export const finalizeAiRunForCurrentUser = internalMutation({
     const { user } = await requireCurrentUser(ctx)
     const run = await ctx.db.get(args.aiRunId)
     if (!run || run.userId !== user._id) {
-      throw new Error('AI run reservation not found.')
+      throw notFound('AI run')
+    }
+    const { session } = await requireOwnedSession(ctx, run.caseSessionId)
+    if (session.userId !== run.userId) throw notFound('AI run')
+    await requireWritableCaseSession(ctx, session._id)
+    if (run.errorClass !== 'in_flight') {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
     }
     await ctx.db.patch(args.aiRunId, {
       actorId: args.actorId,
@@ -2331,15 +2410,22 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const { user, session: authorizedSession } = await requireOwnedSession(ctx, args.caseSessionId)
+    const caseSessionDoc = authorizedSession
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const validation = validateToolCall(session, args.toolCall)
     if (args.aiRunId) {
       const run = await ctx.db.get(args.aiRunId)
-      if (!run || run.userId !== user._id) {
-        throw new Error('AI run reservation not found.')
+      if (
+        !run ||
+        run.userId !== user._id ||
+        run.caseSessionId !== authorizedSession._id
+      ) {
+        throw notFound('AI run')
+      }
+      if (run.errorClass !== 'in_flight') {
+        throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
       }
       await ctx.db.patch(args.aiRunId, {
         actorId: args.toolCall.actorId,
@@ -2396,6 +2482,7 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
 export const persistActorWorkProductForCurrentUser = internalMutation({
   args: {
     caseSessionId: v.id('caseSessions'),
+    aiRunId: v.id('aiRuns'),
     actorId: v.string(),
     kind: actorWorkProductKindValidator,
     workProductJson: v.string(),
@@ -2403,16 +2490,35 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
     sourceFilingIds: v.array(v.string()),
     validationIssues: v.array(validationIssueValidator),
     createdAt: v.string(),
+    costCents: v.number(),
+    latencyMs: v.number(),
   },
   returns: actorWorkProductValidator,
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
-    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const { user, session } = await requireOwnedSession(ctx, args.caseSessionId)
     await requireWritableCaseSession(ctx, args.caseSessionId)
+    const run = await ctx.db.get(args.aiRunId)
+    if (
+      !run ||
+      run.userId !== user._id ||
+      run.caseSessionId !== session._id
+    ) {
+      throw notFound('AI run')
+    }
+    if (run.errorClass !== 'in_flight') {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
+    }
+    await requireActorWorkProductSources(
+      ctx,
+      session._id,
+      args.sourceDocumentAnalysisIds,
+      args.sourceFilingIds,
+    )
     const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
       args.workProductJson,
       'actor work product mutation payload',
     )
+    const validationAccepted = !args.validationIssues.some((issue) => issue.severity === 'error')
     const productId = await ctx.db.insert('actorWorkProducts', {
       caseSessionId: args.caseSessionId,
       actorId: args.actorId,
@@ -2428,6 +2534,15 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
       sourceFilingIds: args.sourceFilingIds,
       createdAt: args.createdAt,
+    })
+    await ctx.db.patch(args.aiRunId, {
+      actorId: args.actorId,
+      toolCallJson: args.workProductJson,
+      accepted: validationAccepted,
+      issues: args.validationIssues.map((issue) => issue.code ?? issue.message),
+      costCents: args.costCents,
+      latencyMs: args.latencyMs,
+      errorClass: validationAccepted ? undefined : 'actor_validation_rejected',
     })
 
     return {
@@ -2504,6 +2619,7 @@ export const generateActorWorkProduct = action({
         internal.caseSessions.persistActorWorkProductForCurrentUser,
         {
           caseSessionId: args.caseSessionId,
+          aiRunId: reservation.aiRunId,
           actorId: product.actorId,
           kind: product.kind,
           workProductJson: JSON.stringify(product.workProduct),
@@ -2511,17 +2627,10 @@ export const generateActorWorkProduct = action({
           sourceFilingIds: product.sourceFilingIds,
           validationIssues: product.validationIssues ?? [],
           createdAt: product.createdAt,
+          costCents: estimatedOpenRouterCostCents,
+          latencyMs: Date.now() - startedAt,
         },
       )) as ActorWorkProduct
-      await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
-        aiRunId: reservation.aiRunId,
-        actorId: product.actorId,
-        toolCallJson: JSON.stringify(product.workProduct),
-        accepted: !(product.validationIssues ?? []).some((issue) => issue.severity === 'error'),
-        issues: (product.validationIssues ?? []).map((issue) => issue.code ?? issue.message),
-        costCents: estimatedOpenRouterCostCents,
-        latencyMs: Date.now() - startedAt,
-      })
       return persisted
     } catch (error) {
       const isTimeout = errorMessage(error).includes('timed out')
@@ -2564,8 +2673,7 @@ export const acceptActorWorkProduct = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Actor work product not found')
+      throw notFound('Actor work product')
     }
 
     const session = await assembleCaseSession(ctx, caseSessionDoc)
@@ -2677,9 +2785,14 @@ export const rejectActorWorkProduct = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
-      // ERROR_CODE: NOT_FOUND
-      throw new Error('Actor work product not found')
+      throw notFound('Actor work product')
     }
+    await requireActorWorkProductSources(
+      ctx,
+      args.caseSessionId,
+      productDoc.sourceDocumentAnalysisIds,
+      productDoc.sourceFilingIds,
+    )
 
     await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
     await appendCaseSessionEvent(

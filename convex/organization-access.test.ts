@@ -636,6 +636,9 @@ describe("registered organization-scoped authorization", () => {
     const caseSessionId = await learner.mutation(startSessionRef, {
       assignmentId: fixture.publishedB,
     });
+    expect(
+      await t.run((ctx) => ctx.db.get(caseSessionId)),
+    ).toMatchObject({ institutionId: fixture.organizationB });
     await learner.mutation(submitSessionRef, {
       assignmentId: fixture.publishedB,
       caseSessionId,

@@ -349,6 +349,7 @@ export const ecfEventAvailabilityValidator = v.object({
 
 export const caseSessionValidator = v.object({
   id: v.string(),
+  institutionId: v.optional(v.id('institutions')),
   scenario: scenarioValidator,
   courtPackId: v.string(),
   status: caseStatusValidator,
@@ -412,6 +413,7 @@ export const caseSessionValidator = v.object({
 
 export const caseSessionSummaryValidator = v.object({
   id: v.string(),
+  institutionId: v.id('institutions'),
   scenarioTitle: v.string(),
   shortCaption: v.string(),
   status: caseStatusValidator,

@@ -237,14 +237,6 @@ async function requireScenarioForAssignment(
     .unique();
   const bundled = seedScenarios.find((scenario) => scenario.id === scenarioKey);
   if (existing) {
-    if (bundled) {
-      await ctx.db.patch(existing._id, seedScenarioDoc(bundled));
-      const updated = await ctx.db.get(existing._id);
-      if (!updated) {
-        throw notFound("Scenario");
-      }
-      return updated;
-    }
     return existing;
   }
 
@@ -259,6 +251,61 @@ async function requireScenarioForAssignment(
   return scenario;
 }
 
+async function requireAssignableScenario(
+  ctx: ReadCtx,
+  scenario: Doc<"scenarios">,
+  institution: Doc<"institutions">,
+  privateOwnerUserId: Id<"users">,
+) {
+  if (scenario.institutionId && scenario.institutionId !== institution._id) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Scenario organization scope mismatch",
+    );
+  }
+
+  const visibility = scenarioVisibility(scenario);
+  if (visibility === "public_template") {
+    if (scenarioRevisionStatus(scenario) !== "published" || !scenario.published) {
+      throw notFound("Scenario");
+    }
+    return scenario;
+  }
+
+  if (
+    visibility !== "private" ||
+    scenario.institutionId !== institution._id ||
+    scenario.ownerUserId !== privateOwnerUserId
+  ) {
+    throw notFound("Scenario");
+  }
+
+  if (
+    (institution.kind ?? "shared") === "personal" &&
+    institution.personalOwnerUserId !== scenario.ownerUserId
+  ) {
+    throw notFound("Scenario");
+  }
+  const memberships = await ctx.db
+    .query("institutionMemberships")
+    .withIndex("by_institution_user", (index) =>
+      index
+        .eq("institutionId", institution._id)
+        .eq("userId", scenario.ownerUserId!),
+    )
+    .collect();
+  if (memberships.length > 1) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Organization membership is ambiguous",
+    );
+  }
+  if (!isOrganizationMembershipActive(institution, memberships[0] ?? null, Date.now())) {
+    throw notFound("Scenario");
+  }
+  return scenario;
+}
+
 function isSubmittedLockActive(
   session: Pick<Doc<"assignmentSessions">, "submittedAt" | "reopenedAt"> | null,
 ) {
@@ -266,6 +313,104 @@ function isSubmittedLockActive(
     session?.submittedAt &&
     (!session.reopenedAt || session.reopenedAt <= session.submittedAt),
   );
+}
+
+async function requireAssignmentSessionBinding(
+  ctx: ReadCtx,
+  assignmentSession: Doc<"assignmentSessions">,
+  assignment: Doc<"assignments">,
+  cohort: Doc<"cohorts">,
+  institution: Doc<"institutions">,
+) {
+  if (
+    assignmentSession.assignmentId !== assignment._id ||
+    cohort.institutionId !== institution._id
+  ) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session linkage is inconsistent",
+    );
+  }
+  const session = await ctx.db.get(assignmentSession.caseSessionId);
+  if (
+    !session ||
+    session.userId !== assignmentSession.userId ||
+    !session.institutionId ||
+    session.institutionId !== institution._id
+  ) {
+    throw notFound("Case session");
+  }
+  if (session.scenarioId !== assignment.scenarioId) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session scenario mismatch",
+    );
+  }
+
+  const scenario = await ctx.db.get(assignment.scenarioId);
+  if (!scenario) throw notFound("Scenario");
+  await requireAssignableScenario(
+    ctx,
+    scenario,
+    institution,
+    assignment.createdByUserId,
+  );
+
+  const memberships = await ctx.db
+    .query("institutionMemberships")
+    .withIndex("by_institution_user", (index) =>
+      index.eq("institutionId", institution._id).eq("userId", session.userId),
+    )
+    .collect();
+  if (memberships.length > 1) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Organization membership is ambiguous",
+    );
+  }
+  if (!isOrganizationMembershipActive(institution, memberships[0] ?? null, Date.now())) {
+    throw notFound("Case session");
+  }
+
+  const links = await ctx.db
+    .query("assignmentSessions")
+    .withIndex("by_case", (index) =>
+      index.eq("caseSessionId", assignmentSession.caseSessionId),
+    )
+    .collect();
+  if (!links.some((link) => link._id === assignmentSession._id)) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session linkage is inconsistent",
+    );
+  }
+  for (const link of links) {
+    if (
+      link.caseSessionId !== session._id ||
+      link.userId !== session.userId
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Assignment session linkage is inconsistent",
+      );
+    }
+    const linkedAssignment = await ctx.db.get(link.assignmentId);
+    const linkedCohort = linkedAssignment
+      ? await ctx.db.get(linkedAssignment.cohortId)
+      : null;
+    if (
+      !linkedAssignment ||
+      !linkedCohort ||
+      linkedAssignment.scenarioId !== session.scenarioId ||
+      linkedCohort.institutionId !== session.institutionId
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Assignment session linkage is inconsistent",
+      );
+    }
+  }
+  return session;
 }
 
 function statusForAssignmentSession(session: Doc<"assignmentSessions"> | null) {
@@ -364,25 +509,7 @@ export const create = mutation({
       ["instructor", "admin"],
     );
     const scenario = await requireScenarioForAssignment(ctx, args);
-    const visibility = scenarioVisibility(scenario);
-    const revisionStatus = scenarioRevisionStatus(scenario);
-    if (scenario.institutionId && scenario.institutionId !== institution._id) {
-      throw new ConvexError(
-        AppErrorCode.CONFLICT,
-        "Scenario organization scope mismatch",
-      );
-    }
-    const canAssignPrivateScenario =
-      visibility === "private" &&
-      scenario.institutionId === institution._id &&
-      scenario.ownerUserId === user._id;
-    const canAssignPublishedTemplate =
-      visibility === "public_template" &&
-      revisionStatus === "published" &&
-      scenario.published;
-    if (!canAssignPrivateScenario && !canAssignPublishedTemplate) {
-      throw notFound("Scenario");
-    }
+    await requireAssignableScenario(ctx, scenario, institution, user._id);
 
     let simulationPolicyId;
     if (args.autonomyMode) {
@@ -781,7 +908,7 @@ export const startSession = mutation({
   },
   returns: v.id("caseSessions"),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(
+    const { assignment, user, cohort, institution } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
       ["learner"],
@@ -789,18 +916,59 @@ export const startSession = mutation({
     if (!assignment.published) {
       throw validationError("Assignment is not published");
     }
-    const existing = await getAssignmentSession(ctx, assignment._id, user._id);
-    if (existing) {
-      return existing.caseSessionId;
-    }
     const scenario = await ctx.db.get(assignment.scenarioId);
     if (!scenario) {
       throw notFound("Scenario");
+    }
+    await requireAssignableScenario(
+      ctx,
+      scenario,
+      institution,
+      assignment.createdByUserId,
+    );
+    const existingSessions = await listAssignmentSessionsForUser(
+      ctx,
+      assignment._id,
+      user._id,
+    );
+    if (existingSessions.length > 1) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Assignment session linkage is ambiguous",
+      );
+    }
+    const existing = existingSessions[0];
+    if (existing) {
+      const existingCaseSession = await ctx.db.get(existing.caseSessionId);
+      const linkedSessions = await ctx.db
+        .query("assignmentSessions")
+        .withIndex("by_case", (index) =>
+          index.eq("caseSessionId", existing.caseSessionId),
+        )
+        .collect();
+      if (
+        !existingCaseSession ||
+        existing.userId !== user._id ||
+        existingCaseSession.userId !== user._id ||
+        existingCaseSession.institutionId !== institution._id ||
+        existingCaseSession.scenarioId !== assignment.scenarioId ||
+        linkedSessions.length !== 1 ||
+        linkedSessions[0]?._id !== existing._id ||
+        linkedSessions[0]?.assignmentId !== assignment._id ||
+        linkedSessions[0]?.userId !== user._id
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Assignment session linkage is inconsistent",
+        );
+      }
+      return existing.caseSessionId;
     }
     const initialSession = createInitialSessionForScenarioDoc(scenario);
     const caseSessionId = await ctx.db.insert("caseSessions", {
       scenarioId: assignment.scenarioId,
       userId: user._id,
+      institutionId: cohort.institutionId,
       courtPackId: initialSession.courtPackId,
       status: initialSession.status,
       procedureState: inferProcedureState(initialSession),
@@ -852,7 +1020,7 @@ export const attachSession = mutation({
   },
   returns: v.id("caseSessions"),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(
+    const { assignment, user, cohort, institution } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
       ["learner"],
@@ -861,7 +1029,14 @@ export const attachSession = mutation({
       throw validationError("Assignment is not published");
     }
     const caseSession = await ctx.db.get(args.caseSessionId);
-    if (!caseSession || caseSession.userId !== user._id) {
+    if (
+      !caseSession ||
+      caseSession.userId !== user._id ||
+      !caseSession.institutionId
+    ) {
+      throw notFound("Case session");
+    }
+    if (caseSession.institutionId !== cohort.institutionId) {
       throw notFound("Case session");
     }
     if (caseSession.scenarioId !== assignment.scenarioId) {
@@ -870,7 +1045,60 @@ export const attachSession = mutation({
         "Case session scenario mismatch",
       );
     }
-    const existing = await getAssignmentSession(ctx, assignment._id, user._id);
+    const scenario = await ctx.db.get(assignment.scenarioId);
+    if (!scenario) throw notFound("Scenario");
+    await requireAssignableScenario(
+      ctx,
+      scenario,
+      institution,
+      assignment.createdByUserId,
+    );
+
+    const linkedAssignmentSessions = await ctx.db
+      .query("assignmentSessions")
+      .withIndex("by_case", (index) =>
+        index.eq("caseSessionId", args.caseSessionId),
+      )
+      .collect();
+    for (const linkedSession of linkedAssignmentSessions) {
+      if (linkedSession.userId !== caseSession.userId) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Assignment session linkage is inconsistent",
+        );
+      }
+      const linkedAssignment = await ctx.db.get(linkedSession.assignmentId);
+      const linkedCohort = linkedAssignment
+        ? await ctx.db.get(linkedAssignment.cohortId)
+        : null;
+      if (
+        !linkedAssignment ||
+        !linkedCohort ||
+        linkedAssignment.scenarioId !== caseSession.scenarioId ||
+        linkedCohort.institutionId !== caseSession.institutionId
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          "Assignment session linkage is inconsistent",
+        );
+      }
+    }
+    if (linkedAssignmentSessions.some(isSubmittedLockActive)) {
+      throw sessionLocked();
+    }
+
+    const existingSessions = await listAssignmentSessionsForUser(
+      ctx,
+      assignment._id,
+      user._id,
+    );
+    if (existingSessions.length > 1) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Assignment session linkage is ambiguous",
+      );
+    }
+    const existing = existingSessions[0];
     if (existing) {
       if (existing.caseSessionId !== args.caseSessionId) {
         throw new ConvexError(
@@ -880,12 +1108,6 @@ export const attachSession = mutation({
       }
       return existing.caseSessionId;
     }
-    const linkedAssignmentSessions = await ctx.db
-      .query("assignmentSessions")
-      .withIndex("by_case", (index) =>
-        index.eq("caseSessionId", args.caseSessionId),
-      )
-      .collect();
     const linkedToAnotherAssignment = linkedAssignmentSessions.some(
       (assignmentSession) =>
         assignmentSession.assignmentId !== args.assignmentId,
@@ -934,7 +1156,7 @@ export const submitSession = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { assignment, user, cohort } = await requireAssignmentRole(
+    const { assignment, user, cohort, institution } = await requireAssignmentRole(
       ctx,
       args.assignmentId,
       ["learner"],
@@ -950,6 +1172,13 @@ export const submitSession = mutation({
     if (!assignmentSession) {
       throw notFound("Assignment session");
     }
+    await requireAssignmentSessionBinding(
+      ctx,
+      assignmentSession,
+      assignment,
+      cohort,
+      institution,
+    );
     if (isSubmittedLockActive(assignmentSession)) {
       throw sessionLocked();
     }
@@ -978,10 +1207,17 @@ export const reopenSession = mutation({
     if (!assignmentSession) {
       throw notFound("Assignment session");
     }
-    const { assignment, user, cohort } = await requireAssignmentRole(
+    const { assignment, user, cohort, institution } = await requireAssignmentRole(
       ctx,
       assignmentSession.assignmentId,
       ["instructor", "admin"],
+    );
+    await requireAssignmentSessionBinding(
+      ctx,
+      assignmentSession,
+      assignment,
+      cohort,
+      institution,
     );
     await ctx.db.patch(args.assignmentSessionId, {
       reopenedAt: new Date().toISOString(),

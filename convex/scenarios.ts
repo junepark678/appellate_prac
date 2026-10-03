@@ -25,6 +25,8 @@ import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
 import { requireCurrentUser } from './authHelpers'
+import { requireInstitutionRole } from './authz'
+import { AppErrorCode, ConvexError, notFound, validationError } from './errors'
 import { createSyntheticPdf, wrapPdfWords } from '../src/domain/synthetic-pdf'
 import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
 import scenarioSeed from '../src/domain/scenarios.seed.json'
@@ -133,6 +135,7 @@ function scenarioDocFromInput(
   },
   systemFields: {
     scenarioKey: string
+    institutionId?: Id<'institutions'>
     visibility: 'public_template' | 'private'
     ownerUserId?: Id<'users'>
     scenarioFamilyKey: string
@@ -200,40 +203,84 @@ async function loadRelatedScenarioData(ctx: ReadCtx, scenarioId: Id<'scenarios'>
   }
 }
 
-async function visibleScenarioDocsForUser(ctx: ReadCtx, userId: Id<'users'>) {
+async function visibleScenarioDocsForUser(
+  ctx: ReadCtx,
+  userId: Id<'users'>,
+  institutionId?: Id<'institutions'>,
+) {
   const all = await ctx.db.query('scenarios').collect()
-  return all.filter((scenario: Doc<'scenarios'>) => {
+  const visible: Doc<'scenarios'>[] = []
+  for (const scenario of all) {
     const visibility = visibilityForDoc(scenario)
     if (visibility === 'public_template') {
-      return (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) === 'published'
+      if ((scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) === 'published') {
+        visible.push(scenario)
+      }
+      continue
     }
-    return scenario.ownerUserId === userId
-  })
+    if (
+      scenario.ownerUserId !== userId ||
+      !scenario.institutionId ||
+      (institutionId && scenario.institutionId !== institutionId)
+    ) continue
+    try {
+      const { user } = await requireInstitutionRole(ctx, scenario.institutionId, ['learner'])
+      if (user._id === userId) visible.push(scenario)
+    } catch (error) {
+      if (error instanceof ConvexError && error.data.code === AppErrorCode.NOT_FOUND) {
+        continue
+      }
+      throw error
+    }
+  }
+  return visible
 }
 
 async function requireVisibleScenario(
   ctx: ReadCtx,
   scenarioKey: string,
   userId: Id<'users'>,
+  institutionId?: Id<'institutions'>,
 ) {
   const scenario = await ctx.db
     .query('scenarios')
     .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
     .unique()
   if (!scenario) {
-    throw new Error('Scenario not found')
+    throw notFound('Scenario')
   }
   const visibility = visibilityForDoc(scenario)
-  if (visibility === 'private' && scenario.ownerUserId !== userId) {
-    throw new Error('Scenario not found')
+  if (visibility === 'private') {
+    if (
+      scenario.ownerUserId !== userId ||
+      !scenario.institutionId ||
+      (institutionId && scenario.institutionId !== institutionId)
+    ) {
+      throw notFound('Scenario')
+    }
+    const { user } = await requireInstitutionRole(ctx, scenario.institutionId, ['learner'])
+    if (user._id !== userId) throw notFound('Scenario')
   }
   if (
     visibility === 'public_template' &&
     (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published'
   ) {
-    throw new Error('Scenario not found')
+    throw notFound('Scenario')
   }
   return scenario
+}
+
+async function requireScenarioInstitution(
+  ctx: MutationCtx,
+  userId: Id<'users'>,
+  institutionId?: Id<'institutions'>,
+) {
+  const resolvedInstitutionId = institutionId ?? (
+    await ctx.runMutation(internal.organizations.ensurePersonalForTrustedUser, { userId })
+  ).institutionId
+  const { user, institution } = await requireInstitutionRole(ctx, resolvedInstitutionId, ['learner'])
+  if (user._id !== userId) throw notFound('Organization')
+  return institution._id
 }
 
 async function cloneScenarioChildren(
@@ -299,6 +346,7 @@ async function cloneScenarioChildren(
 }
 
 const scenarioInputValidator = v.object({
+  institutionId: v.optional(v.id('institutions')),
   title: v.string(),
   source: v.union(v.literal('synthetic'), v.literal('recap_import'), v.literal('generated_from_import')),
   courtPackId: v.string(),
@@ -314,11 +362,16 @@ const scenarioInputValidator = v.object({
 })
 
 export const listAvailableForCurrentUser = query({
-  args: {},
+  args: {
+    institutionId: v.optional(v.id('institutions')),
+  },
   returns: v.array(scenarioValidator),
-  handler: async (ctx) => {
+  handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const docs = (await visibleScenarioDocsForUser(ctx, user._id)).filter(
+    if (args.institutionId) {
+      await requireInstitutionRole(ctx, args.institutionId, ['learner'])
+    }
+    const docs = (await visibleScenarioDocsForUser(ctx, user._id, args.institutionId)).filter(
       (scenario) => scenario.scenarioKey !== 'recap-import-placeholder',
     )
     const persistedScenarios = await Promise.all(
@@ -374,16 +427,18 @@ export const listPublished = query({
   args: {},
   returns: v.array(scenarioValidator),
   handler: async (ctx) => {
-    const { user } = await requireCurrentUser(ctx)
-    const docs = await visibleScenarioDocsForUser(ctx, user._id)
+    await requireCurrentUser(ctx)
+    const docs = (await ctx.db.query('scenarios').collect()).filter(
+      (scenario) =>
+        visibilityForDoc(scenario) === 'public_template' &&
+        (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) === 'published' &&
+        scenario.scenarioKey !== 'recap-import-placeholder',
+    )
     const persistedScenarios = await Promise.all(
-      docs
-        .filter((scenario) => visibilityForDoc(scenario) === 'public_template')
-        .filter((scenario) => scenario.scenarioKey !== 'recap-import-placeholder')
-        .map(async (doc) => {
-          const related = await loadRelatedScenarioData(ctx, doc._id)
-          return scenarioFromDoc(doc, related.issues, related.recordExcerpts, related.assets)
-        }),
+      docs.map(async (doc) => {
+        const related = await loadRelatedScenarioData(ctx, doc._id)
+        return scenarioFromDoc(doc, related.issues, related.recordExcerpts, related.assets)
+      }),
     )
     const persistedKeys = new Set(persistedScenarios.map((scenario) => scenario.id))
     const bundledPublicTemplates = seedScenarios
@@ -405,12 +460,14 @@ export const createPrivateScenario = mutation({
   returns: scenarioValidator,
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
+    const institutionId = await requireScenarioInstitution(ctx, user._id, args.institutionId)
     const now = Date.now().toString(36)
     const scenarioKey = `private-${user._id}-${now}`
     const scenarioId = await ctx.db.insert(
       'scenarios',
       scenarioDocFromInput(args, {
         scenarioKey,
+        institutionId,
         visibility: 'private',
         ownerUserId: user._id,
         scenarioFamilyKey: scenarioKey,
@@ -428,17 +485,20 @@ export const createPrivateScenario = mutation({
 export const copyTemplateForCurrentUser = mutation({
   args: {
     scenarioId: v.string(),
+    institutionId: v.optional(v.id('institutions')),
   },
   returns: scenarioValidator,
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
+    const institutionId = await requireScenarioInstitution(ctx, user._id, args.institutionId)
     const template = await requireVisibleScenario(ctx, args.scenarioId, user._id)
     if (visibilityForDoc(template) !== 'public_template') {
-      throw new Error('Only public templates can be copied.')
+      throw validationError('Only public templates can be copied.')
     }
     const scenarioKey = `private-${template.scenarioKey}-${user._id}-${Date.now().toString(36)}`
     const privateScenarioId = await ctx.db.insert('scenarios', {
       scenarioKey,
+      institutionId,
       visibility: 'private',
       ownerUserId: user._id,
       scenarioFamilyKey: template.scenarioFamilyKey ?? template.scenarioKey,
@@ -477,7 +537,13 @@ export const updatePrivateScenario = mutation({
     const { user } = await requireCurrentUser(ctx)
     const current = await requireVisibleScenario(ctx, args.scenarioId, user._id)
     if (visibilityForDoc(current) !== 'private' || current.ownerUserId !== user._id) {
-      throw new Error('Scenario not found')
+      throw new ConvexError(AppErrorCode.CONFLICT, 'Public scenarios are immutable')
+    }
+    if (!current.institutionId) {
+      throw notFound('Scenario')
+    }
+    if (args.input.institutionId && args.input.institutionId !== current.institutionId) {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'Scenario organization is immutable')
     }
     const sessions = await ctx.db
       .query('caseSessions')
@@ -488,6 +554,7 @@ export const updatePrivateScenario = mutation({
         current._id,
         scenarioDocFromInput(args.input, {
           scenarioKey: current.scenarioKey,
+          institutionId: current.institutionId,
           visibility: 'private',
           ownerUserId: user._id,
           scenarioFamilyKey: current.scenarioFamilyKey ?? current.scenarioKey,
@@ -509,6 +576,7 @@ export const updatePrivateScenario = mutation({
       'scenarios',
       scenarioDocFromInput(args.input, {
         scenarioKey,
+        institutionId: current.institutionId,
         visibility: 'private',
         ownerUserId: user._id,
         scenarioFamilyKey: current.scenarioFamilyKey ?? current.scenarioKey,
