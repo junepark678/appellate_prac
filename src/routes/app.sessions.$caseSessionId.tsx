@@ -23,13 +23,19 @@ import { useQuery } from 'convex/react'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import { AppFrame, EmptyState } from '../components/AppFrame'
+import { RouteErrorBoundary } from '../components/RouteErrorBoundary'
 
 export const Route = createFileRoute('/app/sessions/$caseSessionId')({
-  component: SessionView,
+  component: SessionRoute,
+  errorComponent: SessionRouteErrorBoundary,
 })
 
-function SessionView() {
+function SessionRoute() {
   const { caseSessionId } = Route.useParams()
+  return <SessionPage caseSessionId={caseSessionId} />
+}
+
+export function SessionPage({ caseSessionId }: { caseSessionId: string }) {
   const session = useQuery(api.caseSessions.getForCurrentUser, {
     caseSessionId: caseSessionId as Id<'caseSessions'>,
   })
@@ -87,4 +93,27 @@ function SessionView() {
       </div>
     </AppFrame>
   )
+}
+
+function isConvexNotFound(error: unknown) {
+  if (!(error instanceof Error) || !('data' in error)) return false
+  const data = (error as { data?: unknown }).data
+  return Boolean(data && typeof data === 'object' && 'code' in data && data.code === 'NOT_FOUND')
+}
+
+export function SessionRouteErrorBoundary({
+  error,
+  reset,
+}: {
+  error: Error
+  reset: () => void
+}) {
+  if (isConvexNotFound(error)) {
+    return (
+      <AppFrame title="Session">
+        <EmptyState>Session not found.</EmptyState>
+      </AppFrame>
+    )
+  }
+  return <RouteErrorBoundary error={error} reset={reset} />
 }

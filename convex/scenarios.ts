@@ -26,6 +26,7 @@ import type { MutationCtx, QueryCtx } from './_generated/server'
 import { scenarioValidator } from './validators'
 import { requireCurrentUser } from './authHelpers'
 import { requireInstitutionRole } from './authz'
+import { isOrganizationMembershipActive } from './organizationContracts'
 import { AppErrorCode, ConvexError, notFound, validationError } from './errors'
 import { createSyntheticPdf, wrapPdfWords } from '../src/domain/synthetic-pdf'
 import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExcerpt } from '../src/domain/types'
@@ -165,6 +166,41 @@ function scenarioDocFromInput(
 
 type ReadCtx = QueryCtx | MutationCtx
 
+async function existingActivePersonalInstitutionForUser(
+  ctx: ReadCtx,
+  userId: Id<'users'>,
+): Promise<Id<'institutions'> | undefined> {
+  const institutions = await ctx.db
+    .query('institutions')
+    .withIndex('by_personal_owner', (index) => index.eq('personalOwnerUserId', userId))
+    .collect()
+  if (institutions.length !== 1) return undefined
+  const institution = institutions[0]
+  if (
+    !institution ||
+    institution.kind !== 'personal' ||
+    institution.personalOwnerUserId !== userId ||
+    institution.status !== 'active'
+  ) {
+    return undefined
+  }
+
+  const memberships = await ctx.db
+    .query('institutionMemberships')
+    .withIndex('by_institution_user', (index) =>
+      index.eq('institutionId', institution._id).eq('userId', userId),
+    )
+    .collect()
+  if (
+    memberships.length !== 1 ||
+    memberships[0]?.role !== 'admin' ||
+    !isOrganizationMembershipActive(institution, memberships[0] ?? null, Date.now())
+  ) {
+    return undefined
+  }
+  return institution._id
+}
+
 async function loadRelatedScenarioData(ctx: ReadCtx, scenarioId: Id<'scenarios'>) {
   const [issues, recordExcerpts, assets] = await Promise.all([
     ctx.db
@@ -221,7 +257,8 @@ async function visibleScenarioDocsForUser(
     if (
       scenario.ownerUserId !== userId ||
       !scenario.institutionId ||
-      (institutionId && scenario.institutionId !== institutionId)
+      !institutionId ||
+      scenario.institutionId !== institutionId
     ) continue
     try {
       const { user } = await requireInstitutionRole(ctx, scenario.institutionId, ['learner'])
@@ -263,7 +300,8 @@ async function requireVisibleScenario(
   }
   if (
     visibility === 'public_template' &&
-    (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published'
+    ((scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published' ||
+      (institutionId && scenario.institutionId && scenario.institutionId !== institutionId))
   ) {
     throw notFound('Scenario')
   }
@@ -371,7 +409,9 @@ export const listAvailableForCurrentUser = query({
     if (args.institutionId) {
       await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     }
-    const docs = (await visibleScenarioDocsForUser(ctx, user._id, args.institutionId)).filter(
+    const privateInstitutionId = args.institutionId ??
+      await existingActivePersonalInstitutionForUser(ctx, user._id)
+    const docs = (await visibleScenarioDocsForUser(ctx, user._id, privateInstitutionId)).filter(
       (scenario) => scenario.scenarioKey !== 'recap-import-placeholder',
     )
     const persistedScenarios = await Promise.all(
@@ -491,7 +531,7 @@ export const copyTemplateForCurrentUser = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const institutionId = await requireScenarioInstitution(ctx, user._id, args.institutionId)
-    const template = await requireVisibleScenario(ctx, args.scenarioId, user._id)
+    const template = await requireVisibleScenario(ctx, args.scenarioId, user._id, institutionId)
     if (visibilityForDoc(template) !== 'public_template') {
       throw validationError('Only public templates can be copied.')
     }

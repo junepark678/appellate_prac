@@ -26,8 +26,10 @@ import type { Id } from './_generated/dataModel'
 import { internal } from './_generated/api'
 import { AppErrorCode } from './errors'
 import schema from './schema'
-import type { CaseSession, Scenario } from '../src/domain/types'
+import type { ActorWorkProduct, CaseSession, Scenario } from '../src/domain/types'
 import { createInitialSession, nextExpectedToolCall } from '../src/domain/simulation'
+import { generateActorWorkProductWithProvider } from '../src/domain/actors/orchestration'
+import type { AiProvider, StructuredAiRequest, StructuredAiResult } from '../src/domain/ports'
 
 const modules = {
   './_generated/api.ts': () => import('./_generated/api'),
@@ -162,6 +164,16 @@ const listAvailableScenariosRef = makeFunctionReference<
   { institutionId?: Id<'institutions'> },
   Scenario[]
 >('scenarios:listAvailableForCurrentUser')
+const copyTemplateRef = makeFunctionReference<
+  'mutation',
+  { scenarioId: string; institutionId?: Id<'institutions'> },
+  Scenario
+>('scenarios:copyTemplateForCurrentUser')
+const acceptActorWorkProductRef = makeFunctionReference<
+  'mutation',
+  { caseSessionId: Id<'caseSessions'>; workProductId: Id<'actorWorkProducts'> },
+  { session: CaseSession; workProduct: ActorWorkProduct; receipt: unknown }
+>('caseSessions:acceptActorWorkProduct')
 const updatePrivateScenarioRef = makeFunctionReference<
   'mutation',
   { scenarioId: string; input: ScenarioInput },
@@ -589,11 +601,162 @@ describe('organization isolation for sessions and scenarios', () => {
     )
   })
 
-  it('keeps institution-scoped public templates within their stored organization', async () => {
+  it('uses only personal private scenarios for omitted listing context and leaves reads side-effect free', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedIsolationFixture(t)
-    const scenarioKey = 'organization-scoped-public-template'
-    await t.run((ctx) =>
+    const asAlice = t.withIdentity(identity('alice'))
+    await t.mutation(internal.scenarios.seedPublished, {})
+
+    const sharedScenario = await asAlice.mutation(createPrivateScenarioRef, {
+      ...scenarioInput('Shared organization private scenario'),
+      institutionId: fixture.orgA,
+    })
+    const personalScenario = await asAlice.mutation(createPrivateScenarioRef, {
+      ...scenarioInput('Personal private scenario'),
+    })
+    const omitted = await asAlice.query(listAvailableScenariosRef, {})
+    expect(omitted.some((scenario) => scenario.id === personalScenario.id)).toBe(true)
+    expect(omitted.some((scenario) => scenario.id === sharedScenario.id)).toBe(false)
+    expect(omitted.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
+
+    const explicitShared = await asAlice.query(listAvailableScenariosRef, {
+      institutionId: fixture.orgA,
+    })
+    expect(explicitShared.some((scenario) => scenario.id === sharedScenario.id)).toBe(true)
+    expect(explicitShared.some((scenario) => scenario.id === personalScenario.id)).toBe(false)
+    expect(explicitShared.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
+
+    const outsiderBefore = await t.run((ctx) =>
+      ctx.db
+        .query('institutions')
+        .withIndex('by_personal_owner', (index) => index.eq('personalOwnerUserId', fixture.outsider))
+        .collect(),
+    )
+    const outsiderScenarios = await t
+      .withIdentity(identity('outsider'))
+      .query(listAvailableScenariosRef, {})
+    const outsiderAfter = await t.run((ctx) =>
+      ctx.db
+        .query('institutions')
+        .withIndex('by_personal_owner', (index) => index.eq('personalOwnerUserId', fixture.outsider))
+        .collect(),
+    )
+    expect(outsiderScenarios.some((scenario) => scenario.visibility === 'private')).toBe(false)
+    expect(outsiderScenarios.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
+    expect(outsiderAfter).toEqual(outsiderBefore)
+  })
+
+  it('fails closed to public templates when personal workspace ownership is inactive or malformed', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    await t.run(async (ctx) => {
+      const createMalformedPersonal = async (input: {
+        userId: Id<'users'>
+        kind: 'personal' | 'shared'
+        status: 'active' | 'paused'
+        slug: string
+      }) => {
+        const institutionId = await ctx.db.insert('institutions', {
+          kind: input.kind,
+          personalOwnerUserId: input.userId,
+          createdAt: '2026-10-03T00:00:00.000Z',
+          name: 'Fixture personal workspace',
+          slug: input.slug,
+          status: input.status,
+          monthlyAiBudgetCents: 0,
+        })
+        await ctx.db.insert('institutionMemberships', {
+          institutionId,
+          userId: input.userId,
+          role: 'admin',
+          status: 'active',
+          createdAt: '2026-10-03T00:00:00.000Z',
+        })
+        await ctx.db.insert('scenarios', {
+          scenarioKey: `${input.slug}-private`,
+          institutionId,
+          visibility: 'private',
+          scenarioFamilyKey: `${input.slug}-private`,
+          revision: 1,
+          revisionStatus: 'draft',
+          title: 'Malformed workspace private scenario',
+          source: 'synthetic',
+          courtPackId: 'us-federal-ca4-civil-appeal',
+          shortCaption: 'Fixture v. State',
+          lowerTribunal: 'District Court',
+          natureOfSuit: 'Civil rights',
+          proceduralPosture: 'Appeal from summary judgment',
+          issuesPresented: ['Whether the record supports judgment.'],
+          meritsRecord: ['A synthetic record for isolated testing.'],
+          ownerUserId: input.userId,
+          published: false,
+        })
+      }
+      await createMalformedPersonal({
+        userId: fixture.peer,
+        kind: 'personal',
+        status: 'paused',
+        slug: 'suspended-personal',
+      })
+      await createMalformedPersonal({
+        userId: fixture.outsider,
+        kind: 'shared',
+        status: 'active',
+        slug: 'misclassified-personal',
+      })
+    })
+
+    for (const subject of ['peer', 'outsider']) {
+      const scenarios = await t
+        .withIdentity(identity(subject))
+        .query(listAvailableScenariosRef, {})
+      expect(scenarios.some((scenario) => scenario.visibility === 'private')).toBe(false)
+      expect(scenarios.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
+    }
+  })
+
+  it('keeps published public templates globally readable across organization contexts', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    const scenarioKey = 'synthetic-employment-retaliation'
+    const publicBefore = await t.run((ctx) =>
+      ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+        .unique(),
+    )
+    if (!publicBefore) throw new Error('public template fixture missing')
+    const asDual = t.withIdentity(identity('dual'))
+    for (const institutionId of [undefined, fixture.orgA, fixture.orgB]) {
+      const scenarios = await asDual.query(listAvailableScenariosRef, { institutionId })
+      expect(scenarios.some((scenario) => scenario.id === scenarioKey)).toBe(true)
+    }
+    const orgASession = await asDual.mutation(createSessionRef, {
+      institutionId: fixture.orgA,
+      scenarioId: scenarioKey,
+    })
+    const orgBSession = await asDual.mutation(createSessionRef, {
+      institutionId: fixture.orgB,
+      scenarioId: scenarioKey,
+    })
+    expect(orgASession.scenario.id).toBe(scenarioKey)
+    expect(orgBSession.scenario.id).toBe(scenarioKey)
+    expect(await asDual.query(getSessionRef, {
+      caseSessionId: orgASession.id as Id<'caseSessions'>,
+    })).toMatchObject({ id: orgASession.id, institutionId: fixture.orgA })
+    expect(await asDual.query(getSessionRef, {
+      caseSessionId: orgBSession.id as Id<'caseSessions'>,
+    })).toMatchObject({ id: orgBSession.id, institutionId: fixture.orgB })
+    expect(await t.run((ctx) => ctx.db.get(publicBefore._id))).toEqual(publicBefore)
+  })
+
+  it('keeps catalog discovery global but checks stored scope on malformed public-row writes', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    const scenarioKey = 'scoped-public-template-legacy-fixture'
+    const scenarioId = await t.run((ctx) =>
       ctx.db.insert('scenarios', {
         scenarioKey,
         institutionId: fixture.orgA,
@@ -601,7 +764,7 @@ describe('organization isolation for sessions and scenarios', () => {
         scenarioFamilyKey: scenarioKey,
         revision: 1,
         revisionStatus: 'published',
-        title: 'Organization-scoped public template',
+        title: 'Scoped legacy public template fixture',
         source: 'synthetic',
         courtPackId: 'us-federal-ca4-civil-appeal',
         shortCaption: 'Example v. State',
@@ -613,14 +776,13 @@ describe('organization isolation for sessions and scenarios', () => {
         published: true,
       }),
     )
+    const scenarioBefore = await t.run((ctx) => ctx.db.get(scenarioId))
     const asDual = t.withIdentity(identity('dual'))
-    const beforeCrossOrgCreate = await t.run(async (ctx) => ({
-      sessions: await ctx.db.query('caseSessions').collect(),
-      scenario: await ctx.db
-        .query('scenarios')
-        .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
-        .unique(),
-    }))
+    for (const institutionId of [undefined, fixture.orgA, fixture.orgB]) {
+      const listed = await asDual.query(listAvailableScenariosRef, { institutionId })
+      expect(listed.some((scenario) => scenario.id === scenarioKey)).toBe(true)
+    }
+
     await expectAppError(
       asDual.mutation(createSessionRef, {
         institutionId: fixture.orgB,
@@ -628,34 +790,64 @@ describe('organization isolation for sessions and scenarios', () => {
       }),
       AppErrorCode.NOT_FOUND,
     )
-    expect(
-      await t.run(async (ctx) => ({
-        sessions: await ctx.db.query('caseSessions').collect(),
-        scenario: await ctx.db
-          .query('scenarios')
-          .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
-          .unique(),
-      })),
-    ).toEqual(beforeCrossOrgCreate)
-
-    const session = await asDual.mutation(createSessionRef, {
+    const orgASession = await asDual.mutation(createSessionRef, {
       institutionId: fixture.orgA,
       scenarioId: scenarioKey,
     })
-    expect(session.scenario.id).toBe(scenarioKey)
-    expect(await asDual.query(getSessionRef, {
-      caseSessionId: session.id as Id<'caseSessions'>,
-    })).toMatchObject({ id: session.id, institutionId: fixture.orgA })
-
-    await t.run((ctx) =>
-      ctx.db.patch(session.id as Id<'caseSessions'>, { institutionId: fixture.orgB }),
-    )
+    expect(orgASession.scenario.id).toBe(scenarioKey)
     await expectAppError(
-      asDual.query(getSessionRef, {
-        caseSessionId: session.id as Id<'caseSessions'>,
+      asDual.mutation(copyTemplateRef, {
+        scenarioId: scenarioKey,
+        institutionId: fixture.orgB,
       }),
       AppErrorCode.NOT_FOUND,
     )
+    const privateCopy = await asDual.mutation(copyTemplateRef, {
+      scenarioId: scenarioKey,
+      institutionId: fixture.orgA,
+    })
+    expect(privateCopy.visibility).toBe('private')
+    expect(await t.run((ctx) => ctx.db.get(scenarioId))).toEqual(scenarioBefore)
+
+    const cohorts = await t.run(async (ctx) => {
+      await ctx.db.insert('institutionMemberships', {
+        institutionId: fixture.orgB,
+        userId: fixture.instructor,
+        role: 'instructor',
+        status: 'active',
+        createdAt: '2026-10-03T00:00:00.000Z',
+      })
+      const createCohort = (institutionId: Id<'institutions'>, slug: string) =>
+        ctx.db.insert('cohorts', {
+          institutionId,
+          title: `${slug} cohort`,
+          term: 'Fall 2026',
+          startsAt: '2026-09-01T00:00:00.000Z',
+          endsAt: '2026-12-20T00:00:00.000Z',
+          archived: false,
+        })
+      const [orgACohort, orgBCohort] = await Promise.all([
+        createCohort(fixture.orgA, 'Org A'),
+        createCohort(fixture.orgB, 'Org B'),
+      ])
+      return { orgACohort, orgBCohort }
+    })
+    await t.withIdentity(identity('instructor')).mutation(createAssignmentRef, {
+      cohortId: cohorts.orgACohort,
+      scenarioId,
+      title: 'Same scope malformed public row',
+      published: true,
+    })
+    await expectAppError(
+      t.withIdentity(identity('instructor')).mutation(createAssignmentRef, {
+        cohortId: cohorts.orgBCohort,
+        scenarioId,
+        title: 'Cross scope malformed public row',
+        published: true,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    expect(await t.run((ctx) => ctx.db.get(scenarioId))).toEqual(scenarioBefore)
   })
 
   it('binds assignment-started sessions and rejects a revoked private-scenario owner before writes', async () => {
@@ -1013,6 +1205,213 @@ describe('organization isolation for sessions and scenarios', () => {
       status: 'reviewed',
       instructorNote: 'Validated inside the owning organization.',
     })
+  })
+
+  it('validates generated actor sources, remaps accepted work products, and rejects foreign refs', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    const asAlice = t.withIdentity(identity('alice'))
+    const sessionA = await asAlice.mutation(createSessionRef, { institutionId: fixture.orgA })
+    const sessionB = await asAlice.mutation(createSessionRef, { institutionId: fixture.orgA })
+    const sessionAId = sessionA.id as Id<'caseSessions'>
+    const sessionBId = sessionB.id as Id<'caseSessions'>
+    const originalSources = await t.run(async (ctx) => {
+      const analysis = {
+        analyzerId: 'fixture-analyzer',
+        fileSizeBytes: 1200,
+        mimeType: 'application/pdf',
+        searchableText: true,
+        certificateOfServiceDetected: true,
+        certificateOfComplianceDetected: true,
+        sealedOrRedactionWarning: false,
+        warnings: [],
+      }
+      const documentId = await ctx.db.insert('documents', {
+        caseSessionId: sessionAId,
+        fileName: 'opening-brief.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1200,
+        extractedSignals: ['opening brief', 'record citation'],
+        validationJson: JSON.stringify(analysis),
+      })
+      const analysisId = await ctx.db.insert('documentAnalyses', {
+        caseSessionId: sessionAId,
+        documentId,
+        analyzerId: 'fixture-analyzer',
+        fileSizeBytes: 1200,
+        mimeType: 'application/pdf',
+        searchableText: true,
+        certificateOfServiceDetected: true,
+        certificateOfComplianceDetected: true,
+        sealedOrRedactionWarning: false,
+        warnings: [],
+        analysisJson: JSON.stringify(analysis),
+        createdAt: '2026-10-03T00:00:00.000Z',
+      })
+      await ctx.db.patch(documentId, { analysisId })
+      const filingId = await ctx.db.insert('filings', {
+        caseSessionId: sessionAId,
+        eventId: 'opening_brief',
+        participantRole: 'appellant',
+        title: 'Opening Brief',
+        documentIds: [documentId],
+        documentAnalysisIds: [analysisId],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Fixture accepted filing.',
+        filedAt: '2026-10-03T00:00:00.000Z',
+        outcome: 'accepted',
+        validationIssues: [],
+      })
+      return { documentId, analysisId, filingId }
+    })
+
+    const sessionForGeneration = await asAlice.query(getSessionRef, { caseSessionId: sessionAId })
+    if (!sessionForGeneration) throw new Error('actor session fixture missing')
+    const memo = {
+      title: 'Appellee strategy',
+      summary: 'Review the opening brief before responding.',
+      reasoning: [],
+      recommendations: [],
+      citations: [
+        {
+          id: 'opening-brief',
+          label: 'Opening brief',
+          sourceType: 'filing' as const,
+          sourceId: originalSources.filingId,
+        },
+        {
+          id: 'brief-analysis',
+          label: 'Opening brief analysis',
+          sourceType: 'document_analysis' as const,
+          sourceId: originalSources.analysisId,
+        },
+      ],
+      ruleRefs: [],
+    }
+    const provider: AiProvider = {
+      id: 'fixture-provider',
+      async completeStructured<T>(
+        request: StructuredAiRequest<T>,
+      ): Promise<StructuredAiResult<T>> {
+        if (!request.schemaName) throw new Error('actor schema fixture missing')
+        return { value: memo as T, rawText: JSON.stringify(memo), providerId: this.id }
+      },
+    }
+    const generated = await generateActorWorkProductWithProvider({
+      session: sessionForGeneration,
+      provider,
+      kind: 'counterparty_strategy',
+      nowIso: new Date().toISOString(),
+    })
+    expect(generated.sourceDocumentAnalysisIds).toEqual([originalSources.analysisId])
+    expect(generated.sourceFilingIds).toEqual([originalSources.filingId])
+
+    const reserve = async (caseSessionId: Id<'caseSessions'>) => {
+      const result = await asAlice.mutation(internal.caseSessions.reserveAiRunForCurrentUser, {
+        caseSessionId,
+        actorId: generated.actorId,
+        model: 'fixture-model',
+        promptHash: `fixture-${caseSessionId}`,
+        nowIso: new Date().toISOString(),
+        cooldownMs: 0,
+        estimatedCostCents: 1,
+      })
+      if (!result.aiRunId) throw new Error('AI run fixture missing')
+      return result.aiRunId
+    }
+    const persist = async (
+      caseSessionId: Id<'caseSessions'>,
+      aiRunId: Id<'aiRuns'>,
+      sourceDocumentAnalysisIds: string[],
+      sourceFilingIds: string[],
+    ) =>
+      asAlice.mutation(internal.caseSessions.persistActorWorkProductForCurrentUser, {
+        caseSessionId,
+        aiRunId,
+        actorId: generated.actorId,
+        kind: generated.kind,
+        workProductJson: JSON.stringify(generated.workProduct),
+        sourceDocumentAnalysisIds,
+        sourceFilingIds,
+        validationIssues: generated.validationIssues ?? [],
+        createdAt: new Date().toISOString(),
+        costCents: 1,
+        latencyMs: 1,
+      })
+
+    const product = await persist(
+      sessionAId,
+      await reserve(sessionAId),
+      generated.sourceDocumentAnalysisIds,
+      generated.sourceFilingIds,
+    )
+    expect(product.sourceDocumentAnalysisIds).toEqual([originalSources.analysisId])
+
+    const foreignAnalysisRun = await reserve(sessionBId)
+    const foreignFilingRun = await reserve(sessionBId)
+    const beforeForeignRefs = await t.run(async (ctx) => {
+      const [products, analysisRun, filingRun] = await Promise.all([
+        ctx.db.query('actorWorkProducts').collect(),
+        ctx.db.get(foreignAnalysisRun),
+        ctx.db.get(foreignFilingRun),
+      ])
+      return { products, analysisRun, filingRun }
+    })
+    await expectAppError(
+      persist(sessionBId, foreignAnalysisRun, [originalSources.analysisId], []),
+      AppErrorCode.NOT_FOUND,
+    )
+    await expectAppError(
+      persist(sessionBId, foreignFilingRun, [], [originalSources.filingId]),
+      AppErrorCode.NOT_FOUND,
+    )
+    const afterForeignRefs = await t.run(async (ctx) => {
+      const [products, analysisRun, filingRun] = await Promise.all([
+        ctx.db.query('actorWorkProducts').collect(),
+        ctx.db.get(foreignAnalysisRun),
+        ctx.db.get(foreignFilingRun),
+      ])
+      return { products, analysisRun, filingRun }
+    })
+    expect(afterForeignRefs).toEqual(beforeForeignRefs)
+
+    const accepted = await asAlice.mutation(acceptActorWorkProductRef, {
+      caseSessionId: sessionAId,
+      workProductId: product.id as Id<'actorWorkProducts'>,
+    })
+    expect(accepted.workProduct.status).toBe('accepted')
+    const newFilingId = accepted.session.filings[0]?.id
+    const newAnalysisId = accepted.session.filings[0]?.documents[0]?.analysisId
+    if (!newFilingId || !newAnalysisId) throw new Error('accepted source remap is missing')
+    expect(newFilingId).not.toBe(originalSources.filingId)
+    expect(newAnalysisId).not.toBe(originalSources.analysisId)
+    expect(accepted.workProduct.sourceFilingIds).toEqual([newFilingId])
+    expect(accepted.workProduct.sourceDocumentAnalysisIds).toEqual([newAnalysisId])
+    expect(accepted.workProduct.citations.map((citation) => citation.sourceId)).toEqual([
+      newFilingId,
+      newAnalysisId,
+    ])
+
+    const remapped = await t.run(async (ctx) => ({
+      product: await ctx.db.get(product.id as Id<'actorWorkProducts'>),
+      filing: await ctx.db.get(newFilingId as Id<'filings'>),
+      analysis: await ctx.db.get(newAnalysisId as Id<'documentAnalyses'>),
+      oldFiling: await ctx.db.get(originalSources.filingId),
+      oldAnalysis: await ctx.db.get(originalSources.analysisId),
+    }))
+    expect(remapped.filing?.caseSessionId).toBe(sessionAId)
+    expect(remapped.analysis?.caseSessionId).toBe(sessionAId)
+    expect(remapped.product?.sourceFilingIds).toEqual([newFilingId])
+    expect(remapped.product?.sourceDocumentAnalysisIds).toEqual([newAnalysisId])
+    expect(
+      JSON.parse(remapped.product?.citationsJson ?? '[]').map(
+        (citation: { sourceId?: string }) => citation.sourceId,
+      ),
+    ).toEqual([newFilingId, newAnalysisId])
+    expect(remapped.oldFiling).toBeNull()
+    expect(remapped.oldAnalysis).toBeNull()
   })
 
   it.each([

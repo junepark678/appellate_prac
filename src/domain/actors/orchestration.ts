@@ -60,10 +60,13 @@ function sourceFilingIds(session: CaseSession) {
 function sourceDocumentAnalysisIds(session: CaseSession) {
   return activeFilings(session)
     .flatMap((filing) => filing.documents)
-    .flatMap((document) => [
-      ...(document.analysisId ? [document.analysisId] : []),
-      ...(document.analysis ? [`${document.id}:analysis`] : []),
-    ])
+    .flatMap((document) =>
+      document.analysisId
+        ? [document.analysisId]
+        : document.analysis
+          ? [`${document.id}:analysis`]
+          : [],
+    )
 }
 
 function hasWorkProduct(session: CaseSession, kind: ActorWorkProductKind) {

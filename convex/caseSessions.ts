@@ -691,16 +691,134 @@ async function requireActorWorkProductSources(
   sourceDocumentAnalysisIds: string[],
   sourceFilingIds: string[],
 ) {
+  const canonicalAnalysisIds = new Set<string>()
   for (const rawId of sourceDocumentAnalysisIds) {
-    const analysis = await ctx.db.get(rawId as Id<'documentAnalyses'>)
+    if (rawId.endsWith(':analysis')) {
+      const rawDocumentId = rawId.slice(0, -':analysis'.length)
+      const documentId = ctx.db.normalizeId('documents', rawDocumentId)
+      const document = documentId ? await ctx.db.get(documentId) : null
+      if (!document || document.caseSessionId !== caseSessionId) {
+        throw notFound('Document analysis')
+      }
+
+      let analysis: Doc<'documentAnalyses'> | null = null
+      if (document.analysisId) {
+        analysis = await ctx.db.get(document.analysisId)
+      } else {
+        const analyses = await ctx.db
+          .query('documentAnalyses')
+          .withIndex('by_document', (index) => index.eq('documentId', document._id))
+          .collect()
+        if (analyses.length > 1) {
+          throw new ConvexError(AppErrorCode.CONFLICT, 'Document analysis linkage is ambiguous')
+        }
+        analysis = analyses[0] ?? null
+      }
+      if (
+        analysis &&
+        (analysis.caseSessionId !== caseSessionId ||
+          (analysis.documentId && analysis.documentId !== document._id))
+      ) {
+        throw notFound('Document analysis')
+      }
+      if (!analysis) throw notFound('Document analysis')
+      canonicalAnalysisIds.add(analysis?._id ?? `${document._id}:analysis`)
+      continue
+    }
+
+    const analysisId = ctx.db.normalizeId('documentAnalyses', rawId)
+    const analysis = analysisId ? await ctx.db.get(analysisId) : null
     if (!analysis || analysis.caseSessionId !== caseSessionId) {
       throw notFound('Document analysis')
     }
+    if (analysis.documentId) {
+      const document = await ctx.db.get(analysis.documentId)
+      if (!document || document.caseSessionId !== caseSessionId) {
+        throw notFound('Document analysis')
+      }
+    }
+    canonicalAnalysisIds.add(analysis._id)
   }
+
+  const canonicalFilingIds = new Set<string>()
   for (const rawId of sourceFilingIds) {
-    const filing = await ctx.db.get(rawId as Id<'filings'>)
+    const filingId = ctx.db.normalizeId('filings', rawId)
+    const filing = filingId ? await ctx.db.get(filingId) : null
     if (!filing || filing.caseSessionId !== caseSessionId) throw notFound('Filing')
+    canonicalFilingIds.add(filing._id)
   }
+  return {
+    sourceDocumentAnalysisIds: [...canonicalAnalysisIds],
+    sourceFilingIds: [...canonicalFilingIds],
+  }
+}
+
+function remapActorSourceId(
+  sourceType: unknown,
+  sourceId: unknown,
+  maps: {
+    analysisIds: Map<string, Id<'documentAnalyses'>>
+    documentIds: Map<string, Id<'documents'>>
+    filingIds: Map<string, Id<'filings'>>
+    docketEntryIds: Map<string, Id<'docketEntries'>>
+  },
+) {
+  if (typeof sourceId !== 'string') return sourceId
+  if (sourceType === 'filing') return maps.filingIds.get(sourceId) ?? sourceId
+  if (sourceType === 'document_analysis') {
+    const analysisId = maps.analysisIds.get(sourceId)
+    if (analysisId) return analysisId
+    if (sourceId.endsWith(':analysis')) {
+      const oldDocumentId = sourceId.slice(0, -':analysis'.length)
+      const documentId = maps.documentIds.get(oldDocumentId)
+      if (documentId) return `${documentId}:analysis`
+    }
+    return sourceId
+  }
+  if (sourceType === 'docket_entry') return maps.docketEntryIds.get(sourceId) ?? sourceId
+  return sourceId
+}
+
+function remapWorkProductJson(
+  json: string,
+  maps: Parameters<typeof remapActorSourceId>[2],
+) {
+  const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(json, 'actor work product')
+  return JSON.stringify({
+    ...workProduct,
+    citations: workProduct.citations.map((citation) => ({
+      ...citation,
+      ...(citation.sourceId
+        ? {
+            sourceId: remapActorSourceId(citation.sourceType, citation.sourceId, maps) as string,
+          }
+        : {}),
+    })),
+    ...(workProduct.recordRefs
+      ? {
+          recordRefs: workProduct.recordRefs.map(
+            (sourceId) => maps.docketEntryIds.get(sourceId) ?? sourceId,
+          ),
+        }
+      : {}),
+  })
+}
+
+function remapCitationsJson(
+  json: string,
+  maps: Parameters<typeof remapActorSourceId>[2],
+) {
+  const citations = parseJsonField<ActorWorkProduct['citations']>(json, 'actor work product citations')
+  return JSON.stringify(
+    citations.map((citation) => ({
+      ...citation,
+      ...(citation.sourceId
+        ? {
+            sourceId: remapActorSourceId(citation.sourceType, citation.sourceId, maps) as string,
+          }
+        : {}),
+    })),
+  )
 }
 
 async function assembleCaseSession(
@@ -1121,6 +1239,10 @@ async function replaceSessionState(
   caseSessionId: Id<'caseSessions'>,
   session: CaseSession,
 ) {
+  const actorWorkProducts = await ctx.db
+    .query('actorWorkProducts')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
   await ctx.db.patch(caseSessionId, {
     status: session.status,
     procedureState: session.procedureState ?? inferProcedureState(session),
@@ -1147,6 +1269,8 @@ async function replaceSessionState(
   )
 
   const filingIdMap = new Map<string, Id<'filings'>>()
+  const documentIdMap = new Map<string, Id<'documents'>>()
+  const analysisIdMap = new Map<string, Id<'documentAnalyses'>>()
   for (const filing of session.filings) {
     const documentIds: Array<Id<'documents'>> = []
     const documentAnalysisIds: Array<Id<'documentAnalyses'>> = []
@@ -1167,6 +1291,7 @@ async function replaceSessionState(
         extractedSignals: document.extractedSignals,
         ...(document.analysis ? { validationJson: JSON.stringify(document.analysis) } : {}),
       })
+      documentIdMap.set(document.id, documentId)
       if (document.analysis) {
         const analysis = document.analysis
         const analysisId = await ctx.db.insert('documentAnalyses', {
@@ -1196,6 +1321,8 @@ async function replaceSessionState(
           createdAt: filing.filedAt,
         })
         documentAnalysisIds.push(analysisId)
+        if (document.analysisId) analysisIdMap.set(document.analysisId, analysisId)
+        analysisIdMap.set(`${document.id}:analysis`, analysisId)
         await ctx.db.patch(documentId, { analysisId })
       }
       documentIds.push(documentId)
@@ -1237,6 +1364,36 @@ async function replaceSessionState(
     })
     docketEntryIdMap.set(entry.id, docketEntryId)
   }
+
+  const sourceMaps = {
+    analysisIds: analysisIdMap,
+    documentIds: documentIdMap,
+    filingIds: filingIdMap,
+    docketEntryIds: docketEntryIdMap,
+  }
+  await Promise.all(
+    actorWorkProducts.map((product) =>
+      ctx.db.patch(product._id, {
+        sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds.map((sourceId) =>
+          remapActorSourceId('document_analysis', sourceId, sourceMaps) as string,
+        ),
+        sourceFilingIds: product.sourceFilingIds.map((sourceId) =>
+          remapActorSourceId('filing', sourceId, sourceMaps) as string,
+        ),
+        workProductJson: remapWorkProductJson(product.workProductJson, sourceMaps),
+        ...(product.citationsJson
+          ? { citationsJson: remapCitationsJson(product.citationsJson, sourceMaps) }
+          : {}),
+        ...(product.recordRefs
+          ? {
+              recordRefs: product.recordRefs.map(
+                (sourceId) => docketEntryIdMap.get(sourceId) ?? sourceId,
+              ),
+            }
+          : {}),
+      }),
+    ),
+  )
 
   for (const deadline of session.deadlines) {
     const sourceEntryId = docketEntryIdMap.get(deadline.sourceEntryId)
@@ -2530,7 +2687,7 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       throw notFound('AI run')
     }
     requireActiveAiReservation(run)
-    await requireActorWorkProductSources(
+    const trustedSources = await requireActorWorkProductSources(
       ctx,
       session._id,
       args.sourceDocumentAnalysisIds,
@@ -2553,8 +2710,8 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       recordRefs: workProduct.recordRefs ?? [],
       confidence: workProduct.confidence ?? 0.75,
       roleAuthority: workProduct.roleAuthority ?? 'simulator_actor',
-      sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
-      sourceFilingIds: args.sourceFilingIds,
+      sourceDocumentAnalysisIds: trustedSources.sourceDocumentAnalysisIds,
+      sourceFilingIds: trustedSources.sourceFilingIds,
       createdAt: args.createdAt,
     })
     await ctx.db.patch(args.aiRunId, {
@@ -2580,8 +2737,8 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       recordRefs: workProduct.recordRefs ?? [],
       confidence: workProduct.confidence ?? 0.75,
       roleAuthority: workProduct.roleAuthority ?? 'simulator_actor',
-      sourceDocumentAnalysisIds: args.sourceDocumentAnalysisIds,
-      sourceFilingIds: args.sourceFilingIds,
+      sourceDocumentAnalysisIds: trustedSources.sourceDocumentAnalysisIds,
+      sourceFilingIds: trustedSources.sourceFilingIds,
       createdAt: args.createdAt,
       validationIssues: args.validationIssues,
     }
@@ -2769,6 +2926,8 @@ export const acceptActorWorkProduct = mutation({
 
     await ctx.db.patch(productDoc._id, { status: 'accepted', reviewStatus: 'accepted' })
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, effect.session)
+    const remappedProductDoc = await ctx.db.get(productDoc._id)
+    if (!remappedProductDoc) throw notFound('Actor work product')
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -2785,7 +2944,7 @@ export const acceptActorWorkProduct = mutation({
     return {
       session: saved,
       workProduct: {
-        ...product,
+        ...actorWorkProductFromDoc(remappedProductDoc),
         status: 'accepted' as const,
         reviewStatus: 'accepted' as const,
         validationIssues: acceptance.validationIssues,
