@@ -18,6 +18,10 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { convexTest } from "convex-test";
+import { api, internal } from "./_generated/api";
+import { ca4FormTemplates } from "../src/packages/trial-record-pdfs";
+import schema from "./schema";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { requireCurrentUser } from "./authHelpers";
@@ -69,9 +73,229 @@ const validEval = {
 };
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.clearAllMocks();
   authUser.role = "admin";
+});
+
+const formImportModules = {
+  "./_generated/server.ts": () => import("./_generated/server"),
+  "./adminSources.ts": () => import("./adminSources"),
+};
+
+const pdfPayload = "%PDF-1.7\nSynthetic in-memory test PDF\n";
+const pdfBytes = new TextEncoder().encode(pdfPayload);
+const formUrls = new Set(
+  ca4FormTemplates.map((template) => template.sourceUrl),
+);
+
+function mockPdfFetch(responseFor: (url: string) => Response) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!formUrls.has(url)) {
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    }
+    return responseFor(url);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function successfulPdfResponse() {
+  return new Response(pdfPayload, {
+    status: 200,
+    headers: { "content-type": "application/pdf" },
+  });
+}
+
+type Assert<T extends true> = T;
+type PublicApiOmitsFormImporter = Assert<
+  "storeCa4FormPdfArtifacts" extends keyof typeof api.adminSources
+    ? false
+    : true
+>;
+type InternalApiIncludesFormImporter = Assert<
+  "storeCa4FormPdfArtifacts" extends keyof typeof internal.adminSources
+    ? true
+    : false
+>;
+
+// These aliases make typecheck fail if the generated client API exposes the
+// internal importer or the generated internal API omits it.
+type _FormImporterApiVisibility = [
+  PublicApiOmitsFormImporter,
+  InternalApiIncludesFormImporter,
+];
+
+describe("registered CA4 form PDF importer", () => {
+  it("is included by the generated internal API only", () => {
+    // convex-test does not enforce public/internal invocation visibility, so
+    // these generated API types verify the client-facing registration filter.
+    const apiVisibility: _FormImporterApiVisibility = [true, true];
+    expect(apiVisibility).toEqual([true, true]);
+  });
+
+  it("stores mocked PDFs and upserts published catalog artifacts in ephemeral state", async () => {
+    // convexTest uses only its in-memory database and storage implementation.
+    const t = convexTest(schema, formImportModules);
+    const fetchMock = mockPdfFetch(() => successfulPdfResponse());
+    const digest = await crypto.subtle.digest("SHA-256", pdfBytes);
+    const sha256 = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    const sha256Base64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+    const firstTemplate = ca4FormTemplates[0];
+    expect(firstTemplate).toBeDefined();
+    if (!firstTemplate) throw new Error("Expected a CA4 form template");
+
+    const existingArtifactId = await t.run((ctx) =>
+      ctx.db.insert("sourceArtifacts", {
+        sourceVersionId: firstTemplate.sourceVersionId,
+        label: firstTemplate.label,
+        url: firstTemplate.sourceUrl,
+        fetchedAt: "2026-01-01T00:00:00.000Z",
+        contentHash: `sha256:${sha256}`,
+        parserVersion: "previous-parser",
+        mediaType: firstTemplate.mediaType,
+        rawText: "previous fixture metadata",
+        reviewStatus: "draft",
+      }),
+    );
+
+    const result = await t.action(
+      internal.adminSources.storeCa4FormPdfArtifacts,
+      {},
+    );
+    expect(result).toEqual({ stored: ca4FormTemplates.length, failed: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(ca4FormTemplates.length);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(
+      ca4FormTemplates.map((template) => template.sourceUrl),
+    );
+
+    const artifacts = await t.run((ctx) =>
+      ctx.db.query("sourceArtifacts").collect(),
+    );
+    expect(artifacts).toHaveLength(ca4FormTemplates.length);
+    const artifactByUrl = new Map(
+      artifacts.map((artifact) => [artifact.url, artifact]),
+    );
+    for (const template of ca4FormTemplates) {
+      const artifact = artifactByUrl.get(template.sourceUrl);
+      expect(artifact).toMatchObject({
+        sourceVersionId: template.sourceVersionId,
+        label: template.label,
+        url: template.sourceUrl,
+        contentHash: `sha256:${sha256}`,
+        parserVersion: "ca4-form-pdf-catalog-v1",
+        mediaType: template.mediaType,
+        reviewStatus: "published",
+      });
+      expect(artifact?.rawStorageId).toBeDefined();
+      expect(JSON.parse(artifact?.rawText ?? "{}")).toEqual({
+        formTemplateId: template.id,
+        category: template.category,
+        fileName: template.fileName,
+      });
+    }
+    expect(artifactByUrl.get(firstTemplate.sourceUrl)?._id).toBe(
+      existingArtifactId,
+    );
+
+    const storageResults = await t.run(async (ctx) => {
+      const storageMetadata = await ctx.db.system.query("_storage").collect();
+      const storedBlobs = await Promise.all(
+        artifacts.map(async (artifact) => {
+          const blob = artifact.rawStorageId
+            ? await ctx.storage.get(artifact.rawStorageId)
+            : null;
+          return blob
+            ? { text: await blob.text(), type: blob.type, size: blob.size }
+            : null;
+        }),
+      );
+      return { storageMetadata, storedBlobs };
+    });
+    expect(storageResults.storageMetadata).toHaveLength(
+      ca4FormTemplates.length,
+    );
+    expect(
+      storageResults.storageMetadata.every(
+        (metadata) =>
+          metadata.sha256 === sha256Base64 &&
+          metadata.size === pdfBytes.byteLength,
+      ),
+    ).toBe(true);
+    expect(storageResults.storedBlobs).toHaveLength(ca4FormTemplates.length);
+    for (const storedBlob of storageResults.storedBlobs) {
+      expect(storedBlob).toEqual({
+        text: pdfPayload,
+        type: "application/pdf",
+        size: pdfBytes.byteLength,
+      });
+    }
+  });
+
+  it("fails closed on unsuccessful responses and non-PDF content types", async () => {
+    const t = convexTest(schema, formImportModules);
+    const unavailableTemplate = ca4FormTemplates[0];
+    const nonPdfTemplate = ca4FormTemplates[1];
+    expect(unavailableTemplate).toBeDefined();
+    expect(nonPdfTemplate).toBeDefined();
+    if (!unavailableTemplate || !nonPdfTemplate) {
+      throw new Error("Expected at least two CA4 form templates");
+    }
+
+    const fetchMock = mockPdfFetch((url) => {
+      if (url === unavailableTemplate.sourceUrl) {
+        return new Response("unavailable", { status: 503 });
+      }
+      if (url === nonPdfTemplate.sourceUrl) {
+        return new Response("not a PDF", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return successfulPdfResponse();
+    });
+
+    const result = await t.action(
+      internal.adminSources.storeCa4FormPdfArtifacts,
+      {},
+    );
+    expect(result).toEqual({
+      stored: ca4FormTemplates.length - 2,
+      failed: [
+        {
+          label: unavailableTemplate.label,
+          sourceUrl: unavailableTemplate.sourceUrl,
+          reason: "HTTP 503",
+        },
+        {
+          label: nonPdfTemplate.label,
+          sourceUrl: nonPdfTemplate.sourceUrl,
+          reason: "Expected PDF, received text/html",
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(ca4FormTemplates.length);
+
+    const storedState = await t.run(async (ctx) => ({
+      artifacts: await ctx.db.query("sourceArtifacts").collect(),
+      storageMetadata: await ctx.db.system.query("_storage").collect(),
+    }));
+    expect(storedState.artifacts).toHaveLength(ca4FormTemplates.length - 2);
+    expect(
+      storedState.artifacts.some(
+        (artifact) =>
+          artifact.url === unavailableTemplate.sourceUrl ||
+          artifact.url === nonPdfTemplate.sourceUrl,
+      ),
+    ).toBe(false);
+    expect(storedState.storageMetadata).toHaveLength(
+      ca4FormTemplates.length - 2,
+    );
+  });
 });
 
 function promotionContext(reviewStatus: string) {
