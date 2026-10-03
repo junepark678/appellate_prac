@@ -61,6 +61,8 @@ function CohortDetail() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<InviteRole>("learner");
   const [inviteToken, setInviteToken] = useState("");
+  const allowedInviteRole: InviteRole =
+    cohort?.role === "admin" ? inviteRole : "learner";
 
   const createDisabled =
     !title || !scenarioKey || Number(budgetCapDollars || 0) < 0;
@@ -202,14 +204,16 @@ function CohortDetail() {
             />
             <select
               className="rounded border border-slate-300 px-3 py-2"
-              value={inviteRole}
+              value={allowedInviteRole}
               onChange={(event) =>
                 setInviteRole(event.target.value as InviteRole)
               }
               aria-label="Invite role"
             >
               <option value="learner">Learner</option>
-              <option value="instructor">Instructor</option>
+              {cohort?.role === "admin" ? (
+                <option value="instructor">Instructor</option>
+              ) : null}
             </select>
             <button
               className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50"
@@ -219,7 +223,9 @@ function CohortDetail() {
                   ? void inviteMembers({
                       institutionId: cohort.institutionId,
                       cohortId: cohortId as Id<"cohorts">,
-                      invites: [{ email: inviteEmail, role: inviteRole }],
+                      invites: [
+                        { email: inviteEmail, role: allowedInviteRole },
+                      ],
                     }).then((result) => {
                       setInviteToken(result[0]?.token ?? "");
                       setInviteEmail("");

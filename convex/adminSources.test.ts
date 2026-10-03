@@ -18,9 +18,13 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { requireCurrentUser } from "./authHelpers";
-import { promoteCourtPackRelease } from "./adminSources";
+import {
+  promoteCourtPackRelease,
+  promoteCourtPackReleaseInternal,
+} from "./adminSources";
 
 const { authUser } = vi.hoisted(() => ({
   authUser: { _id: "admin-fixture", role: "admin" },
@@ -32,7 +36,7 @@ vi.mock("./authHelpers", () => ({
   })),
 }));
 
-const handler = (
+const publicHandler = (
   promoteCourtPackRelease as unknown as {
     _handler: (
       ctx: MutationCtx,
@@ -40,10 +44,60 @@ const handler = (
     ) => Promise<null>;
   }
 )._handler;
+const internalHandler = (
+  promoteCourtPackReleaseInternal as unknown as {
+    _handler: (
+      ctx: MutationCtx,
+      args: {
+        actorUserId: Id<"users">;
+        courtPackId: string;
+        simulationEvalSnapshotJson: string;
+      },
+    ) => Promise<null>;
+  }
+)._handler;
+
+const now = "2026-09-30T04:00:00.000Z";
+const actorUserId = "admin-fixture" as Id<"users">;
+const validEval = {
+  createdAt: now,
+  criticalFailureCount: 0,
+  validTurnRate: 0.99,
+  hallucinatedSourceRate: 0,
+  roleAuthorityFailureRate: 0,
+  pass: true,
+};
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   authUser.role = "admin";
 });
+
+function promotionContext(reviewStatus: string) {
+  const patch = vi.fn(async () => undefined);
+  const insert = vi.fn(async () => "audit-fixture");
+  const courtPack = {
+    _id: "pack-fixture",
+    sourceVersionIds: ["custom-reviewed-source"],
+  };
+  const query = vi.fn((table: string) => ({
+    withIndex: vi.fn(() => ({
+      unique: vi.fn(async () => courtPack),
+      order: vi.fn(() => ({
+        first: vi.fn(async () =>
+          table === "sourceArtifacts" ? { reviewStatus } : null,
+        ),
+      })),
+    })),
+  }));
+  return {
+    ctx: { db: { query, patch, insert } } as unknown as MutationCtx,
+    query,
+    patch,
+    insert,
+  };
+}
 
 describe("legacy court pack production promotion endpoint", () => {
   it.each(["admin", "instructor", "student"])(
@@ -54,7 +108,7 @@ describe("legacy court pack production promotion endpoint", () => {
       const patch = vi.fn();
       const ctx = { db: { query, patch } } as unknown as MutationCtx;
       await expect(
-        handler(ctx, {
+        publicHandler(ctx, {
           courtPackId: "us-federal-ca4-civil-appeal",
           simulationEvalSnapshotJson: "{malformed",
         }),
@@ -75,10 +129,88 @@ describe("legacy court pack production promotion endpoint", () => {
       new Error("Not authenticated"),
     );
     await expect(
-      handler({} as MutationCtx, {
+      publicHandler({} as MutationCtx, {
         courtPackId: "us-federal-ca4-civil-appeal",
         simulationEvalSnapshotJson: "{malformed",
       }),
     ).rejects.toThrow("Not authenticated");
   });
+});
+
+describe("internal court pack production evidence gates", () => {
+  it.each([
+    { ...validEval, pass: false },
+    { ...validEval, pass: "true" },
+    { ...validEval, validTurnRate: "0.99" },
+    { ...validEval, hallucinatedSourceRate: null },
+    { ...validEval, createdAt: "2026-09-28T04:00:00.000Z" },
+    { ...validEval, createdAt: "2026-10-01T04:00:00.000Z" },
+    null,
+  ])(
+    "rejects stale or invalid eval evidence before reading state %#",
+    async (snapshot) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(now));
+      const query = vi.fn();
+      const patch = vi.fn();
+      const ctx = { db: { query, patch } } as unknown as MutationCtx;
+      await expect(
+        internalHandler(ctx, {
+          actorUserId,
+          courtPackId: "us-federal-ca4-civil-appeal",
+          simulationEvalSnapshotJson: JSON.stringify(snapshot),
+        }),
+      ).rejects.toThrow("Simulation eval snapshot rejected");
+      expect(query).not.toHaveBeenCalled();
+      expect(patch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects unreviewed sources even with valid passing eval evidence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    const { ctx, query, patch, insert } = promotionContext("draft");
+    await expect(
+      internalHandler(ctx, {
+        actorUserId,
+        courtPackId: "fixture-pack",
+        simulationEvalSnapshotJson: JSON.stringify(validEval),
+      }),
+    ).rejects.toThrow(
+      "Source custom-reviewed-source must be reviewed before publication.",
+    );
+    expect(query).toHaveBeenCalledWith("sourceArtifacts");
+    expect(patch).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it.each(["reviewed", "published"])(
+    "promotes only with %s source evidence and records the audit",
+    async (reviewStatus) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(now));
+      const { ctx, patch, insert } = promotionContext(reviewStatus);
+      const simulationEvalSnapshotJson = JSON.stringify(validEval);
+      await expect(
+        internalHandler(ctx, {
+          actorUserId,
+          courtPackId: "fixture-pack",
+          simulationEvalSnapshotJson,
+        }),
+      ).resolves.toBeNull();
+      expect(patch).toHaveBeenCalledExactlyOnceWith("pack-fixture", {
+        releaseStatus: "production_approved",
+        evalThresholdsJson: simulationEvalSnapshotJson,
+        published: true,
+      });
+      expect(insert).toHaveBeenCalledExactlyOnceWith("auditLog", {
+        actorUserId,
+        action: "court_pack.promoted_to_production",
+        targetTable: "courtPacks",
+        targetId: "pack-fixture",
+        metadataJson: JSON.stringify({ courtPackId: "fixture-pack" }),
+        createdAt: now,
+      });
+    },
+  );
 });

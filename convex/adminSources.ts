@@ -671,14 +671,18 @@ export const listSourceFreshness = query({
   },
 });
 
-export const promoteCourtPackRelease = mutation({
+/**
+ * Trusted internal path retains production evidence gates for a future
+ * organization-scoped caller. The legacy public mutation below stays closed.
+ */
+export const promoteCourtPackReleaseInternal = internalMutation({
   args: {
+    actorUserId: v.id("users"),
     courtPackId: v.string(),
     simulationEvalSnapshotJson: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const user = await requireAdmin(ctx);
     const snapshot: unknown = JSON.parse(args.simulationEvalSnapshotJson);
     const evalIssues = validateEvalFreshness(snapshot);
     if (evalIssues.length) {
@@ -700,12 +704,24 @@ export const promoteCourtPackRelease = mutation({
       published: true,
     });
     await writeAuditLog(ctx, {
-      actorUserId: user._id,
+      actorUserId: args.actorUserId,
       action: "court_pack.promoted_to_production",
       targetTable: "courtPacks",
       targetId: courtPack._id,
       metadata: { courtPackId: args.courtPackId },
     });
+    return null;
+  },
+});
+
+export const promoteCourtPackRelease = mutation({
+  args: {
+    courtPackId: v.string(),
+    simulationEvalSnapshotJson: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx) => {
+    await requireAdmin(ctx);
     return null;
   },
 });
