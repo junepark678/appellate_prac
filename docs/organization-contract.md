@@ -25,6 +25,10 @@ Never disclose foreign names, titles, storage IDs, role data, or other metadata 
 
 Capabilities are `{manageMembers, teach, learn}`: admin has all three; instructor has teach and learn; learner has learn. Personal owners still need their own active membership.
 
+## Disabled legacy pack-bundle export
+
+The public `adminPackBundles.generatePackBundleZip({bundleId})` action remains registered for call compatibility, but it is disabled. An unauthenticated call returns `AUTH_REQUIRED`; every authenticated caller returns `VALIDATION_ERROR` with `Use organization membership management`, regardless of legacy `users.role`. The action does not read a bundle payload, fetch artifacts, build a ZIP, write storage, or attach a generated bundle. There is no global-admin or organization-admin export exception. Any future authorized pack export must be defined and tracked in [issue #94](https://github.com/junepark678/appellate_prac/issues/94) before implementation; this contract does not provide a replacement path.
+
 ## Organization APIs reserved for the dependent implementation
 
 These signatures are published for integration; this foundation does not register them.
