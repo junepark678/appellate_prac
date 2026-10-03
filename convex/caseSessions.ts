@@ -587,6 +587,23 @@ function documentFromDoc(
   }
 }
 
+async function requireDocumentAnalysisBinding(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+  document: Doc<'documents'>,
+) {
+  if (!document.analysisId) return null
+  const analysis = await ctx.db.get(document.analysisId)
+  if (
+    !analysis ||
+    analysis.caseSessionId !== caseSessionId ||
+    (analysis.documentId && analysis.documentId !== document._id)
+  ) {
+    throw notFound('Document analysis')
+  }
+  return analysis
+}
+
 function actorWorkProductFromDoc(product: Doc<'actorWorkProducts'>): ActorWorkProduct {
   const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
     product.workProductJson,
@@ -921,7 +938,11 @@ async function assembleCaseSession(
   for (const analysis of documentAnalyses) {
     if (!analysis.documentId) continue
     const document = await ctx.db.get(analysis.documentId)
-    if (!document || document.caseSessionId !== caseSession._id) {
+    if (
+      !document ||
+      document.caseSessionId !== caseSession._id ||
+      (document.analysisId && document.analysisId !== analysis._id)
+    ) {
       throw notFound('Document analysis')
     }
   }
@@ -929,6 +950,9 @@ async function assembleCaseSession(
     const documents = await Promise.all(filing.documentIds.map((id) => ctx.db.get(id)))
     if (documents.some((document) => !document || document.caseSessionId !== caseSession._id)) {
       throw notFound('Filing')
+    }
+    for (const document of documents) {
+      if (document) await requireDocumentAnalysisBinding(ctx, caseSession._id, document)
     }
     for (const analysisId of filing.documentAnalysisIds ?? []) {
       const analysis = await ctx.db.get(analysisId)
@@ -2059,6 +2083,9 @@ export const getDocumentAnalysesForCurrentUser = query({
       if (!analysis.documentId) continue
       const document = await ctx.db.get(analysis.documentId)
       if (!document || document.caseSessionId !== args.caseSessionId) {
+        throw notFound('Document analysis')
+      }
+      if (document.analysisId && document.analysisId !== analysis._id) {
         throw notFound('Document analysis')
       }
     }

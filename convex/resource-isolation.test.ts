@@ -1251,6 +1251,90 @@ describe('organization isolation for sessions and scenarios', () => {
     })
   })
 
+  it.each(['foreign_analysis', 'missing_analysis'] as const)(
+    'rejects a session document with a %s pointer',
+    async (pointerKind) => {
+      const t = convexTest(schema, modules)
+      const fixture = await seedIsolationFixture(t)
+      const asAlice = t.withIdentity(identity('alice'))
+      const sessionA = await asAlice.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+      })
+      const sessionB = await asAlice.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+      })
+      const sessionAId = sessionA.id as Id<'caseSessions'>
+      const sessionBId = sessionB.id as Id<'caseSessions'>
+      await t.run(async (ctx) => {
+        const documentId = await ctx.db.insert('documents', {
+          caseSessionId: sessionAId,
+          fileName: 'session-a.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 1200,
+          extractedSignals: [],
+        })
+        let analysisId: Id<'documentAnalyses'>
+        if (pointerKind === 'foreign_analysis') {
+          const foreignDocumentId = await ctx.db.insert('documents', {
+            caseSessionId: sessionBId,
+            fileName: 'session-b.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 1200,
+            extractedSignals: [],
+          })
+          analysisId = await ctx.db.insert('documentAnalyses', {
+            caseSessionId: sessionBId,
+            documentId: foreignDocumentId,
+            analyzerId: 'fixture-analyzer',
+            fileSizeBytes: 1200,
+            mimeType: 'application/pdf',
+            searchableText: true,
+            certificateOfServiceDetected: false,
+            certificateOfComplianceDetected: false,
+            sealedOrRedactionWarning: false,
+            warnings: [],
+            createdAt: '2026-10-03T00:00:00.000Z',
+          })
+        } else {
+          analysisId = await ctx.db.insert('documentAnalyses', {
+            caseSessionId: sessionAId,
+            documentId,
+            analyzerId: 'fixture-analyzer',
+            fileSizeBytes: 1200,
+            mimeType: 'application/pdf',
+            searchableText: true,
+            certificateOfServiceDetected: false,
+            certificateOfComplianceDetected: false,
+            sealedOrRedactionWarning: false,
+            warnings: [],
+            createdAt: '2026-10-03T00:00:00.000Z',
+          })
+        }
+        await ctx.db.patch(documentId, { analysisId })
+        if (pointerKind === 'missing_analysis') await ctx.db.delete(analysisId)
+        await ctx.db.insert('filings', {
+          caseSessionId: sessionAId,
+          eventId: 'notice_of_appeal',
+          participantRole: 'appellant',
+          title: 'Notice of Appeal',
+          documentIds: [documentId],
+          certificateOfService: true,
+          certificateOfCompliance: false,
+          sealed: false,
+          notes: '',
+          filedAt: '2026-10-03T00:00:00.000Z',
+          outcome: 'accepted',
+          validationIssues: [],
+        })
+      })
+
+      await expectAppError(
+        asAlice.query(getSessionRef, { caseSessionId: sessionAId }),
+        AppErrorCode.NOT_FOUND,
+      )
+    },
+  )
+
   it('validates generated actor sources, remaps accepted work products, and rejects foreign refs', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedIsolationFixture(t)
