@@ -232,6 +232,22 @@ function verifyLintStagedRuntimeSelection(fixture: {
     throw new Error(
       "The forced-Bun lint-staged invocation still launched its CLI with Node.",
     );
+
+  rmSync(fixture.nodeRuntimeTrace, { force: true });
+  const lintScript = requireSuccess(
+    "bun",
+    ["run", "lint", "--version"],
+    fixture.path,
+    fixture.env,
+  );
+  if (lintScript.stdout.trim() !== "17.6.0")
+    throw new Error(
+      "The package lint script did not execute lint-staged 17.6.0.",
+    );
+  if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+    throw new Error(
+      "The package lint script executed the lint-staged CLI with Node instead of Bun.",
+    );
 }
 
 function verifySuccessfulHook(): void {
@@ -252,6 +268,34 @@ function verifySuccessfulHook(): void {
       file,
       "export const unstagedValue='keep this unstaged edit';\n",
     );
+
+    requireSuccess("bun", ["run", "lint"], fixture.path, fixture.env);
+
+    const stagedAfterLint = requireSuccess(
+      "git",
+      ["show", `:${relativePath}`],
+      fixture.path,
+      fixture.env,
+    ).stdout;
+    const worktreeAfterLint = readFileSync(file, "utf8");
+    if (!stagedAfterLint.includes("export const stagedValue = { answer: 42 };"))
+      throw new Error(
+        "bun run lint did not format the staged TypeScript file.",
+      );
+    if (stagedAfterLint.includes("unstagedValue"))
+      throw new Error("bun run lint included the unstaged edit in the index.");
+    if (
+      !worktreeAfterLint.includes(
+        "export const unstagedValue='keep this unstaged edit';",
+      )
+    )
+      throw new Error(
+        "bun run lint did not preserve the unstaged same-file edit.",
+      );
+    if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+      throw new Error(
+        "bun run lint executed lint-staged with Node instead of Bun.",
+      );
 
     requireSuccess(
       "git",
@@ -319,6 +363,31 @@ function verifyFailurePropagates(): void {
       fixture.env,
     );
 
+    const lint = run("bun", ["run", "lint"], fixture.path, fixture.env);
+    if (lint.error || lint.status === 0)
+      throw new Error(
+        `bun run lint did not propagate the failing typecheck.\n${describe(lint)}`,
+      );
+    if (!describe(lint).includes("not assignable to type 'number'"))
+      throw new Error(
+        `bun run lint failed for an unexpected reason.\n${describe(lint)}`,
+      );
+    if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+      throw new Error(
+        "bun run lint executed lint-staged with Node instead of Bun.",
+      );
+
+    const stagedBeforeCommit = requireSuccess(
+      "git",
+      ["diff", "--cached", "--name-only"],
+      fixture.path,
+      fixture.env,
+    ).stdout;
+    if (!stagedBeforeCommit.split("\n").includes(relativePath))
+      throw new Error(
+        "bun run lint unexpectedly removed the failing staged file.",
+      );
+
     const commit = run(
       "git",
       ["commit", "-m", "expected hook failure"],
@@ -371,5 +440,5 @@ if (Bun.version !== bunVersion)
 verifySuccessfulHook();
 verifyFailurePropagates();
 console.log(
-  `PASS: Husky pre-commit runs lint-staged under Bun ${Bun.version}; staged paths with spaces are formatted, failures block commits, and unstaged edits are preserved.`,
+  `PASS: bun run lint and Husky pre-commit execute lint-staged under Bun ${Bun.version}; staged paths with spaces are formatted, failures block commits, and unstaged edits are preserved.`,
 );
