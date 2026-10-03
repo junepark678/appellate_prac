@@ -172,6 +172,15 @@ async function expireStaleAiReservations(
   )
 }
 
+function requireActiveAiReservation(run: Doc<'aiRuns'>) {
+  if (
+    run.errorClass !== 'in_flight' ||
+    isStaleAiReservation(run, new Date().toISOString())
+  ) {
+    throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
+  }
+}
+
 function makeRecordId(prefix: string, count: number) {
   return `${prefix}_${String(count + 1).padStart(4, '0')}`
 }
@@ -309,7 +318,10 @@ async function ensureScenarioDoc(
     }
     if (
       visibility === 'public_template' &&
-      (existing.revisionStatus ?? (existing.published ? 'published' : 'draft')) !== 'published'
+      (
+        (existing.revisionStatus ?? (existing.published ? 'published' : 'draft')) !== 'published' ||
+        (existing.institutionId !== undefined && existing.institutionId !== institutionId)
+      )
     ) {
       throw notFound('Scenario')
     }
@@ -437,6 +449,9 @@ async function requireSessionScenarioLink(
   ) {
     throw notFound('Case session')
   }
+  if (scenario.institutionId && scenario.institutionId !== session.institutionId) {
+    throw notFound('Case session')
+  }
   return scenario
 }
 
@@ -452,6 +467,7 @@ async function requireSessionAssignmentLinks(
     .query('assignmentSessions')
     .withIndex('by_case', (index) => index.eq('caseSessionId', session._id))
     .collect()
+  if (links.length > 1) sessionLinkConflict()
   for (const link of links) {
     if (link.caseSessionId !== session._id || link.userId !== session.userId) {
       sessionLinkConflict()
@@ -463,6 +479,18 @@ async function requireSessionAssignmentLinks(
       !cohort ||
       assignment.scenarioId !== session.scenarioId ||
       cohort.institutionId !== session.institutionId
+    ) {
+      sessionLinkConflict()
+    }
+    const assignmentUserLinks = await ctx.db
+      .query('assignmentSessions')
+      .withIndex('by_assignment_user', (index) =>
+        index.eq('assignmentId', assignment._id).eq('userId', link.userId),
+      )
+      .collect()
+    if (
+      assignmentUserLinks.length !== 1 ||
+      assignmentUserLinks[0]?._id !== link._id
     ) {
       sessionLinkConflict()
     }
@@ -2342,9 +2370,7 @@ export const finalizeAiRunForCurrentUser = internalMutation({
     const { session } = await requireOwnedSession(ctx, run.caseSessionId)
     if (session.userId !== run.userId) throw notFound('AI run')
     await requireWritableCaseSession(ctx, session._id)
-    if (run.errorClass !== 'in_flight') {
-      throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
-    }
+    requireActiveAiReservation(run)
     await ctx.db.patch(args.aiRunId, {
       actorId: args.actorId,
       toolCallJson: args.toolCallJson,
@@ -2424,9 +2450,7 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
       ) {
         throw notFound('AI run')
       }
-      if (run.errorClass !== 'in_flight') {
-        throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
-      }
+      requireActiveAiReservation(run)
       await ctx.db.patch(args.aiRunId, {
         actorId: args.toolCall.actorId,
         toolCallJson: args.rawText,
@@ -2505,9 +2529,7 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
     ) {
       throw notFound('AI run')
     }
-    if (run.errorClass !== 'in_flight') {
-      throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
-    }
+    requireActiveAiReservation(run)
     await requireActorWorkProductSources(
       ctx,
       session._id,

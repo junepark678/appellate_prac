@@ -20,13 +20,14 @@
 import { makeFunctionReference } from 'convex/server'
 import { convexTest } from 'convex-test'
 import type { TestConvex } from 'convex-test'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { Id } from './_generated/dataModel'
 import { internal } from './_generated/api'
 import { AppErrorCode } from './errors'
 import schema from './schema'
 import type { CaseSession, Scenario } from '../src/domain/types'
+import { createInitialSession, nextExpectedToolCall } from '../src/domain/simulation'
 
 const modules = {
   './_generated/api.ts': () => import('./_generated/api'),
@@ -202,6 +203,48 @@ const reviewAssignmentSessionRef = makeFunctionReference<
   { assignmentSessionId: Id<'assignmentSessions'>; instructorNote: string; score?: number },
   null
 >('instructor:reviewAssignmentSession')
+const listAssignmentSessionsRef = makeFunctionReference<
+  'query',
+  { assignmentId: Id<'assignments'> },
+  unknown[]
+>('instructor:listAssignmentSessions')
+const exportAssignmentCsvRef = makeFunctionReference<
+  'query',
+  { assignmentId: Id<'assignments'> },
+  string
+>('instructor:exportAssignmentCsv')
+const getSessionReplayRef = makeFunctionReference<
+  'query',
+  { caseSessionId: Id<'caseSessions'> },
+  unknown[]
+>('instructor:getSessionReplay')
+const getReviewContextRef = makeFunctionReference<
+  'query',
+  { caseSessionId: Id<'caseSessions'> },
+  unknown
+>('instructor:getReviewContext')
+const getAssignmentRef = makeFunctionReference<
+  'query',
+  { assignmentId: Id<'assignments'> },
+  {
+    status: 'not_started' | 'in_progress' | 'submitted' | 'reviewed'
+    caseSessionId?: Id<'caseSessions'>
+    submittedAt?: string
+    reviewedAt?: string
+    instructorNote?: string
+  } | null
+>('assignments:get')
+const listMineAssignmentsRef = makeFunctionReference<
+  'query',
+  Record<string, never>,
+  Array<{
+    id: Id<'assignments'>
+    status: 'not_started' | 'in_progress' | 'submitted' | 'reviewed'
+    caseSessionId?: Id<'caseSessions'>
+    submittedAt?: string
+    reviewedAt?: string
+  }>
+>('assignments:listMine')
 
 async function expectAppError(promise: Promise<unknown>, code: AppErrorCode) {
   let caught: unknown
@@ -546,6 +589,75 @@ describe('organization isolation for sessions and scenarios', () => {
     )
   })
 
+  it('keeps institution-scoped public templates within their stored organization', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    const scenarioKey = 'organization-scoped-public-template'
+    await t.run((ctx) =>
+      ctx.db.insert('scenarios', {
+        scenarioKey,
+        institutionId: fixture.orgA,
+        visibility: 'public_template',
+        scenarioFamilyKey: scenarioKey,
+        revision: 1,
+        revisionStatus: 'published',
+        title: 'Organization-scoped public template',
+        source: 'synthetic',
+        courtPackId: 'us-federal-ca4-civil-appeal',
+        shortCaption: 'Example v. State',
+        lowerTribunal: 'District Court',
+        natureOfSuit: 'Civil rights',
+        proceduralPosture: 'Appeal from summary judgment',
+        issuesPresented: ['Whether the record supports judgment.'],
+        meritsRecord: ['A synthetic record for isolated testing.'],
+        published: true,
+      }),
+    )
+    const asDual = t.withIdentity(identity('dual'))
+    const beforeCrossOrgCreate = await t.run(async (ctx) => ({
+      sessions: await ctx.db.query('caseSessions').collect(),
+      scenario: await ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+        .unique(),
+    }))
+    await expectAppError(
+      asDual.mutation(createSessionRef, {
+        institutionId: fixture.orgB,
+        scenarioId: scenarioKey,
+      }),
+      AppErrorCode.NOT_FOUND,
+    )
+    expect(
+      await t.run(async (ctx) => ({
+        sessions: await ctx.db.query('caseSessions').collect(),
+        scenario: await ctx.db
+          .query('scenarios')
+          .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+          .unique(),
+      })),
+    ).toEqual(beforeCrossOrgCreate)
+
+    const session = await asDual.mutation(createSessionRef, {
+      institutionId: fixture.orgA,
+      scenarioId: scenarioKey,
+    })
+    expect(session.scenario.id).toBe(scenarioKey)
+    expect(await asDual.query(getSessionRef, {
+      caseSessionId: session.id as Id<'caseSessions'>,
+    })).toMatchObject({ id: session.id, institutionId: fixture.orgA })
+
+    await t.run((ctx) =>
+      ctx.db.patch(session.id as Id<'caseSessions'>, { institutionId: fixture.orgB }),
+    )
+    await expectAppError(
+      asDual.query(getSessionRef, {
+        caseSessionId: session.id as Id<'caseSessions'>,
+      }),
+      AppErrorCode.NOT_FOUND,
+    )
+  })
+
   it('binds assignment-started sessions and rejects a revoked private-scenario owner before writes', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedIsolationFixture(t)
@@ -816,6 +928,351 @@ describe('organization isolation for sessions and scenarios', () => {
     expect(after).toEqual(before)
   })
 
+  it('preserves valid learner and instructor assignment-session projections', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    const scenario = await t.run((ctx) =>
+      ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) =>
+          index.eq('scenarioKey', 'synthetic-employment-retaliation'),
+        )
+        .unique(),
+    )
+    if (!scenario) throw new Error('public template fixture missing')
+    const assignment = await seedCohortAssignment(t, {
+      institutionId: fixture.orgA,
+      scenarioId: scenario._id,
+      createdByUserId: fixture.instructor,
+      learners: [fixture.dual],
+      title: 'Valid session projection',
+    })
+    const asDual = t.withIdentity(identity('dual'))
+    const caseSessionId = await asDual.mutation(startAssignmentSessionRef, {
+      assignmentId: assignment.assignmentId,
+    })
+    await asDual.mutation(submitAssignmentSessionRef, {
+      assignmentId: assignment.assignmentId,
+      caseSessionId,
+    })
+    const assignmentSession = await t.run(async (ctx) =>
+      ctx.db
+        .query('assignmentSessions')
+        .withIndex('by_assignment_user', (index) =>
+          index.eq('assignmentId', assignment.assignmentId).eq('userId', fixture.dual),
+        )
+        .unique(),
+    )
+    if (!assignmentSession) throw new Error('assignment-session fixture missing')
+    await t.withIdentity(identity('instructor')).mutation(reviewAssignmentSessionRef, {
+      assignmentSessionId: assignmentSession._id,
+      instructorNote: 'Validated inside the owning organization.',
+      score: 91,
+    })
+
+    const learnerAssignment = await asDual.query(getAssignmentRef, {
+      assignmentId: assignment.assignmentId,
+    })
+    expect(learnerAssignment).toMatchObject({
+      status: 'reviewed',
+      caseSessionId,
+      submittedAt: assignmentSession.submittedAt,
+      instructorNote: 'Validated inside the owning organization.',
+    })
+    expect(await asDual.query(listMineAssignmentsRef, {})).toContainEqual(
+      expect.objectContaining({
+        id: assignment.assignmentId,
+        status: 'reviewed',
+        caseSessionId,
+        submittedAt: assignmentSession.submittedAt,
+      }),
+    )
+
+    const asInstructor = t.withIdentity(identity('instructor'))
+    expect(await asInstructor.query(listAssignmentSessionsRef, {
+      assignmentId: assignment.assignmentId,
+    })).toContainEqual(
+      expect.objectContaining({
+        assignmentSessionId: assignmentSession._id,
+        caseSessionId,
+        userId: fixture.dual,
+        status: 'reviewed',
+        instructorNote: 'Validated inside the owning organization.',
+      }),
+    )
+    expect(await asInstructor.query(exportAssignmentCsvRef, {
+      assignmentId: assignment.assignmentId,
+    })).toContain(String(caseSessionId))
+    expect(await asInstructor.query(getSessionReplayRef, { caseSessionId })).toContainEqual(
+      expect.objectContaining({ eventType: 'instructor_review_submitted' }),
+    )
+    expect(await asInstructor.query(getReviewContextRef, { caseSessionId })).toMatchObject({
+      assignmentSessionId: assignmentSession._id,
+      assignmentId: assignment.assignmentId,
+      status: 'reviewed',
+      instructorNote: 'Validated inside the owning organization.',
+    })
+  })
+
+  it.each([
+    'cross_organization',
+    'foreign_owner',
+    'legacy_unscoped',
+    'mismatched_scenario',
+    'revoked_session_owner',
+  ] as const)('hides assignment projections for %s links', async (linkKind) => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    const publicScenario = await t.run((ctx) =>
+      ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) =>
+          index.eq('scenarioKey', 'synthetic-employment-retaliation'),
+        )
+        .unique(),
+    )
+    if (!publicScenario) throw new Error('public template fixture missing')
+    const otherScenario = await t.run(async (ctx) =>
+      (await ctx.db.query('scenarios').collect()).find(
+        (scenario) =>
+          scenario._id !== publicScenario._id &&
+          scenario.visibility === 'public_template' &&
+          scenario.published,
+      ) ?? null,
+    )
+    if (!otherScenario) throw new Error('second public template fixture missing')
+    const assignment = await seedCohortAssignment(t, {
+      institutionId: fixture.orgA,
+      scenarioId: publicScenario._id,
+      createdByUserId: fixture.instructor,
+      learners: [fixture.dual],
+      title: `Invalid projection ${linkKind}`,
+    })
+    const asDual = t.withIdentity(identity('dual'))
+    let caseSessionId: Id<'caseSessions'>
+    if (linkKind === 'cross_organization') {
+      const session = await asDual.mutation(createSessionRef, {
+        institutionId: fixture.orgB,
+        scenarioId: publicScenario.scenarioKey,
+      })
+      caseSessionId = session.id as Id<'caseSessions'>
+    } else if (linkKind === 'foreign_owner') {
+      const session = await t.withIdentity(identity('alice')).mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: publicScenario.scenarioKey,
+      })
+      caseSessionId = session.id as Id<'caseSessions'>
+    } else if (linkKind === 'mismatched_scenario') {
+      const session = await asDual.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: otherScenario.scenarioKey,
+      })
+      caseSessionId = session.id as Id<'caseSessions'>
+    } else {
+      const session = await asDual.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: publicScenario.scenarioKey,
+      })
+      caseSessionId = session.id as Id<'caseSessions'>
+      if (linkKind === 'legacy_unscoped') {
+        await t.run((ctx) => ctx.db.patch(caseSessionId, { institutionId: undefined }))
+      }
+      if (linkKind === 'revoked_session_owner') {
+        await t.run((ctx) => ctx.db.patch(fixture.dualA, { status: 'suspended' }))
+      }
+    }
+    await t.run((ctx) =>
+      ctx.db.insert('assignmentSessions', {
+        assignmentId: assignment.assignmentId,
+        caseSessionId,
+        userId: fixture.dual,
+        submittedAt: '2026-10-03T01:00:00.000Z',
+        reviewedAt: '2026-10-03T01:05:00.000Z',
+        instructorNote: 'Foreign review note must remain hidden.',
+        score: 100,
+      }),
+    )
+
+    const errorCode = linkKind === 'mismatched_scenario'
+      ? AppErrorCode.CONFLICT
+      : AppErrorCode.NOT_FOUND
+    for (const operation of [
+      t.withIdentity(identity('instructor')).query(listAssignmentSessionsRef, {
+        assignmentId: assignment.assignmentId,
+      }),
+      t.withIdentity(identity('instructor')).query(exportAssignmentCsvRef, {
+        assignmentId: assignment.assignmentId,
+      }),
+      t.withIdentity(identity('instructor')).query(getSessionReplayRef, { caseSessionId }),
+      t.withIdentity(identity('instructor')).query(getReviewContextRef, { caseSessionId }),
+    ]) {
+      await expectAppError(operation, errorCode)
+    }
+
+    if (linkKind === 'revoked_session_owner') {
+      await expectAppError(
+        asDual.query(getAssignmentRef, { assignmentId: assignment.assignmentId }),
+        AppErrorCode.NOT_FOUND,
+      )
+      expect(await asDual.query(listMineAssignmentsRef, {})).toEqual([])
+    } else {
+      await expectAppError(
+        asDual.query(getAssignmentRef, { assignmentId: assignment.assignmentId }),
+        errorCode,
+      )
+      await expectAppError(asDual.query(listMineAssignmentsRef, {}), errorCode)
+    }
+  })
+
+  it.each([
+    'second_assignment_same_case',
+    'second_session_same_assignment_user',
+  ] as const)('rejects ambiguous assignment-session link sets: %s', async (duplicateKind) => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    const scenario = await t.run((ctx) =>
+      ctx.db
+        .query('scenarios')
+        .withIndex('by_scenario_key', (index) =>
+          index.eq('scenarioKey', 'synthetic-employment-retaliation'),
+        )
+        .unique(),
+    )
+    if (!scenario) throw new Error('public template fixture missing')
+    const [assignmentA, assignmentB] = await Promise.all([
+      seedCohortAssignment(t, {
+        institutionId: fixture.orgA,
+        scenarioId: scenario._id,
+        createdByUserId: fixture.instructor,
+        learners: [fixture.dual],
+        title: 'First assignment link',
+      }),
+      seedCohortAssignment(t, {
+        institutionId: fixture.orgA,
+        scenarioId: scenario._id,
+        createdByUserId: fixture.instructor,
+        learners: [fixture.dual],
+        title: 'Second assignment link',
+      }),
+    ])
+    const asDual = t.withIdentity(identity('dual'))
+    const caseSessionId = await asDual.mutation(startAssignmentSessionRef, {
+      assignmentId: assignmentA.assignmentId,
+    })
+    if (duplicateKind === 'second_assignment_same_case') {
+      await t.run((ctx) =>
+        ctx.db.insert('assignmentSessions', {
+          assignmentId: assignmentB.assignmentId,
+          caseSessionId,
+          userId: fixture.dual,
+        }),
+      )
+    } else {
+      const otherSession = await asDual.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: scenario.scenarioKey,
+      })
+      await t.run((ctx) =>
+        ctx.db.insert('assignmentSessions', {
+          assignmentId: assignmentA.assignmentId,
+          caseSessionId: otherSession.id as Id<'caseSessions'>,
+          userId: fixture.dual,
+        }),
+      )
+    }
+    const before = await t.run(async (ctx) => ({
+      session: await ctx.db.get(caseSessionId),
+      links: await ctx.db.query('assignmentSessions').collect(),
+      events: await ctx.db
+        .query('caseSessionEvents')
+        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+        .collect(),
+      audit: await ctx.db.query('auditLog').collect(),
+    }))
+    const asInstructor = t.withIdentity(identity('instructor'))
+    await expectAppError(
+      asDual.query(getSessionRef, { caseSessionId }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asDual.mutation(acceptDisclaimerRef, { caseSessionId, version: 'v1' }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asDual.query(getAssignmentRef, { assignmentId: assignmentA.assignmentId }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asDual.query(listMineAssignmentsRef, {}),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asDual.mutation(attachSessionRef, {
+        assignmentId: assignmentA.assignmentId,
+        caseSessionId,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asDual.mutation(submitAssignmentSessionRef, {
+        assignmentId: assignmentA.assignmentId,
+        caseSessionId,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    const targetLink = before.links.find(
+      (link) => link.assignmentId === assignmentA.assignmentId,
+    )
+    if (!targetLink) throw new Error('assignment-session fixture missing')
+    await expectAppError(
+      asInstructor.mutation(reopenAssignmentSessionRef, {
+        assignmentSessionId: targetLink._id,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asInstructor.mutation(reviewAssignmentSessionRef, {
+        assignmentSessionId: targetLink._id,
+        instructorNote: 'Should not write against ambiguous links.',
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asInstructor.query(listAssignmentSessionsRef, {
+        assignmentId: assignmentA.assignmentId,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asInstructor.query(exportAssignmentCsvRef, {
+        assignmentId: assignmentA.assignmentId,
+      }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asInstructor.query(getSessionReplayRef, { caseSessionId }),
+      AppErrorCode.CONFLICT,
+    )
+    await expectAppError(
+      asInstructor.query(getReviewContextRef, { caseSessionId }),
+      AppErrorCode.CONFLICT,
+    )
+    expect(
+      await t.run(async (ctx) => ({
+        session: await ctx.db.get(caseSessionId),
+        links: await ctx.db.query('assignmentSessions').collect(),
+        events: await ctx.db
+          .query('caseSessionEvents')
+          .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+          .collect(),
+        audit: await ctx.db.query('auditLog').collect(),
+      })),
+    ).toEqual(before)
+  })
+
   it('rechecks organization and session binding when finalizing AI reservations', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedIsolationFixture(t)
@@ -868,6 +1325,208 @@ describe('organization isolation for sessions and scenarios', () => {
     const run = await t.run((ctx) => ctx.db.get(reservation.aiRunId!))
     expect(run?.errorClass).toBe('in_flight')
     expect(run?.toolCallJson).toBe('')
+  })
+
+  it('enforces reservation expiry at each completion boundary', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-10-03T01:00:00.000Z'))
+      const t = convexTest(schema, modules)
+      const fixture = await seedIsolationFixture(t)
+      const asDual = t.withIdentity(identity('dual'))
+      const sessions = await Promise.all(
+        Array.from({ length: 6 }, () =>
+          asDual.mutation(createSessionRef, { institutionId: fixture.orgA }),
+        ),
+      )
+      const sessionIds = sessions.map((session) => session.id as Id<'caseSessions'>)
+      const reserve = async (sessionId: Id<'caseSessions'>, nowIso: string, actorId: string) => {
+        vi.setSystemTime(new Date(nowIso))
+        const result = await asDual.mutation(
+          internal.caseSessions.reserveAiRunForCurrentUser,
+          {
+            caseSessionId: sessionId,
+            actorId,
+            model: 'fixture-model',
+            promptHash: `fixture-${actorId}`,
+            nowIso,
+            cooldownMs: 0,
+            estimatedCostCents: 1,
+          },
+        )
+        if (!result.aiRunId) throw new Error(`reservation rejected: ${result.reason}`)
+        return result.aiRunId
+      }
+
+      const finalizeEarly = await reserve(
+        sessionIds[0]!,
+        '2026-10-03T01:00:00.000Z',
+        'finalize-early',
+      )
+      vi.setSystemTime(new Date('2026-10-03T01:04:59.999Z'))
+      await asDual.mutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+        aiRunId: finalizeEarly,
+        actorId: 'fixture-actor',
+        toolCallJson: '{}',
+        accepted: true,
+        issues: [],
+        costCents: 1,
+        latencyMs: 1,
+      })
+      expect(await t.run((ctx) => ctx.db.get(finalizeEarly))).toMatchObject({
+        accepted: true,
+        toolCallJson: '{}',
+        costCents: 1,
+      })
+      expect((await t.run((ctx) => ctx.db.get(finalizeEarly)))?.errorClass).toBeUndefined()
+
+      const finalizeExpired = await reserve(
+        sessionIds[1]!,
+        '2026-10-03T02:00:00.000Z',
+        'finalize-expired',
+      )
+      const finalizeBefore = await t.run((ctx) => ctx.db.get(finalizeExpired))
+      vi.setSystemTime(new Date('2026-10-03T02:05:00.000Z'))
+      await expectAppError(
+        asDual.mutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
+          aiRunId: finalizeExpired,
+          actorId: 'fixture-actor',
+          toolCallJson: '{}',
+          accepted: true,
+          issues: [],
+          costCents: 1,
+          latencyMs: 1,
+        }),
+        AppErrorCode.CONFLICT,
+      )
+      expect(await t.run((ctx) => ctx.db.get(finalizeExpired))).toEqual(finalizeBefore)
+
+      const expectedToolCall = nextExpectedToolCall(createInitialSession())
+      const applyEarly = await reserve(
+        sessionIds[2]!,
+        '2026-10-03T03:00:00.000Z',
+        'apply-early',
+      )
+      vi.setSystemTime(new Date('2026-10-03T03:04:59.999Z'))
+      const applied = await asDual.mutation(
+        internal.caseSessions.applyLiveToolCallForCurrentUser,
+        {
+          caseSessionId: sessionIds[2]!,
+          toolCall: expectedToolCall,
+          model: 'fixture-model',
+          rawText: JSON.stringify(expectedToolCall),
+          latencyMs: 1,
+          costCents: 1,
+          createdAt: '2026-10-03T03:04:59.999Z',
+          aiRunId: applyEarly,
+        },
+      )
+      expect(applied.docketEntries.length).toBeGreaterThan(0)
+      expect((await t.run((ctx) => ctx.db.get(applyEarly)))?.errorClass).toBeUndefined()
+
+      const applyExpired = await reserve(
+        sessionIds[3]!,
+        '2026-10-03T04:00:00.000Z',
+        'apply-expired',
+      )
+      const applyBefore = await t.run(async (ctx) => ({
+        run: await ctx.db.get(applyExpired),
+        session: await ctx.db.get(sessionIds[3]!),
+        events: await ctx.db
+          .query('caseSessionEvents')
+          .withIndex('by_case', (index) => index.eq('caseSessionId', sessionIds[3]!))
+          .collect(),
+      }))
+      vi.setSystemTime(new Date('2026-10-03T04:05:00.000Z'))
+      await expectAppError(
+        asDual.mutation(internal.caseSessions.applyLiveToolCallForCurrentUser, {
+          caseSessionId: sessionIds[3]!,
+          toolCall: expectedToolCall,
+          model: 'fixture-model',
+          rawText: JSON.stringify(expectedToolCall),
+          latencyMs: 1,
+          costCents: 1,
+          createdAt: '2026-10-03T04:05:00.000Z',
+          aiRunId: applyExpired,
+        }),
+        AppErrorCode.CONFLICT,
+      )
+      expect(
+        await t.run(async (ctx) => ({
+          run: await ctx.db.get(applyExpired),
+          session: await ctx.db.get(sessionIds[3]!),
+          events: await ctx.db
+            .query('caseSessionEvents')
+            .withIndex('by_case', (index) => index.eq('caseSessionId', sessionIds[3]!))
+            .collect(),
+        })),
+      ).toEqual(applyBefore)
+
+      const memoJson = JSON.stringify({
+        title: 'Fixture bench memo',
+        summary: 'Prepared before the reservation deadline.',
+        reasoning: [],
+        recommendations: [],
+        citations: [],
+        ruleRefs: [],
+      })
+      const persistEarly = await reserve(
+        sessionIds[4]!,
+        '2026-10-03T05:00:00.000Z',
+        'persist-early',
+      )
+      vi.setSystemTime(new Date('2026-10-03T05:04:59.999Z'))
+      await asDual.mutation(internal.caseSessions.persistActorWorkProductForCurrentUser, {
+        caseSessionId: sessionIds[4]!,
+        aiRunId: persistEarly,
+        actorId: 'fixture-actor',
+        kind: 'bench_memo',
+        workProductJson: memoJson,
+        sourceDocumentAnalysisIds: [],
+        sourceFilingIds: [],
+        validationIssues: [],
+        createdAt: '2026-10-03T05:04:59.999Z',
+        costCents: 1,
+        latencyMs: 1,
+      })
+      expect((await t.run((ctx) => ctx.db.query('actorWorkProducts').collect())).length).toBe(1)
+      expect((await t.run((ctx) => ctx.db.get(persistEarly)))?.errorClass).toBeUndefined()
+
+      const persistExpired = await reserve(
+        sessionIds[5]!,
+        '2026-10-03T06:00:00.000Z',
+        'persist-expired',
+      )
+      const persistBefore = await t.run(async (ctx) => ({
+        run: await ctx.db.get(persistExpired),
+        products: await ctx.db.query('actorWorkProducts').collect(),
+      }))
+      vi.setSystemTime(new Date('2026-10-03T06:05:00.000Z'))
+      await expectAppError(
+        asDual.mutation(internal.caseSessions.persistActorWorkProductForCurrentUser, {
+          caseSessionId: sessionIds[5]!,
+          aiRunId: persistExpired,
+          actorId: 'fixture-actor',
+          kind: 'bench_memo',
+          workProductJson: memoJson,
+          sourceDocumentAnalysisIds: [],
+          sourceFilingIds: [],
+          validationIssues: [],
+          createdAt: '2026-10-03T06:05:00.000Z',
+          costCents: 1,
+          latencyMs: 1,
+        }),
+        AppErrorCode.CONFLICT,
+      )
+      expect(
+        await t.run(async (ctx) => ({
+          run: await ctx.db.get(persistExpired),
+          products: await ctx.db.query('actorWorkProducts').collect(),
+        })),
+      ).toEqual(persistBefore)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('enforces submitted locks and rejects assignment links to another owner or organization', async () => {

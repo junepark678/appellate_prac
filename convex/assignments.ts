@@ -192,7 +192,31 @@ async function getAssignmentSession(
     assignmentId,
     userId,
   );
-  return sessions[0] ?? null;
+  if (sessions.length > 1) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session linkage is ambiguous",
+    );
+  }
+  const assignmentSession = sessions[0] ?? null;
+  if (!assignmentSession) return null;
+  const assignment = await ctx.db.get(assignmentId);
+  const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null;
+  const institution = cohort ? await ctx.db.get(cohort.institutionId) : null;
+  if (!assignment || !cohort || !institution) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session linkage is inconsistent",
+    );
+  }
+  await requireAssignmentSessionBinding(
+    ctx,
+    assignmentSession,
+    assignment,
+    cohort,
+    institution,
+  );
+  return assignmentSession;
 }
 
 async function listAssignmentSessionsForUser(
@@ -315,7 +339,7 @@ function isSubmittedLockActive(
   );
 }
 
-async function requireAssignmentSessionBinding(
+export async function requireAssignmentSessionBinding(
   ctx: ReadCtx,
   assignmentSession: Doc<"assignmentSessions">,
   assignment: Doc<"assignments">,
@@ -378,10 +402,24 @@ async function requireAssignmentSessionBinding(
       index.eq("caseSessionId", assignmentSession.caseSessionId),
     )
     .collect();
-  if (!links.some((link) => link._id === assignmentSession._id)) {
+  if (links.length !== 1 || links[0]?._id !== assignmentSession._id) {
     throw new ConvexError(
       AppErrorCode.CONFLICT,
       "Assignment session linkage is inconsistent",
+    );
+  }
+  const userLinks = await ctx.db
+    .query("assignmentSessions")
+    .withIndex("by_assignment_user", (index) =>
+      index
+        .eq("assignmentId", assignmentSession.assignmentId)
+        .eq("userId", assignmentSession.userId),
+    )
+    .collect();
+  if (userLinks.length !== 1 || userLinks[0]?._id !== assignmentSession._id) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Assignment session linkage is ambiguous",
     );
   }
   for (const link of links) {
@@ -1060,6 +1098,12 @@ export const attachSession = mutation({
         index.eq("caseSessionId", args.caseSessionId),
       )
       .collect();
+    if (linkedAssignmentSessions.length > 1) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Case session is already attached",
+      );
+    }
     for (const linkedSession of linkedAssignmentSessions) {
       if (linkedSession.userId !== caseSession.userId) {
         throw new ConvexError(
@@ -1166,6 +1210,12 @@ export const submitSession = mutation({
       assignment._id,
       user._id,
     );
+    if (assignmentSessions.length > 1) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        "Assignment session linkage is ambiguous",
+      );
+    }
     const assignmentSession = assignmentSessions.find(
       (candidate) => candidate.caseSessionId === args.caseSessionId,
     );

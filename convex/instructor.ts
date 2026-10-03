@@ -22,6 +22,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { requireAssignmentSessionBinding } from "./assignments";
 import { requireCohortRole, writeAuditLog } from "./authz";
 import { appendCaseSessionEvent } from "./caseSessionEventLog";
 import { AppErrorCode, ConvexError, notFound } from "./errors";
@@ -100,7 +101,10 @@ export const listAssignmentSessions = query({
     }),
   ),
   handler: async (ctx, args) => {
-    await requireAssignmentInstructor(ctx, args.assignmentId);
+    const { assignment, cohort, institution } = await requireAssignmentInstructor(
+      ctx,
+      args.assignmentId,
+    );
     const sessions = await ctx.db
       .query("assignmentSessions")
       .withIndex("by_assignment", (index) =>
@@ -110,6 +114,13 @@ export const listAssignmentSessions = query({
 
     const rows = [];
     for (const session of sessions) {
+      await requireAssignmentSessionBinding(
+        ctx,
+        session,
+        assignment,
+        cohort,
+        institution,
+      );
       const user = await ctx.db.get(session.userId);
       const filings = await ctx.db
         .query("filings")
@@ -168,22 +179,44 @@ export const getSessionReplay = query({
       throw notFound("Assignment session", args.caseSessionId);
 
     let permissionError: Error | null = null;
-    let hasAccess = false;
+    let authorizedLink:
+      | {
+          link: Doc<"assignmentSessions">;
+          assignment: Doc<"assignments">;
+          cohort: Doc<"cohorts">;
+          institution: Doc<"institutions">;
+        }
+      | null = null;
     for (const assignmentSession of assignmentSessions) {
       try {
-        await requireAssignmentInstructor(ctx, assignmentSession.assignmentId);
-        hasAccess = true;
+        const access = await requireAssignmentInstructor(
+          ctx,
+          assignmentSession.assignmentId,
+        );
+        authorizedLink = {
+          link: assignmentSession,
+          assignment: access.assignment,
+          cohort: access.cohort,
+          institution: access.institution,
+        };
         break;
       } catch (error) {
         if (!isScopeAccessError(error)) throw error;
         permissionError = error;
       }
     }
-    if (!hasAccess) {
+    if (!authorizedLink) {
       throw (
         permissionError ?? notFound("Assignment session", args.caseSessionId)
       );
     }
+    await requireAssignmentSessionBinding(
+      ctx,
+      authorizedLink.link,
+      authorizedLink.assignment,
+      authorizedLink.cohort,
+      authorizedLink.institution,
+    );
 
     const events = await ctx.db
       .query("caseSessionEvents")
@@ -232,49 +265,71 @@ export const getReviewContext = query({
       .collect();
 
     let permissionError: Error | null = null;
+    let authorizedLink:
+      | {
+          link: Doc<"assignmentSessions">;
+          assignment: Doc<"assignments">;
+          cohort: Doc<"cohorts">;
+          institution: Doc<"institutions">;
+        }
+      | null = null;
     for (const assignmentSession of assignmentSessions) {
       try {
-        const { assignment } = await requireAssignmentInstructor(
+        const access = await requireAssignmentInstructor(
           ctx,
           assignmentSession.assignmentId,
         );
-        const user = await ctx.db.get(assignmentSession.userId);
-        const status: ReviewStatus = assignmentSession.reviewedAt
-          ? "reviewed"
-          : isSubmittedLockActive(assignmentSession)
-            ? "submitted"
-            : "in_progress";
-        return {
-          assignmentSessionId: assignmentSession._id,
-          assignmentId: assignment._id,
-          assignmentTitle: assignment.title,
-          accountName: user?.displayName ?? "Account",
-          status,
-          ...(assignmentSession.submittedAt
-            ? { submittedAt: assignmentSession.submittedAt }
-            : {}),
-          ...(assignmentSession.reviewedAt
-            ? { reviewedAt: assignmentSession.reviewedAt }
-            : {}),
-          ...(assignmentSession.instructorNote
-            ? { instructorNote: assignmentSession.instructorNote }
-            : {}),
-          ...(typeof assignmentSession.score === "number"
-            ? { score: assignmentSession.score }
-            : {}),
+        authorizedLink = {
+          link: assignmentSession,
+          assignment: access.assignment,
+          cohort: access.cohort,
+          institution: access.institution,
         };
+        break;
       } catch (error) {
         if (!isScopeAccessError(error)) throw error;
         permissionError = error;
       }
     }
 
-    if (assignmentSessions.length > 0) {
+    if (!authorizedLink && assignmentSessions.length > 0) {
       throw (
         permissionError ?? notFound("Assignment session", args.caseSessionId)
       );
     }
-    return null;
+    if (!authorizedLink) return null;
+    await requireAssignmentSessionBinding(
+      ctx,
+      authorizedLink.link,
+      authorizedLink.assignment,
+      authorizedLink.cohort,
+      authorizedLink.institution,
+    );
+    const user = await ctx.db.get(authorizedLink.link.userId);
+    const status: ReviewStatus = authorizedLink.link.reviewedAt
+      ? "reviewed"
+      : isSubmittedLockActive(authorizedLink.link)
+        ? "submitted"
+        : "in_progress";
+    return {
+      assignmentSessionId: authorizedLink.link._id,
+      assignmentId: authorizedLink.assignment._id,
+      assignmentTitle: authorizedLink.assignment.title,
+      accountName: user?.displayName ?? "Account",
+      status,
+      ...(authorizedLink.link.submittedAt
+        ? { submittedAt: authorizedLink.link.submittedAt }
+        : {}),
+      ...(authorizedLink.link.reviewedAt
+        ? { reviewedAt: authorizedLink.link.reviewedAt }
+        : {}),
+      ...(authorizedLink.link.instructorNote
+        ? { instructorNote: authorizedLink.link.instructorNote }
+        : {}),
+      ...(typeof authorizedLink.link.score === "number"
+        ? { score: authorizedLink.link.score }
+        : {}),
+    };
   },
 });
 
@@ -289,9 +344,16 @@ export const reviewAssignmentSession = mutation({
     const assignmentSession = await ctx.db.get(args.assignmentSessionId);
     if (!assignmentSession)
       throw notFound("Assignment session", args.assignmentSessionId);
-    const { assignment, user, cohort } = await requireAssignmentInstructor(
+    const { assignment, user, cohort, institution } = await requireAssignmentInstructor(
       ctx,
       assignmentSession.assignmentId,
+    );
+    await requireAssignmentSessionBinding(
+      ctx,
+      assignmentSession,
+      assignment,
+      cohort,
+      institution,
     );
     await ctx.db.patch(args.assignmentSessionId, {
       instructorNote: args.instructorNote,
@@ -329,7 +391,10 @@ export const exportAssignmentCsv = query({
   },
   returns: v.string(),
   handler: async (ctx, args) => {
-    await requireAssignmentInstructor(ctx, args.assignmentId);
+    const { assignment, cohort, institution } = await requireAssignmentInstructor(
+      ctx,
+      args.assignmentId,
+    );
     const sessions = await ctx.db
       .query("assignmentSessions")
       .withIndex("by_assignment", (index) =>
@@ -348,6 +413,13 @@ export const exportAssignmentCsv = query({
       ],
     ];
     for (const session of sessions) {
+      await requireAssignmentSessionBinding(
+        ctx,
+        session,
+        assignment,
+        cohort,
+        institution,
+      );
       const user = await ctx.db.get(session.userId);
       const filings = await ctx.db
         .query("filings")
