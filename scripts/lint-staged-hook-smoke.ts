@@ -120,23 +120,52 @@ function copyTrackedRepository(destination: string): void {
   }
 }
 
-function createFixture(): { path: string; env: NodeJS.ProcessEnv } {
+function createFixture(): {
+  path: string;
+  env: NodeJS.ProcessEnv;
+  nodeRuntimeTrace: string;
+} {
   const fixture = mkdtempSync(join(tmpdir(), "appellate-issue89-hook-"));
   const home = join(fixture, "home");
+  const shimDirectory = join(home, "bin");
+  const nodeRuntimeTrace = join(home, "node-runtime-trace.log");
+  const realNode = Bun.which("node");
+  if (!realNode)
+    throw new Error(
+      "The hook smoke fixture requires Node for its existing tool tasks.",
+    );
   mkdirSync(home);
+  mkdirSync(shimDirectory);
   copyTrackedRepository(fixture);
   symlinkSync(
     resolve(repositoryRoot, "node_modules"),
     join(fixture, "node_modules"),
     "dir",
   );
+  const nodeShim = join(shimDirectory, "node");
+  writeFileSync(
+    nodeShim,
+    `#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    */node_modules/.bin/lint-staged|*/lint-staged/bin/lint-staged.js)
+      printf '%s\\n' "$argument" >> "$ISSUE89_NODE_RUNTIME_TRACE"
+      ;;
+  esac
+done
+exec "$ISSUE89_REAL_NODE" "$@"
+`,
+  );
+  chmodSync(nodeShim, 0o755);
 
   const env: NodeJS.ProcessEnv = {
     CI: "1",
     GIT_CONFIG_NOSYSTEM: "1",
     HOME: home,
+    ISSUE89_NODE_RUNTIME_TRACE: nodeRuntimeTrace,
+    ISSUE89_REAL_NODE: realNode,
     LANG: "C.UTF-8",
-    PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ""}`,
+    PATH: `${shimDirectory}:${dirname(process.execPath)}:${process.env.PATH ?? ""}`,
     TMPDIR: fixture,
   };
 
@@ -155,7 +184,54 @@ function createFixture(): { path: string; env: NodeJS.ProcessEnv } {
   );
   requireSuccess("bun", ["run", "prepare"], fixture, env);
 
-  return { path: fixture, env };
+  return { path: fixture, env, nodeRuntimeTrace };
+}
+
+function tracedLintStagedNodeInvocations(fixture: {
+  nodeRuntimeTrace: string;
+}): string[] {
+  try {
+    return readFileSync(fixture.nodeRuntimeTrace, "utf8")
+      .split("\n")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function verifyLintStagedRuntimeSelection(fixture: {
+  path: string;
+  env: NodeJS.ProcessEnv;
+  nodeRuntimeTrace: string;
+}): void {
+  const defaultRun = requireSuccess(
+    "bun",
+    ["run", "lint-staged", "--version"],
+    fixture.path,
+    fixture.env,
+  );
+  if (defaultRun.stdout.trim() !== "17.6.0")
+    throw new Error("The fixture did not execute the locked lint-staged CLI.");
+  if (tracedLintStagedNodeInvocations(fixture).length === 0)
+    throw new Error(
+      "The fixture did not detect Bun's default Node-shebang execution.",
+    );
+
+  rmSync(fixture.nodeRuntimeTrace, { force: true });
+  const bunRun = requireSuccess(
+    "bun",
+    ["run", "--bun", "lint-staged", "--version"],
+    fixture.path,
+    fixture.env,
+  );
+  if (bunRun.stdout.trim() !== "17.6.0")
+    throw new Error(
+      "The forced-Bun invocation did not execute lint-staged 17.6.0.",
+    );
+  if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+    throw new Error(
+      "The forced-Bun lint-staged invocation still launched its CLI with Node.",
+    );
 }
 
 function verifySuccessfulHook(): void {
@@ -164,6 +240,7 @@ function verifySuccessfulHook(): void {
   const file = join(fixture.path, relativePath);
 
   try {
+    verifyLintStagedRuntimeSelection(fixture);
     writeFileSync(file, "export const stagedValue={answer:42};\n");
     requireSuccess(
       "git",
@@ -215,6 +292,10 @@ function verifySuccessfulHook(): void {
     )
       throw new Error(
         "The fixture's unstaged edit disappeared after the hook ran.",
+      );
+    if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+      throw new Error(
+        "The Husky hook executed the lint-staged CLI with Node instead of Bun.",
       );
   } finally {
     rmSync(fixture.path, { recursive: true, force: true });
@@ -273,6 +354,10 @@ function verifyFailurePropagates(): void {
       throw new Error(
         "The failing fixture file was unexpectedly removed from the index.",
       );
+    if (tracedLintStagedNodeInvocations(fixture).length !== 0)
+      throw new Error(
+        "The failing Husky hook executed the lint-staged CLI with Node instead of Bun.",
+      );
   } finally {
     rmSync(fixture.path, { recursive: true, force: true });
   }
@@ -286,5 +371,5 @@ if (Bun.version !== bunVersion)
 verifySuccessfulHook();
 verifyFailurePropagates();
 console.log(
-  `PASS: Husky pre-commit works with Bun ${Bun.version}; staged paths with spaces are formatted, failures block commits, and unstaged edits are preserved.`,
+  `PASS: Husky pre-commit runs lint-staged under Bun ${Bun.version}; staged paths with spaces are formatted, failures block commits, and unstaged edits are preserved.`,
 );
