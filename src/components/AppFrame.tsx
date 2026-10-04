@@ -17,7 +17,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Link } from '@tanstack/react-router'
+import { Link, useRouterState } from '@tanstack/react-router'
 import {
   ClerkLoaded,
   ClerkLoading,
@@ -26,11 +26,17 @@ import {
   UserButton,
   useUser,
 } from '@clerk/tanstack-react-start'
-import { useConvexAuth, useMutation } from 'convex/react'
-import { useEffect, type ReactNode } from 'react'
-import { BookOpen, GraduationCap, LogOut, Shield } from 'lucide-react'
+import { type ReactNode } from 'react'
+import {
+  BookOpen,
+  Database,
+  GraduationCap,
+  Library,
+  LogOut,
+  Shield,
+} from 'lucide-react'
 
-import { api } from '../../convex/_generated/api'
+import { useOrganizationContext } from './OrganizationContext'
 
 export function AppFrame({
   title,
@@ -40,45 +46,189 @@ export function AppFrame({
   children: ReactNode
 }) {
   const { isSignedIn } = useUser()
-  const convexAuth = useConvexAuth()
-  const upsertCurrentUser = useMutation(api.users.upsertCurrentUser)
-
-  useEffect(() => {
-    if (isSignedIn && convexAuth.isAuthenticated) {
-      void upsertCurrentUser({})
-    }
-  }, [convexAuth.isAuthenticated, isSignedIn, upsertCurrentUser])
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  })
+  const organizationContext = useOrganizationContext()
+  const requiresOrganization =
+    pathname === '/app' ||
+    pathname.startsWith('/app/') ||
+    pathname === '/instructor' ||
+    pathname.startsWith('/instructor/') ||
+    pathname === '/admin' ||
+    pathname.startsWith('/admin/')
+  const organizationReady = organizationContext.status === 'ready'
+  const requiredCapability =
+    pathname === '/app' || pathname.startsWith('/app/')
+      ? 'learn'
+      : pathname === '/instructor' || pathname.startsWith('/instructor/')
+        ? 'teach'
+        : pathname === '/admin' || pathname.startsWith('/admin/')
+          ? 'manageMembers'
+          : null
+  const hasRequiredCapability = requiredCapability
+    ? organizationContext.capabilities[requiredCapability]
+    : true
+  const capabilityDenied =
+    requiresOrganization && organizationReady && !hasRequiredCapability
+  const canShowChildren =
+    !requiresOrganization || (organizationReady && hasRequiredCapability)
+  const visibleTitle = canShowChildren
+    ? title
+    : organizationContext.status === 'loading'
+      ? 'Workspace'
+      : capabilityDenied
+        ? 'Access unavailable'
+        : 'Organization unavailable'
 
   return (
     <main className="min-h-screen bg-stone-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
-          <Link to="/app" className="text-sm font-semibold">
+          <Link
+            to="/app"
+            search={(previous) =>
+              organizationContext.organizationId
+                ? {
+                    ...previous,
+                    organizationId: organizationContext.organizationId,
+                  }
+                : previous
+            }
+            className="text-sm font-semibold"
+          >
             Appellate Practice Simulator
           </Link>
           <nav className="flex items-center gap-2 text-sm">
-            <Link
-              to="/app"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
+            {!requiresOrganization ||
+            (organizationReady && organizationContext.capabilities.learn) ? (
+              <Link
+                to="/app"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
+                search={(previous) =>
+                  organizationContext.organizationId
+                    ? {
+                        ...previous,
+                        organizationId: organizationContext.organizationId,
+                      }
+                    : previous
+                }
+              >
+                <BookOpen className="h-4 w-4" aria-hidden="true" />
+                Study
+              </Link>
+            ) : (
+              <span
+                role="link"
+                aria-disabled="true"
+                className="inline-flex cursor-not-allowed items-center gap-1 rounded px-2 py-1 text-slate-400"
+              >
+                <BookOpen className="h-4 w-4" aria-hidden="true" />
+                Study
+              </span>
+            )}
+            {organizationReady && organizationContext.capabilities.teach ? (
+              <Link
+                to="/instructor"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
+                search={(previous) =>
+                  organizationContext.organizationId
+                    ? {
+                        ...previous,
+                        organizationId: organizationContext.organizationId,
+                      }
+                    : previous
+                }
+              >
+                <GraduationCap className="h-4 w-4" aria-hidden="true" />
+                Courses
+              </Link>
+            ) : null}
+            {organizationReady &&
+            organizationContext.capabilities.manageMembers &&
+            organizationContext.organization?.kind === 'shared' ? (
+              <Link
+                to="/admin"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
+                search={(previous) =>
+                  organizationContext.organizationId
+                    ? {
+                        ...previous,
+                        organizationId: organizationContext.organizationId,
+                      }
+                    : previous
+                }
+              >
+                <Shield className="h-4 w-4" aria-hidden="true" />
+                Organization administration
+              </Link>
+            ) : null}
+            <button
+              type="button"
+              disabled
+              title="Data routes are not available yet"
+              className="inline-flex cursor-not-allowed items-center gap-1 rounded px-2 py-1 text-slate-400"
             >
-              <BookOpen className="h-4 w-4" aria-hidden="true" />
-              Practice
-            </Link>
-            <Link
-              to="/instructor"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
+              <Database className="h-4 w-4" aria-hidden="true" />
+              Data
+            </button>
+            <button
+              type="button"
+              disabled
+              title="Catalog routes are not available yet"
+              className="inline-flex cursor-not-allowed items-center gap-1 rounded px-2 py-1 text-slate-400"
             >
-              <GraduationCap className="h-4 w-4" aria-hidden="true" />
-              Courses
-            </Link>
-            <Link
-              to="/admin"
-              className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
-            >
-              <Shield className="h-4 w-4" aria-hidden="true" />
-              Admin
-            </Link>
+              <Library className="h-4 w-4" aria-hidden="true" />
+              Catalog
+            </button>
           </nav>
+          {requiresOrganization ? (
+            <div className="flex items-center gap-2">
+              <label htmlFor="organization-context" className="sr-only">
+                Organization
+              </label>
+              <select
+                id="organization-context"
+                aria-label="Organization"
+                value={organizationContext.organizationId ?? ''}
+                disabled={organizationContext.organizationsStatus !== 'ready'}
+                onChange={(event) =>
+                  organizationContext.selectOrganization(
+                    event.target.value as NonNullable<
+                      typeof organizationContext.organizationId
+                    >,
+                  )
+                }
+                className="max-w-52 rounded border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:text-slate-500"
+              >
+                {organizationContext.organizationId &&
+                !organizationContext.organizations.some(
+                  (item) =>
+                    item.institutionId === organizationContext.organizationId,
+                ) ? (
+                  <option value={organizationContext.organizationId}>
+                    {organizationContext.status === 'unavailable'
+                      ? 'Organization unavailable'
+                      : 'Loading organization'}
+                  </option>
+                ) : null}
+                {!organizationContext.organizationId ? (
+                  <option value="">
+                    {organizationContext.organizationsStatus === 'loading'
+                      ? 'Loading organizations…'
+                      : 'Choose organization'}
+                  </option>
+                ) : null}
+                {organizationContext.organizations.map((item) => (
+                  <option key={item.institutionId} value={item.institutionId}>
+                    {item.kind === 'personal'
+                      ? 'Personal workspace'
+                      : item.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
           <ClerkLoading>
             <span className="text-sm text-slate-500">Loading</span>
           </ClerkLoading>
@@ -107,11 +257,71 @@ export function AppFrame({
         </div>
       </header>
       <section className="mx-auto max-w-7xl px-4 py-6">
-        <h1 className="text-2xl font-semibold tracking-normal">{title}</h1>
-        <div className="mt-5">{children}</div>
+        <h1 className="text-2xl font-semibold tracking-normal">
+          {visibleTitle}
+        </h1>
+        <div className="mt-5">
+          {canShowChildren ? (
+            children
+          ) : organizationContext.status === 'loading' ? (
+            <p
+              role="status"
+              className="rounded border border-slate-200 bg-white p-4 text-sm text-slate-600"
+            >
+              Loading organization…
+            </p>
+          ) : (
+            <div
+              role="alert"
+              className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
+            >
+              {capabilityDenied
+                ? 'Your selected organization does not have access to this section.'
+                : organizationContext.unavailableMessage ??
+                  'This organization is unavailable. Choose an organization you can access.'}
+              {organizationContext.canRecoverUnavailableOrganization ? (
+                <button
+                  type="button"
+                  onClick={organizationContext.recoverToPersonalWorkspace}
+                  className="ml-2 rounded border border-amber-700 px-2 py-1 font-medium hover:bg-amber-100"
+                >
+                  Use personal workspace
+                </button>
+              ) : null}
+              {organizationContext.canRetryOrganizationBootstrap ? (
+                <button
+                  type="button"
+                  onClick={organizationContext.retryOrganizationBootstrap}
+                  className="ml-2 rounded border border-amber-700 px-2 py-1 font-medium hover:bg-amber-100"
+                >
+                  Try again
+                </button>
+              ) : null}
+            </div>
+          )}
+        </div>
       </section>
     </main>
   )
+}
+
+export function OrganizationRouteGate({
+  title,
+  capability,
+  children,
+}: {
+  title: string
+  capability: 'learn' | 'teach' | 'manageMembers'
+  children: ReactNode
+}) {
+  const organizationContext = useOrganizationContext()
+  if (
+    organizationContext.status === 'ready' &&
+    organizationContext.capabilities[capability]
+  ) {
+    return <>{children}</>
+  }
+  return <AppFrame title={title}>{children}</AppFrame>
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
