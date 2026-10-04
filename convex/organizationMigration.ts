@@ -182,8 +182,26 @@ export function classifyIntegrationEventOwnership(input: {
   sessionScopeState?: ClassificationState;
   sessionInstitutionIds: string[];
   existingInstitutionId?: string;
+  scopeProvenance?: string;
+  provider?: string;
+  action?: string;
+  referencedUserExists?: boolean;
+  referencedInstitutionExists?: boolean;
 }): OwnershipClassification {
   if (!input.hasSession) {
+    if (
+      input.existingInstitutionId !== undefined &&
+      input.scopeProvenance === "active_membership_v1" &&
+      input.provider === "courtlistener" &&
+      input.action === "searchLiveCourtListenerDockets" &&
+      input.referencedUserExists === true &&
+      input.referencedInstitutionExists === true
+    ) {
+      return {
+        state: "ready",
+        reason: "sessionless_search_scope_already_recorded",
+      };
+    }
     return input.existingInstitutionId
       ? {
           state: "ambiguous",
@@ -1239,10 +1257,24 @@ async function classifyIntegrationEvent(
   now: number,
 ): Promise<RowFinding> {
   if (!row.caseSessionId) {
+    const isMarkedSearch =
+      row.scopeProvenance === "active_membership_v1" &&
+      row.institutionId !== undefined;
+    const [user, institution] = isMarkedSearch
+      ? await Promise.all([
+          readDocument(ctx, row.userId),
+          readDocument(ctx, row.institutionId!),
+        ])
+      : [null, null];
     const classification = classifyIntegrationEventOwnership({
       hasSession: false,
       sessionInstitutionIds: [],
       existingInstitutionId: row.institutionId,
+      scopeProvenance: row.scopeProvenance,
+      provider: row.provider,
+      action: row.action,
+      referencedUserExists: Boolean(user),
+      referencedInstitutionExists: Boolean(institution),
     });
     return { outcome: classification.state, reason: classification.reason };
   }

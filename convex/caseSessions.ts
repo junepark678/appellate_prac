@@ -2329,6 +2329,11 @@ export const importCourtListenerSource = mutation({
     const sourceUrl = sourceUrlForCourtListenerResult(args.result)
     const trialDocket = createImportedTrialDocket(session, args.result, sourceUrl)
     const importedAt = new Date().toISOString()
+    const provenance = {
+      ...args.result,
+      evidenceStatus: 'caller_reported_metadata',
+      evidenceNotice: 'Caller-reported metadata; not verified court evidence.',
+    }
 
     await ctx.db.insert('sourceCases', {
       caseSessionId: caseSessionDoc._id,
@@ -2337,7 +2342,7 @@ export const importCourtListenerSource = mutation({
       externalId: String(args.result.docket_id ?? args.result.id),
       sourceUrl,
       importedAt,
-      provenanceJson: JSON.stringify(args.result),
+      provenanceJson: JSON.stringify(provenance),
     })
     await ctx.db.insert('trialDocketImports', {
       caseSessionId: caseSessionDoc._id,

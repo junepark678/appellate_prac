@@ -255,6 +255,7 @@ describe('organization isolation for integrations', () => {
       userId: fixture.alice,
       provider: 'courtlistener',
       action: 'searchLiveCourtListenerDockets',
+      scopeProvenance: 'active_membership_v1',
       accepted: true,
     })
 
@@ -310,6 +311,38 @@ describe('organization isolation for integrations', () => {
     })
   })
 
+  it('does not let a caller choose the sessionless search scope provenance marker', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    vi.stubEnv('COURTLISTENER_TOKEN', 'mock-provider-token')
+    const argsWithCallerMarker = {
+      institutionId: fixture.organizationA,
+      query: 'caller marker test',
+      scopeProvenance: 'forged_marker',
+    } as { institutionId: Id<'institutions'>; query: string }
+    await expect(
+      t.withIdentity(identity('alice')).action(searchRef, argsWithCallerMarker),
+    ).rejects.toThrow('Unexpected field `scopeProvenance` in object')
+    await expect(
+      t
+        .withIdentity(identity('alice'))
+        .mutation(internal.integrations.reserveIntegrationEventForCurrentUser, {
+          institutionId: fixture.organizationA,
+          provider: 'courtlistener',
+          action: 'searchLiveCourtListenerDockets',
+          cooldownMs: 5_000,
+          nowIso: testNow,
+          scopeProvenance: 'forged_marker',
+        } as never),
+    ).rejects.toThrow('Unexpected field `scopeProvenance` in object')
+
+    const events = await t.run((ctx) =>
+      ctx.db.query('integrationEvents').collect(),
+    )
+    expect(events).toHaveLength(0)
+    expect(searchCourtListenerDockets).not.toHaveBeenCalled()
+  })
+
   it('imports only into an owned session and keeps source provenance off the shared scenario', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
@@ -331,7 +364,7 @@ describe('organization isolation for integrations', () => {
       id: 51,
       docket_id: 51,
       caseName: 'Fixture v. Fixture',
-      snippet: `${metadataNotice}\n\nImported caller text.`,
+      snippet: 'Imported caller text.',
     }
 
     await asAlice.mutation(importCourtListenerSourceRef, {
@@ -358,7 +391,16 @@ describe('organization isolation for integrations', () => {
     expect(after.sourceCases[0]).toMatchObject({
       caseSessionId: aliceSessionId,
       scenarioId: scenarioBefore?._id,
-      provenanceJson: expect.stringContaining(metadataNotice),
+    })
+    expect(
+      JSON.parse(after.sourceCases[0]?.provenanceJson ?? '{}'),
+    ).toMatchObject({
+      id: 51,
+      docket_id: 51,
+      caseName: 'Fixture v. Fixture',
+      snippet: 'Imported caller text.',
+      evidenceStatus: 'caller_reported_metadata',
+      evidenceNotice: metadataNotice,
     })
     expect(after.scenario).toEqual(scenarioBefore)
   })

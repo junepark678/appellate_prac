@@ -33,6 +33,8 @@ import { searchCourtListenerDockets } from '../src/integrations/courtlistener'
 
 const courtListenerCooldownMs = 5_000
 const courtListenerResultLimit = 20
+const courtListenerSearchAction = 'searchLiveCourtListenerDockets'
+const courtListenerScopeProvenance = 'active_membership_v1' as const
 const courtListenerMetadataNotice =
   'Caller-reported metadata; not verified court evidence.'
 const advanceLiveEventRef = makeFunctionReference<'action'>(
@@ -159,6 +161,10 @@ export const reserveIntegrationEventForCurrentUser = internalMutation({
       userId: user._id,
       provider: args.provider,
       action: args.action,
+      ...(args.provider === 'courtlistener' &&
+      args.action === courtListenerSearchAction
+        ? { scopeProvenance: courtListenerScopeProvenance }
+        : {}),
       accepted: false,
       errorClass: 'in_flight',
       createdAt: args.nowIso,
@@ -235,7 +241,7 @@ export const searchLiveCourtListenerDockets = action({
       {
         institutionId: args.institutionId,
         provider: 'courtlistener',
-        action: 'searchLiveCourtListenerDockets',
+        action: courtListenerSearchAction,
         cooldownMs: courtListenerCooldownMs,
         nowIso,
       },
