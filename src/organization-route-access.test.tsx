@@ -754,6 +754,23 @@ describe("organization scoped route access", () => {
     });
   });
 
+  it("does not show a parseable non-UTC expiry as active access", async () => {
+    setContext("org-admin", "admin");
+    setQueryResponse("users:listOrganizationMembers", [
+      {
+        membershipId: "membership-org-admin",
+        userId: "member-user",
+        displayName: "Organization A Member",
+        role: "learner",
+        status: "active",
+        expiresAt: "2999-01-01 00:00:00",
+      },
+    ]);
+    renderRoute("/admin?organizationId=org-admin");
+
+    expect(await screen.findByText(/Access: Expiration invalid/)).toBeTruthy();
+  });
+
   it("requires a future expiry before reactivating a suspended expired membership", async () => {
     setContext("org-admin", "admin");
     setQueryResponse("users:listOrganizationMembers", [
@@ -793,6 +810,37 @@ describe("organization scoped route access", () => {
         screen.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
       ).toBe(false);
     });
+  });
+
+  it("blocks reactivation when a suspended membership has a parseable non-UTC expiry", async () => {
+    setContext("org-admin", "admin");
+    setQueryResponse("users:listOrganizationMembers", [
+      {
+        membershipId: "membership-org-admin",
+        userId: "member-user",
+        displayName: "Organization A Member",
+        role: "learner",
+        status: "suspended",
+        expiresAt: "2999-01-01 00:00:00",
+      },
+    ]);
+    renderRoute("/admin?organizationId=org-admin");
+    expect(await screen.findByText(/Access: Suspended/)).toBeTruthy();
+
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: "Status for Organization A Member",
+      }),
+      { target: { value: "active" } },
+    );
+    expect(
+      screen.getByText(
+        "Set a future expiry before reactivating this membership.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
+    ).toBe(true);
   });
 
   it("hides personal owner membership controls and ignores a late response after switching organizations", async () => {

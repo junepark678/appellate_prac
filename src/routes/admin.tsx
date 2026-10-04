@@ -341,6 +341,9 @@ function toLocalDateTimeInput(value?: string) {
 function effectiveMembershipStatus(member: OrganizationMemberRow) {
   if (member.status !== "active") return "Suspended";
   if (!member.expiresAt) return "Active";
+  if (!isOrganizationContractUtcTimestamp(member.expiresAt)) {
+    return "Expiration invalid";
+  }
   const expiresAt = Date.parse(member.expiresAt);
   if (!Number.isFinite(expiresAt)) return "Expiration invalid";
   return expiresAt <= Date.now() ? "Expired" : "Active";
@@ -348,8 +351,26 @@ function effectiveMembershipStatus(member: OrganizationMemberRow) {
 
 function membershipExpiryIsInactive(value?: string) {
   if (!value) return false;
+  if (!isOrganizationContractUtcTimestamp(value)) return true;
   const expiresAt = Date.parse(value);
   return !Number.isFinite(expiresAt) || expiresAt <= Date.now();
+}
+
+/** Match convex/organizationContracts.ts:isUtcTimestamp for admin expiry checks. */
+function isOrganizationContractUtcTimestamp(value: string): boolean {
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|\+00:00)$/.test(
+      value,
+    )
+  )
+    return false;
+  const normalized = value.replace(/\+00:00$/, "Z");
+  const time = Date.parse(normalized);
+  if (!Number.isFinite(time)) return false;
+  const [seconds, fraction = ""] = normalized.slice(0, -1).split(".");
+  return (
+    new Date(time).toISOString() === `${seconds}.${fraction.padEnd(3, "0")}Z`
+  );
 }
 
 function scopeKey(capture: OrganizationContextCapture) {
