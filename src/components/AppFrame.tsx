@@ -100,7 +100,8 @@ export function AppFrame({
             Appellate Practice Simulator
           </Link>
           <nav className="flex items-center gap-2 text-sm">
-            {organizationReady && organizationContext.capabilities.learn ? (
+            {!requiresOrganization ||
+            (organizationReady && organizationContext.capabilities.learn) ? (
               <Link
                 to="/app"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
