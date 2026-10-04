@@ -547,13 +547,15 @@ export const complete = action({
       throw validationError('Completed file exceeds the 25 MiB limit.')
     }
 
-    const parts: Uint8Array[] = []
     let assembled: Uint8Array | undefined
     let storedId: Id<'_storage'> | undefined
     try {
       let totalBytes = 0
-      for (const chunk of plan.chunks) {
-        if (chunk.index !== parts.length || chunk.sizeBytes > chunkBytes) {
+      // Keep the assembled payload and one <=4 MiB chunk buffer resident.
+      assembled = new Uint8Array(plan.sizeBytes)
+      for (let index = 0; index < plan.chunks.length; index += 1) {
+        const chunk = plan.chunks[index]!
+        if (chunk.index !== index || chunk.sizeBytes > chunkBytes) {
           throw new ConvexError(
             AppErrorCode.CONFLICT,
             'Upload chunk order is invalid',
@@ -576,25 +578,13 @@ export const complete = action({
         if (totalBytes > maxFileBytes || totalBytes > plan.sizeBytes) {
           throw validationError('Completed file exceeds the 25 MiB limit.')
         }
-        parts.push(bytes)
+        assembled.set(bytes, totalBytes - bytes.byteLength)
       }
-      if (
-        parts.length !== plan.chunks.length ||
-        totalBytes !== plan.sizeBytes
-      ) {
+      if (totalBytes !== plan.sizeBytes) {
         throw validationError(
           'Completed upload size does not match its receipt.',
         )
       }
-
-      // At most one 25 MiB file plus its <=25 MiB chunk buffers are resident.
-      assembled = new Uint8Array(totalBytes)
-      let offset = 0
-      for (const part of parts) {
-        assembled.set(part, offset)
-        offset += part.byteLength
-      }
-      parts.length = 0
 
       const digest = sha256(assembled)
       if (digest !== plan.sha256)
@@ -636,7 +626,6 @@ export const complete = action({
       }
       throw error
     } finally {
-      parts.length = 0
       assembled = undefined
     }
   },

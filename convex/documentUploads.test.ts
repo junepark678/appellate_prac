@@ -927,6 +927,7 @@ describe('document upload receipts', () => {
     expect(saved.cleanup).toHaveLength(0)
     expect(saved.storage).toHaveLength(1)
     expect(saved.storage[0]?._id).toBe(saved.chunks[0]?.storageId)
+    await vi.advanceTimersByTimeAsync(0)
     await t.finishInProgressScheduledFunctions()
   })
 
@@ -1384,7 +1385,19 @@ describe('document upload receipts', () => {
         mimeType: 'application/pdf',
       })
       await uploadBytes(alice, intent.intentId, bytes)
-      await alice.complete(intent.intentId)
+      const storageId = await t.run((ctx) =>
+        ctx.storage.store(
+          new Blob([bytes.buffer as ArrayBuffer], {
+            type: 'application/pdf',
+          }),
+        ),
+      )
+      await alice.mutation(finalizeCompletionRef, {
+        intentId: intent.intentId,
+        storageId,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      })
       return intent
     }
     const document = (fileName: string): UploadedDocument => ({
