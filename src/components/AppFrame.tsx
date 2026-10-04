@@ -17,7 +17,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Link, useRouterState } from '@tanstack/react-router'
+import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ClerkLoaded,
   ClerkLoading,
@@ -25,8 +25,8 @@ import {
   SignOutButton,
   UserButton,
   useUser,
-} from '@clerk/tanstack-react-start'
-import { type ReactNode } from 'react'
+} from "@clerk/tanstack-react-start";
+import { type ReactNode } from "react";
 import {
   BookOpen,
   Database,
@@ -34,52 +34,52 @@ import {
   Library,
   LogOut,
   Shield,
-} from 'lucide-react'
+} from "lucide-react";
 
-import { useOrganizationContext } from './OrganizationContext'
+import { useOrganizationContext } from "./OrganizationContext";
 
 export function AppFrame({
   title,
   children,
 }: {
-  title: string
-  children: ReactNode
+  title: string;
+  children: ReactNode;
 }) {
-  const { isSignedIn } = useUser()
+  const { isSignedIn } = useUser();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
-  })
-  const organizationContext = useOrganizationContext()
+  });
+  const organizationContext = useOrganizationContext();
   const requiresOrganization =
-    pathname === '/app' ||
-    pathname.startsWith('/app/') ||
-    pathname === '/instructor' ||
-    pathname.startsWith('/instructor/') ||
-    pathname === '/admin' ||
-    pathname.startsWith('/admin/')
-  const organizationReady = organizationContext.status === 'ready'
+    pathname === "/app" ||
+    pathname.startsWith("/app/") ||
+    pathname === "/instructor" ||
+    pathname.startsWith("/instructor/") ||
+    pathname === "/admin" ||
+    pathname.startsWith("/admin/");
+  const organizationReady = organizationContext.status === "ready";
   const requiredCapability =
-    pathname === '/app' || pathname.startsWith('/app/')
-      ? 'learn'
-      : pathname === '/instructor' || pathname.startsWith('/instructor/')
-        ? 'teach'
-        : pathname === '/admin' || pathname.startsWith('/admin/')
-          ? 'manageMembers'
-          : null
+    pathname === "/app" || pathname.startsWith("/app/")
+      ? "learn"
+      : pathname === "/instructor" || pathname.startsWith("/instructor/")
+        ? "teach"
+        : pathname === "/admin" || pathname.startsWith("/admin/")
+          ? "manageMembers"
+          : null;
   const hasRequiredCapability = requiredCapability
     ? organizationContext.capabilities[requiredCapability]
-    : true
+    : true;
   const capabilityDenied =
-    requiresOrganization && organizationReady && !hasRequiredCapability
+    requiresOrganization && organizationReady && !hasRequiredCapability;
   const canShowChildren =
-    !requiresOrganization || (organizationReady && hasRequiredCapability)
+    !requiresOrganization || (organizationReady && hasRequiredCapability);
   const visibleTitle = canShowChildren
     ? title
-    : organizationContext.status === 'loading'
-      ? 'Workspace'
+    : organizationContext.status === "loading"
+      ? "Workspace"
       : capabilityDenied
-        ? 'Access unavailable'
-        : 'Organization unavailable'
+        ? "Access unavailable"
+        : "Organization unavailable";
 
   return (
     <main className="min-h-screen bg-stone-50 text-slate-950">
@@ -146,7 +146,7 @@ export function AppFrame({
             ) : null}
             {organizationReady &&
             organizationContext.capabilities.manageMembers &&
-            organizationContext.organization?.kind === 'shared' ? (
+            organizationContext.organization?.kind === "shared" ? (
               <Link
                 to="/admin"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
@@ -190,8 +190,8 @@ export function AppFrame({
               <select
                 id="organization-context"
                 aria-label="Organization"
-                value={organizationContext.organizationId ?? ''}
-                disabled={organizationContext.organizationsStatus !== 'ready'}
+                value={organizationContext.organizationId ?? ""}
+                disabled={organizationContext.organizationsStatus !== "ready"}
                 onChange={(event) =>
                   organizationContext.selectOrganization(
                     event.target.value as NonNullable<
@@ -207,22 +207,22 @@ export function AppFrame({
                     item.institutionId === organizationContext.organizationId,
                 ) ? (
                   <option value={organizationContext.organizationId}>
-                    {organizationContext.status === 'unavailable'
-                      ? 'Organization unavailable'
-                      : 'Loading organization'}
+                    {organizationContext.status === "unavailable"
+                      ? "Organization unavailable"
+                      : "Loading organization"}
                   </option>
                 ) : null}
                 {!organizationContext.organizationId ? (
                   <option value="">
-                    {organizationContext.organizationsStatus === 'loading'
-                      ? 'Loading organizations…'
-                      : 'Choose organization'}
+                    {organizationContext.organizationsStatus === "loading"
+                      ? "Loading organizations…"
+                      : "Choose organization"}
                   </option>
                 ) : null}
                 {organizationContext.organizations.map((item) => (
                   <option key={item.institutionId} value={item.institutionId}>
-                    {item.kind === 'personal'
-                      ? 'Personal workspace'
+                    {item.kind === "personal"
+                      ? "Personal workspace"
                       : item.name}
                   </option>
                 ))}
@@ -263,7 +263,7 @@ export function AppFrame({
         <div className="mt-5">
           {canShowChildren ? (
             children
-          ) : organizationContext.status === 'loading' ? (
+          ) : organizationContext.status === "loading" ? (
             <p
               role="status"
               className="rounded border border-slate-200 bg-white p-4 text-sm text-slate-600"
@@ -276,9 +276,9 @@ export function AppFrame({
               className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
             >
               {capabilityDenied
-                ? 'Your selected organization does not have access to this section.'
-                : organizationContext.unavailableMessage ??
-                  'This organization is unavailable. Choose an organization you can access.'}
+                ? "Your selected organization does not have access to this section."
+                : (organizationContext.unavailableMessage ??
+                  "This organization is unavailable. Choose an organization you can access.")}
               {organizationContext.canRecoverUnavailableOrganization ? (
                 <button
                   type="button"
@@ -288,10 +288,15 @@ export function AppFrame({
                   Use personal workspace
                 </button>
               ) : null}
-              {organizationContext.canRetryOrganizationBootstrap ? (
+              {organizationContext.canRetryUserInitialization ||
+              organizationContext.canRetryOrganizationBootstrap ? (
                 <button
                   type="button"
-                  onClick={organizationContext.retryOrganizationBootstrap}
+                  onClick={
+                    organizationContext.canRetryUserInitialization
+                      ? organizationContext.retryUserInitialization
+                      : organizationContext.retryOrganizationBootstrap
+                  }
                   className="ml-2 rounded border border-amber-700 px-2 py-1 font-medium hover:bg-amber-100"
                 >
                   Try again
@@ -302,7 +307,7 @@ export function AppFrame({
         </div>
       </section>
     </main>
-  )
+  );
 }
 
 export function OrganizationRouteGate({
@@ -310,18 +315,18 @@ export function OrganizationRouteGate({
   capability,
   children,
 }: {
-  title: string
-  capability: 'learn' | 'teach' | 'manageMembers'
-  children: ReactNode
+  title: string;
+  capability: "learn" | "teach" | "manageMembers";
+  children: ReactNode;
 }) {
-  const organizationContext = useOrganizationContext()
+  const organizationContext = useOrganizationContext();
   if (
-    organizationContext.status === 'ready' &&
+    organizationContext.status === "ready" &&
     organizationContext.capabilities[capability]
   ) {
-    return <>{children}</>
+    return <>{children}</>;
   }
-  return <AppFrame title={title}>{children}</AppFrame>
+  return <AppFrame title={title}>{children}</AppFrame>;
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
@@ -329,5 +334,5 @@ export function EmptyState({ children }: { children: ReactNode }) {
     <div className="rounded border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-600">
       {children}
     </div>
-  )
+  );
 }
