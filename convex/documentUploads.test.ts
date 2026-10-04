@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Id } from './_generated/dataModel'
 import { AppErrorCode, type AppErrorData } from './errors'
+import { deleteOrRetryCleanup } from './documentUploadActions'
 import type { DocumentAnalysis, UploadedDocument } from '../src/domain/types'
 import schema from './schema'
 
@@ -108,6 +109,21 @@ const completeRef = makeFunctionReference<
   { intentId: Id<'documentUploadIntents'> },
   { intentId: Id<'documentUploadIntents'>; sizeBytes: number; sha256: string }
 >('documentUploadActions:complete')
+const cleanupOrphanedChunkRef = makeFunctionReference<
+  'action',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploadActions:cleanupOrphanedChunk')
+const queueOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  'queued' | 'referenced'
+>('documentUploads:queueOrphanedChunkCleanup')
+const retryOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:retryOrphanedChunkCleanup')
 const cancelRef = makeFunctionReference<
   'action',
   { intentId: Id<'documentUploadIntents'> },
@@ -495,6 +511,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.clearAllTimers()
+  vi.useRealTimers()
   vi.unstubAllEnvs()
 })
 
@@ -745,6 +763,126 @@ describe('document upload receipts', () => {
     expect(saved.intent?.state).toBe('pending')
     expect(saved.chunks).toHaveLength(0)
     expect(saved.storage).toHaveLength(0)
+  })
+
+  it('returns validation status for malformed intent IDs on the registered chunk route', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const alice = uploadClient(t)
+    const bytes = makePdf(12)
+
+    const response = await alice.fetch(
+      '/documents/chunk?intentId=not-a-convex-id&index=0',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      },
+    )
+
+    expect(response.status).toBe(422)
+    const saved = await t.run(async (ctx) => ({
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.chunks).toHaveLength(0)
+    expect(saved.cleanup).toHaveLength(0)
+    expect(saved.storage).toHaveLength(0)
+  })
+
+  it('queues duplicate chunk temporaries and cleans only the unreferenced object', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'duplicate-chunk.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const first = await postChunk(alice, intent.intentId, 0, bytes)
+    const acceptedChunk = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .unique(),
+    )
+    expect(acceptedChunk).not.toBeNull()
+    expect(
+      await t.mutation(queueOrphanedChunkCleanupRef, {
+        storageId: acceptedChunk!.storageId,
+      }),
+    ).toBe('referenced')
+    const retry = await postChunk(alice, intent.intentId, 0, bytes)
+    expect(first.status).toBe(200)
+    expect(retry.status).toBe(200)
+
+    const queued = await t.run(async (ctx) =>
+      ctx.db.query('documentUploadCleanup').collect(),
+    )
+    expect(queued).toHaveLength(1)
+    let failDelete = true
+    const cleanupAttempt = await deleteOrRetryCleanup({
+      objectExists: () =>
+        t.run(async (ctx) =>
+          Boolean(await ctx.db.system.get('_storage', queued[0]!.storageId)),
+        ),
+      deleteObject: async () => {
+        if (failDelete) {
+          failDelete = false
+          throw new Error('temporary storage outage')
+        }
+        await t.run((ctx) => ctx.storage.delete(queued[0]!.storageId))
+      },
+      markDeleted: async () => undefined,
+      scheduleRetry: () =>
+        t.mutation(retryOrphanedChunkCleanupRef, {
+          storageId: queued[0]!.storageId,
+        }),
+    })
+    expect(cleanupAttempt).toBe('retry')
+    const retained = await t.run(async (ctx) => ({
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', queued[0]!.storageId),
+        )
+        .unique(),
+      tempStorage: await ctx.db.system.get('_storage', queued[0]!.storageId),
+    }))
+    expect(retained.cleanup?.attempts).toBe(1)
+    expect(retained.tempStorage).not.toBeNull()
+    vi.setSystemTime(retained.cleanup!.nextAttemptAt + 1)
+    await t.action(cleanupOrphanedChunkRef, {
+      storageId: queued[0]!.storageId,
+    })
+
+    const saved = await t.run(async (ctx) => ({
+      chunks: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.chunks).toHaveLength(1)
+    expect(saved.cleanup).toHaveLength(0)
+    expect(saved.storage).toHaveLength(1)
+    expect(saved.storage[0]?._id).toBe(saved.chunks[0]?.storageId)
   })
 
   it('validates 25 MiB adversarial JSON in the Node action without a parsed object tree', async () => {

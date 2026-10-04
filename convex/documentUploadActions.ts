@@ -86,6 +86,21 @@ const storageObjectExistsRef = makeFunctionReference<
   { storageId: Id<'_storage'> },
   boolean
 >('documentUploads:storageObjectExists')
+const beginOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  boolean
+>('documentUploads:beginOrphanedChunkCleanup')
+const finishOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  boolean
+>('documentUploads:finishOrphanedChunkCleanup')
+const retryOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:retryOrphanedChunkCleanup')
 
 function sha256(bytes: Uint8Array) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -488,6 +503,37 @@ async function deleteUnreferenced(ctx: ActionCtx, ids: Id<'_storage'>[]) {
   }
 }
 
+export async function deleteOrRetryCleanup(operations: {
+  objectExists: () => Promise<boolean>
+  deleteObject: () => Promise<void>
+  markDeleted: () => Promise<unknown>
+  scheduleRetry: () => Promise<unknown>
+}): Promise<'deleted' | 'retry'> {
+  let deleted = false
+  try {
+    if (!(await operations.objectExists())) {
+      deleted = true
+    } else {
+      await operations.deleteObject()
+      deleted = !(await operations.objectExists())
+    }
+  } catch {
+    deleted = false
+  }
+
+  if (deleted) {
+    try {
+      await operations.markDeleted()
+      return 'deleted'
+    } catch {
+      await operations.scheduleRetry()
+      return 'retry'
+    }
+  }
+  await operations.scheduleRetry()
+  return 'retry'
+}
+
 export const complete = action({
   args: { intentId: v.id('documentUploadIntents') },
   returns: v.object({
@@ -625,6 +671,34 @@ export const cleanupChunks = internalAction({
     })
     await deleteUnreferenced(ctx, storageIds)
     await ctx.runMutation(forgetCleanedChunksRef, { intentId })
+    return null
+  },
+})
+
+export const cleanupOrphanedChunk = internalAction({
+  args: { storageId: v.id('_storage') },
+  returns: v.null(),
+  handler: async (ctx, { storageId }) => {
+    let shouldDelete: boolean
+    try {
+      shouldDelete = await ctx.runMutation(beginOrphanedChunkCleanupRef, {
+        storageId,
+      })
+    } catch {
+      await ctx.runMutation(retryOrphanedChunkCleanupRef, { storageId })
+      return null
+    }
+    if (!shouldDelete) return null
+
+    await deleteOrRetryCleanup({
+      objectExists: () =>
+        ctx.runQuery(storageObjectExistsRef, { storageId }),
+      deleteObject: () => ctx.storage.delete(storageId),
+      markDeleted: () =>
+        ctx.runMutation(finishOrphanedChunkCleanupRef, { storageId }),
+      scheduleRetry: () =>
+        ctx.runMutation(retryOrphanedChunkCleanupRef, { storageId }),
+    })
     return null
   },
 })

@@ -1100,7 +1100,19 @@ export default defineSchema({
 
   documentUploadChunks: defineTable(
     organizationRecordValidators.documentUploadChunks,
-  ).index("by_intent_index", ["intentId", "index"]),
+  )
+    .index("by_intent_index", ["intentId", "index"])
+    .index("by_storage", ["storageId"]),
+
+  documentUploadCleanup: defineTable(
+    v.object({
+      storageId: v.id("_storage"),
+      attempts: v.number(),
+      nextAttemptAt: v.number(),
+      createdAt: v.string(),
+    }),
+  )
+    .index("by_storage", ["storageId"]),
 
   organizationMigrationFindings: defineTable(
     organizationRecordValidators.organizationMigrationFindings,

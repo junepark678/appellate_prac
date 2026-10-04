@@ -26,7 +26,7 @@ const maxChunkBytes = 4 * 1024 * 1024
 
 const authorizeChunkRef = makeFunctionReference<
   'query',
-  { intentId: Id<'documentUploadIntents'>; index: number },
+  { intentId: string; index: number },
   { expectedSize: number }
 >('documentUploads:authorizeChunk')
 const recordChunkRef = makeFunctionReference<
@@ -40,6 +40,11 @@ const recordChunkRef = makeFunctionReference<
   },
   { accepted: boolean }
 >('documentUploads:recordChunk')
+const queueOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  'queued' | 'referenced'
+>('documentUploads:queueOrphanedChunkCleanup')
 
 function allowedOrigins() {
   return new Set(
@@ -199,11 +204,11 @@ const chunkRoute = httpAction(async (ctx, request) => {
         'An upload intent and integer chunk index are required.',
       )
     }
-    const intentId = rawIntentId as Id<'documentUploadIntents'>
     const authorization = await ctx.runQuery(authorizeChunkRef, {
-      intentId,
+      intentId: rawIntentId,
       index,
     })
+    const intentId = rawIntentId as Id<'documentUploadIntents'>
     const contentType = request.headers
       .get('Content-Type')
       ?.trim()
@@ -248,7 +253,9 @@ const chunkRoute = httpAction(async (ctx, request) => {
       sha256,
     })
     if (!record.accepted) {
-      await ctx.storage.delete(storageId)
+      await ctx.runMutation(queueOrphanedChunkCleanupRef, { storageId })
+      storageId = undefined
+    } else {
       storageId = undefined
     }
     headers.set('Content-Type', 'application/json; charset=utf-8')
@@ -262,10 +269,13 @@ const chunkRoute = httpAction(async (ctx, request) => {
   } catch (error) {
     if (storageId) {
       try {
-        await ctx.storage.delete(storageId)
-      } catch {
-        // The chunk transaction did not reference this request's temporary object.
+        await ctx.runMutation(queueOrphanedChunkCleanupRef, { storageId })
+      } catch (cleanupError) {
+        // Never delete here: the record mutation may have committed before an
+        // action transport failure, so this object may already be referenced.
+        console.error('Unable to queue temporary upload cleanup', cleanupError)
       }
+      storageId = undefined
     }
     const response = errorResponse(request, error)
     if ((error as { httpStatus?: number })?.httpStatus === 413) {
