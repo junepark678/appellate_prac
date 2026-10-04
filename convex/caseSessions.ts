@@ -40,6 +40,10 @@ import {
   validateUploadIntentTransition,
 } from './organizationContracts'
 import {
+  fitsSessionDocumentAnalysisReadBudget,
+  maxSessionDocumentAnalysisReadBytes,
+} from './documentAnalysisBudget'
+import {
   actorWorkProductKindValidator,
   actorWorkProductValidator,
   caseSessionSummaryValidator,
@@ -146,6 +150,38 @@ function fitsDocumentRowByteBudget(payload: unknown) {
     encoded.read === serialized.length &&
     encoded.written <= maxDocumentRowBytes
   )
+}
+
+function sessionDocumentAnalysisBudgetError() {
+  return validationError(
+    `Case session document analyses exceed the ${maxSessionDocumentAnalysisReadBytes / (1024 * 1024)} MiB read budget.`,
+  )
+}
+
+async function assertSessionDocumentAnalysisReadBudget(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  let readBytes = 0
+  const addRow = (row: unknown) => {
+    const serialized = JSON.stringify(row)
+    if (serialized === undefined) return
+    readBytes += documentRowEncoder.encode(serialized).byteLength
+    if (!fitsSessionDocumentAnalysisReadBudget(readBytes)) {
+      throw sessionDocumentAnalysisBudgetError()
+    }
+  }
+
+  const documents = await ctx.db
+    .query('documents')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  const analyses = await ctx.db
+    .query('documentAnalyses')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  for (const document of documents) addRow(document)
+  for (const analysis of analyses) addRow(analysis)
 }
 
 function rejectClientStorageClaims(documents: UploadedDocument[]) {
@@ -1356,25 +1392,38 @@ async function bindReceiptBackedFilingSubmission(
     ctx,
     caseSessionId,
   )
-  const bindDocument = (document: UploadedDocument) => {
-    const receiptBacked = receiptBackedDocuments.get(document.id)
-    if (!receiptBacked) return document
-    const canonical = documentFromDoc(
-      receiptBacked.document,
-      receiptBacked.analysis,
-    )
-    delete canonical.storageId
-    return canonical
-  }
 
   return {
     ...submission,
-    mainDocument: bindDocument(submission.mainDocument),
+    mainDocument: bindReceiptBackedDocument(
+      submission.mainDocument,
+      receiptBackedDocuments,
+    ),
     attachments: submission.attachments.map((attachment) => ({
       ...attachment,
-      document: bindDocument(attachment.document),
+      document: bindReceiptBackedDocument(
+        attachment.document,
+        receiptBackedDocuments,
+      ),
     })),
   }
+}
+
+function bindReceiptBackedDocument(
+  document: UploadedDocument,
+  receiptBackedDocuments: Map<
+    string,
+    { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
+  >,
+) {
+  const receiptBacked = receiptBackedDocuments.get(document.id)
+  if (!receiptBacked) return document
+  const canonical = documentFromDoc(
+    receiptBacked.document,
+    receiptBacked.analysis,
+  )
+  delete canonical.storageId
+  return canonical
 }
 
 async function replaceSessionState(
@@ -1478,9 +1527,6 @@ async function replaceSessionState(
             ? { wordCount: document.wordCount }
             : {}),
           extractedSignals: document.extractedSignals,
-          ...(document.analysis
-            ? { validationJson: JSON.stringify(document.analysis) }
-            : {}),
         })
       }
       documentIdMap.set(document.id, documentId)
@@ -1499,7 +1545,9 @@ async function replaceSessionState(
           certificateOfServiceDetected: analysis.certificateOfServiceDetected,
           certificateOfComplianceDetected: analysis.certificateOfComplianceDetected,
           sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
-          warnings: analysis.warnings,
+          // analysisJson is canonical. Keep this compatibility field small;
+          // analysisFromDoc reads the complete warnings from analysisJson.
+          warnings: [],
           analysisJson: JSON.stringify(analysis),
           ...(analysis.normalizedText ? { extractedTextHash: hashText(analysis.normalizedText) } : {}),
           ...(typeof analysis.wordCount === 'number' ? { wordCount: analysis.wordCount } : {}),
@@ -1730,6 +1778,7 @@ async function replaceSessionState(
     // ERROR_CODE: NOT_FOUND
     throw new Error('Case session was removed while saving state')
   }
+  await assertSessionDocumentAnalysisReadBudget(ctx, caseSessionId)
   return assembleCaseSession(ctx, updated)
 }
 
@@ -2155,8 +2204,18 @@ export const submitFiling = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     rejectClientStorageClaims(args.draft.documents)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
+    const receiptBackedDocuments = await loadReceiptBackedDocuments(
+      ctx,
+      caseSessionDoc._id,
+    )
+    const draft = {
+      ...args.draft,
+      documents: args.draft.documents.map((document) =>
+        bindReceiptBackedDocument(document, receiptBackedDocuments),
+      ),
+    }
     const nextSession = transitionAfterFiling(
-      withRejectedFilingAudit(session, args.draft, fileDraft(session, args.draft)),
+      withRejectedFilingAudit(session, draft, fileDraft(session, draft)),
     )
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
     await appendCaseSessionEvent(
@@ -2406,7 +2465,6 @@ export const persistDocumentAnalysis = mutation({
         ? { wordCount: args.document.wordCount }
         : {}),
       extractedSignals: args.document.extractedSignals,
-      validationJson: serializedAnalysis,
     }
     const analysisRowPayload = {
       caseSessionId: args.caseSessionId,
@@ -2422,7 +2480,8 @@ export const persistDocumentAnalysis = mutation({
       certificateOfComplianceDetected:
         args.analysis.certificateOfComplianceDetected,
       sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
-      warnings: args.analysis.warnings,
+      // analysisJson is canonical; keep the fallback warnings field small.
+      warnings: [],
       analysisJson: serializedAnalysis,
       ...(args.analysis.normalizedText
         ? { extractedTextHash: hashText(args.analysis.normalizedText) }
@@ -2502,7 +2561,6 @@ export const persistDocumentAnalysis = mutation({
         ? { wordCount: args.document.wordCount }
         : {}),
       extractedSignals: args.document.extractedSignals,
-      validationJson: serializedAnalysis,
     })
     const analysisId = await ctx.db.insert('documentAnalyses', {
       caseSessionId: args.caseSessionId,
@@ -2518,7 +2576,7 @@ export const persistDocumentAnalysis = mutation({
       certificateOfComplianceDetected:
         args.analysis.certificateOfComplianceDetected,
       sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
-      warnings: args.analysis.warnings,
+      warnings: [],
       analysisJson: serializedAnalysis,
       ...(args.analysis.normalizedText
         ? { extractedTextHash: hashText(args.analysis.normalizedText) }
@@ -2538,6 +2596,10 @@ export const persistDocumentAnalysis = mutation({
       createdAt,
     })
     await ctx.db.patch(documentId, { analysisId })
+
+    // Throwing here rolls the tentative rows back atomically and keeps the
+    // receipt stored for a corrected retry.
+    await assertSessionDocumentAnalysisReadBudget(ctx, args.caseSessionId)
 
     const receiptFields = {
       institutionId: receipt.institutionId,

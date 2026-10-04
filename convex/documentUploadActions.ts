@@ -19,7 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { makeFunctionReference } from 'convex/server'
 import { v } from 'convex/values'
 
@@ -30,6 +30,12 @@ import { AppErrorCode, ConvexError, validationError } from './errors'
 
 const maxFileBytes = 25 * 1024 * 1024
 const chunkBytes = 4 * 1024 * 1024
+const completionRetryAfterMs = 1000
+
+type CompletionClaimResult =
+  | { state: 'claimed' }
+  | { state: 'busy' }
+  | { state: 'existing'; sizeBytes: number; sha256: string }
 
 type CompletionPlan =
   | { state: 'existing'; sizeBytes: number; sha256: string }
@@ -46,20 +52,36 @@ type CompletionPlan =
       }[]
     }
 
+const claimCompletionRef = makeFunctionReference<
+  'mutation',
+  { intentId: Id<'documentUploadIntents'>; claimToken: string },
+  CompletionClaimResult
+>('documentUploads:claimCompletion')
+const releaseCompletionClaimRef = makeFunctionReference<
+  'mutation',
+  { intentId: Id<'documentUploadIntents'>; claimToken: string },
+  null
+>('documentUploads:releaseCompletionClaim')
 const prepareCompletionRef = makeFunctionReference<
   'query',
-  { intentId: Id<'documentUploadIntents'> },
+  { intentId: Id<'documentUploadIntents'>; claimToken: string },
   CompletionPlan
 >('documentUploads:prepareCompletion')
 const finalizeCompletionRef = makeFunctionReference<
   'mutation',
   {
     intentId: Id<'documentUploadIntents'>
+    claimToken: string
     storageId: Id<'_storage'>
     sizeBytes: number
     sha256: string
   },
-  { storageId: Id<'_storage'>; accepted: boolean; cancelled: boolean }
+  {
+    storageId: Id<'_storage'>
+    accepted: boolean
+    cancelled: boolean
+    stale: boolean
+  }
 >('documentUploads:finalizeCompletion')
 const cancelIntentRef = makeFunctionReference<
   'mutation',
@@ -104,6 +126,30 @@ const retryUploadStorageCleanupRef = makeFunctionReference<
 
 function sha256(bytes: Uint8Array) {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+function uploadCompletionBusy() {
+  return new ConvexError(
+    AppErrorCode.CONFLICT,
+    'Upload completion is already in progress. Retry shortly.',
+    {
+      reason: 'UPLOAD_COMPLETION_BUSY',
+      retryable: true,
+      retryAfterMs: completionRetryAfterMs,
+    },
+  )
+}
+
+function uploadCompletionClaimLost() {
+  return new ConvexError(
+    AppErrorCode.CONFLICT,
+    'Upload completion claim is no longer active. Retry completion.',
+    {
+      reason: 'UPLOAD_COMPLETION_CLAIM_LOST',
+      retryable: true,
+      retryAfterMs: completionRetryAfterMs,
+    },
+  )
 }
 
 function hasValidUtf8(bytes: Uint8Array) {
@@ -536,20 +582,32 @@ export const complete = action({
     sha256: v.string(),
   }),
   handler: async (ctx, { intentId }) => {
-    const plan = await ctx.runQuery(prepareCompletionRef, { intentId })
-    if (plan.state === 'existing')
-      return { intentId, sizeBytes: plan.sizeBytes, sha256: plan.sha256 }
-    if (
-      !Number.isSafeInteger(plan.sizeBytes) ||
-      plan.sizeBytes < 1 ||
-      plan.sizeBytes > maxFileBytes
-    ) {
-      throw validationError('Completed file exceeds the 25 MiB limit.')
-    }
+    const claimToken = randomUUID()
+    const claim = await ctx.runMutation(claimCompletionRef, {
+      intentId,
+      claimToken,
+    })
+    if (claim.state === 'existing')
+      return { intentId, sizeBytes: claim.sizeBytes, sha256: claim.sha256 }
+    if (claim.state === 'busy') throw uploadCompletionBusy()
 
     let assembled: Uint8Array | undefined
     let storedId: Id<'_storage'> | undefined
     try {
+      const plan = await ctx.runQuery(prepareCompletionRef, {
+        intentId,
+        claimToken,
+      })
+      if (plan.state === 'existing')
+        return { intentId, sizeBytes: plan.sizeBytes, sha256: plan.sha256 }
+      if (
+        !Number.isSafeInteger(plan.sizeBytes) ||
+        plan.sizeBytes < 1 ||
+        plan.sizeBytes > maxFileBytes
+      ) {
+        throw validationError('Completed file exceeds the 25 MiB limit.')
+      }
+
       let totalBytes = 0
       // Keep the assembled payload and one <=4 MiB chunk buffer resident.
       assembled = new Uint8Array(plan.sizeBytes)
@@ -598,13 +656,13 @@ export const complete = action({
       )
       const result = await ctx.runMutation(finalizeCompletionRef, {
         intentId,
+        claimToken,
         storageId: storedId,
         sizeBytes: totalBytes,
         sha256: digest,
       })
-      if (!result.accepted)
-        await queueStorageCleanup(ctx, [storedId], intentId)
       storedId = undefined
+      if (result.stale) throw uploadCompletionClaimLost()
       if (result.cancelled) {
         throw new ConvexError(
           AppErrorCode.CONFLICT,
@@ -627,6 +685,10 @@ export const complete = action({
       throw error
     } finally {
       assembled = undefined
+      await ctx.runMutation(releaseCompletionClaimRef, {
+        intentId,
+        claimToken,
+      })
     }
   },
 })
@@ -665,8 +727,7 @@ export const cleanupUploadStorage = internalAction({
     if (!shouldDelete) return null
 
     await deleteOrRetryCleanup({
-      objectExists: () =>
-        ctx.runQuery(storageObjectExistsRef, { storageId }),
+      objectExists: () => ctx.runQuery(storageObjectExistsRef, { storageId }),
       deleteObject: () => ctx.storage.delete(storageId),
       markDeleted: () =>
         ctx.runMutation(finishUploadStorageCleanupRef, { storageId }),

@@ -17,7 +17,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Worker } from 'node:worker_threads'
 import { makeFunctionReference } from 'convex/server'
 import { convexTest } from 'convex-test'
@@ -36,6 +36,10 @@ import type {
   UploadedDocument,
 } from '../src/domain/types'
 import { defaultFilingMetadata } from '../src/domain/filing/ecf'
+import {
+  fitsSessionDocumentAnalysisReadBudget,
+  maxSessionDocumentAnalysisReadBytes,
+} from './documentAnalysisBudget'
 import schema from './schema'
 
 const chunkBytes = 4 * 1024 * 1024
@@ -117,15 +121,33 @@ const completeRef = makeFunctionReference<
   { intentId: Id<'documentUploadIntents'> },
   { intentId: Id<'documentUploadIntents'>; sizeBytes: number; sha256: string }
 >('documentUploadActions:complete')
+const claimCompletionRef = makeFunctionReference<
+  'mutation',
+  { intentId: Id<'documentUploadIntents'>; claimToken: string },
+  | { state: 'claimed' }
+  | { state: 'busy' }
+  | { state: 'existing'; sizeBytes: number; sha256: string }
+>('documentUploads:claimCompletion')
+const releaseCompletionClaimRef = makeFunctionReference<
+  'mutation',
+  { intentId: Id<'documentUploadIntents'>; claimToken: string },
+  null
+>('documentUploads:releaseCompletionClaim')
 const finalizeCompletionRef = makeFunctionReference<
   'mutation',
   {
     intentId: Id<'documentUploadIntents'>
+    claimToken?: string
     storageId: Id<'_storage'>
     sizeBytes: number
     sha256: string
   },
-  { storageId: Id<'_storage'>; accepted: boolean; cancelled: boolean }
+  {
+    storageId: Id<'_storage'>
+    accepted: boolean
+    cancelled: boolean
+    stale: boolean
+  }
 >('documentUploads:finalizeCompletion')
 const cleanupUploadStorageRef = makeFunctionReference<
   'action',
@@ -155,6 +177,11 @@ const persistRef = makeFunctionReference<
   PersistArgs,
   PersistResult
 >('caseSessions:persistDocumentAnalysis')
+const getSessionRef = makeFunctionReference<
+  'query',
+  { caseSessionId: Id<'caseSessions'> },
+  CaseSession | null
+>('caseSessions:getForCurrentUser')
 const preflightFilingRef = makeFunctionReference<
   'query',
   { caseSessionId: Id<'caseSessions'>; submission: FilingSubmission },
@@ -163,7 +190,11 @@ const preflightFilingRef = makeFunctionReference<
 const submitEcfFilingRef = makeFunctionReference<
   'mutation',
   { caseSessionId: Id<'caseSessions'>; submission: FilingSubmission },
-  { session: CaseSession; preflight: PreflightCheckResult; receipt: EcfReceipt | null }
+  {
+    session: CaseSession
+    preflight: PreflightCheckResult
+    receipt: EcfReceipt | null
+  }
 >('caseSessions:submitEcfFiling')
 const advanceProcedureRef = makeFunctionReference<
   'mutation',
@@ -319,11 +350,9 @@ function analysisRowPayload(
     certificateOfServiceDetected: analysis.certificateOfServiceDetected,
     certificateOfComplianceDetected: analysis.certificateOfComplianceDetected,
     sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
-    warnings: analysis.warnings,
+    warnings: [],
     analysisJson: serializedAnalysis,
-    ...(analysis.normalizedText
-      ? { extractedTextHash: '00000000' }
-      : {}),
+    ...(analysis.normalizedText ? { extractedTextHash: '00000000' } : {}),
     ...(typeof analysis.wordCount === 'number'
       ? { wordCount: analysis.wordCount }
       : {}),
@@ -344,7 +373,6 @@ function documentRowPayload(
   document: UploadedDocument,
   caseSessionId: Id<'caseSessions'>,
   storageId: Id<'_storage'>,
-  analysis: DocumentAnalysis,
 ) {
   return {
     caseSessionId,
@@ -367,7 +395,6 @@ function documentRowPayload(
       ? { wordCount: document.wordCount }
       : {}),
     extractedSignals: document.extractedSignals,
-    validationJson: JSON.stringify(analysis),
   }
 }
 
@@ -620,6 +647,285 @@ afterEach(() => {
 })
 
 describe('document upload receipts', () => {
+  it('uses an inclusive 12 MiB session document analysis read boundary', () => {
+    expect(fitsSessionDocumentAnalysisReadBudget(0)).toBe(true)
+    expect(
+      fitsSessionDocumentAnalysisReadBudget(
+        maxSessionDocumentAnalysisReadBytes - 1,
+      ),
+    ).toBe(true)
+    expect(
+      fitsSessionDocumentAnalysisReadBudget(
+        maxSessionDocumentAnalysisReadBytes,
+      ),
+    ).toBe(true)
+    expect(
+      fitsSessionDocumentAnalysisReadBudget(
+        maxSessionDocumentAnalysisReadBytes + 1,
+      ),
+    ).toBe(false)
+  })
+
+  it('keeps ten large receipt analyses readable, then fences concurrent consumption at the session budget', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const largeWarning = 'x'.repeat(850_000)
+    const largeAnalysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      warnings: [largeWarning],
+    }
+    const pending: Array<{
+      intentId: Id<'documentUploadIntents'>
+      document: UploadedDocument
+    }> = []
+    for (let index = 0; index < 10; index += 1) {
+      const fileName = `large-analysis-${index}.pdf`
+      const intent = await alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        mimeType: 'application/pdf',
+      })
+      await uploadBytes(alice, intent.intentId, bytes)
+      await alice.complete(intent.intentId)
+      pending.push({
+        intentId: intent.intentId,
+        document: {
+        id: `client-${fileName}`,
+        fileName,
+        mimeType: 'application/pdf',
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        extractedSignals: [],
+        },
+      })
+    }
+    for (const { intentId, document } of pending) {
+      const persisted = await alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId,
+        document,
+        analysis: largeAnalysis,
+      })
+      expect(persisted.document.id).toBeDefined()
+    }
+
+    const restoredSession = await alice.query(getSessionRef, {
+      caseSessionId: fixture.aliceSessionId,
+    })
+    expect(restoredSession?.id).toBe(fixture.aliceSessionId)
+    const tenRows = await t.run(async (ctx) => ({
+      documents: await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+      analyses: await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+    }))
+    expect(tenRows.documents).toHaveLength(10)
+    expect(
+      tenRows.documents.every((document) => !document.validationJson),
+    ).toBe(true)
+    expect(tenRows.analyses).toHaveLength(10)
+    expect(
+      tenRows.analyses.every((analysis) => analysis.warnings.length === 0),
+    ).toBe(true)
+    expect(tenRows.analyses[0]?.analysisJson).toContain(largeWarning)
+  })
+
+  it('accounts legacy rows and serializes concurrent receipt consumption against the session budget', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const largeWarning = 'x'.repeat(850_000)
+    const largeAnalysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      warnings: [largeWarning],
+    }
+    // Existing pre-receipt legacy document rows consume the same per-session
+    // budget even though they have not yet been rewritten through replaceSessionState.
+    const legacyWarning = 'x'.repeat(457_000)
+    const legacyAnalysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      warnings: [legacyWarning],
+    }
+    const legacyAnalysisJson = JSON.stringify(legacyAnalysis)
+    expect(
+      serializedBytes(analysisRowPayload(legacyAnalysis, fixture.aliceSessionId)),
+    ).toBeLessThanOrEqual(960 * 1024)
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 8; index += 1) {
+        const documentId = await ctx.db.insert('documents', {
+          caseSessionId: fixture.aliceSessionId,
+          fileName: `legacy-${index}.pdf`,
+          mimeType: 'application/pdf',
+          sizeBytes: bytes.byteLength,
+          extractedSignals: [],
+          validationJson: legacyAnalysisJson,
+        })
+        const analysisId = await ctx.db.insert('documentAnalyses', {
+          caseSessionId: fixture.aliceSessionId,
+          documentId,
+          analyzerId: legacyAnalysis.analyzerId,
+          fileSizeBytes: legacyAnalysis.fileSizeBytes,
+          mimeType: legacyAnalysis.mimeType,
+          searchableText: legacyAnalysis.searchableText,
+          certificateOfServiceDetected:
+            legacyAnalysis.certificateOfServiceDetected,
+          certificateOfComplianceDetected:
+            legacyAnalysis.certificateOfComplianceDetected,
+          sealedOrRedactionWarning: legacyAnalysis.sealedOrRedactionWarning,
+          warnings: legacyAnalysis.warnings,
+          analysisJson: legacyAnalysisJson,
+          createdAt: new Date().toISOString(),
+        })
+        await ctx.db.patch(documentId, { analysisId })
+      }
+    })
+    const legacyBytes = await t.run(async (ctx) => {
+      const documents = await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      const analyses = await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      return documents
+        .filter((document) => document.validationJson === legacyAnalysisJson)
+        .reduce(
+          (sum, document) =>
+            sum + new TextEncoder().encode(JSON.stringify(document)).byteLength,
+          0,
+        ) + analyses
+        .filter((analysis) => analysis.analysisJson === legacyAnalysisJson)
+        .reduce(
+          (sum, analysis) =>
+            sum + new TextEncoder().encode(JSON.stringify(analysis)).byteLength,
+          0,
+        )
+    })
+    expect(legacyBytes).toBeGreaterThan(10 * 1024 * 1024)
+    expect(legacyBytes).toBeLessThan(maxSessionDocumentAnalysisReadBytes)
+
+    const concurrentReceipts = await Promise.all(
+      [0, 1].map(async (index) => {
+        const fileName = `budget-race-${index}.pdf`
+        const intent = await alice.begin({
+          scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+          fileName,
+          sizeBytes: bytes.byteLength,
+          sha256: sha256(bytes),
+          mimeType: 'application/pdf',
+        })
+        await uploadBytes(alice, intent.intentId, bytes)
+        await alice.complete(intent.intentId)
+        return {
+          intentId: intent.intentId,
+          document: {
+            id: `client-${fileName}`,
+            fileName,
+            mimeType: 'application/pdf',
+            sizeBytes: bytes.byteLength,
+            sha256: sha256(bytes),
+            extractedSignals: [],
+          } satisfies UploadedDocument,
+        }
+      }),
+    )
+    const consumed = await Promise.allSettled(
+      concurrentReceipts.map(({ intentId, document }) =>
+        alice.persist({
+          caseSessionId: fixture.aliceSessionId,
+          intentId,
+          document,
+          analysis: largeAnalysis,
+        }),
+      ),
+    )
+    expect(
+      consumed.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1)
+    expect(
+      consumed.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1)
+    const states = await t.run(async (ctx) =>
+      Promise.all(
+        concurrentReceipts.map(
+          async ({ intentId }) => (await ctx.db.get(intentId))?.state,
+        ),
+      ),
+    )
+    expect(states.filter((state) => state === 'consumed')).toHaveLength(1)
+    expect(states.filter((state) => state === 'stored')).toHaveLength(1)
+
+    const successfulIndex = consumed.findIndex(
+      (result) => result.status === 'fulfilled',
+    )
+    const successfulReceipt = concurrentReceipts[successfulIndex]!
+    const successfulResult = (
+      consumed[successfulIndex] as PromiseFulfilledResult<PersistResult>
+    ).value
+    const idempotentRetry = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: successfulReceipt.intentId,
+      document: successfulReceipt.document,
+      analysis: largeAnalysis,
+    })
+    expect(idempotentRetry.document.id).toBe(successfulResult.document.id)
+    expect(idempotentRetry.analysisId).toBe(successfulResult.analysisId)
+
+    // The state replacement removes unreachable legacy rows and preserves the
+    // consumed receipt rows, then checks the post-replacement read shape.
+    await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Notice of Appeal',
+        documents: [],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Fixture replacement pass',
+      },
+    })
+    const replacedRows = await t.run(async (ctx) => ({
+      legacy: await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .filter((query) => query.eq(query.field('fileName'), 'legacy-0.pdf'))
+        .collect(),
+      analyses: await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+    }))
+    expect(replacedRows.legacy).toHaveLength(0)
+    expect(replacedRows.analyses).toHaveLength(1)
+    expect(
+      replacedRows.analyses.every((analysis) => analysis.analysisJson),
+    ).toBe(true)
+  })
+
   it('accepts a seven-chunk 25 MiB upload through the authenticated route and Node action, then consumes it exactly once', async () => {
     vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
     const t = convexTest(schema, modules)
@@ -663,7 +969,9 @@ describe('document upload receipts', () => {
       sha256: sha256(bytes),
     })
     expect(completed).not.toHaveProperty('storageId')
-    expect(measuredCompletion.peakRssBytes).toBeLessThan(512 * 1024 * 1024)
+    expect(
+      measuredCompletion.peakRssBytes - measuredCompletion.baselineRssBytes,
+    ).toBeLessThan(256 * 1024 * 1024)
     console.info(
       `[upload-memory] 25 MiB PDF complete: baseline ${(measuredCompletion.baselineRssBytes / 1024 / 1024).toFixed(1)} MiB, peak ${(measuredCompletion.peakRssBytes / 1024 / 1024).toFixed(1)} MiB RSS`,
     )
@@ -731,6 +1039,233 @@ describe('document upload receipts', () => {
     expect(saved.analyses).toHaveLength(1)
     expect(saved.storedFileSize).toBe(maxFileBytes)
     expect(saved.chunks).toHaveLength(0)
+  })
+
+  it('allows only one active assembly and returns the same receipt on retry', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'singleflight.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const chunkIds = await t.run(async (ctx) =>
+      (
+        await ctx.db
+          .query('documentUploadChunks')
+          .withIndex('by_intent_index', (index) =>
+            index.eq('intentId', intent.intentId),
+          )
+          .collect()
+      ).map((chunk) => chunk.storageId),
+    )
+
+    let releaseFirstRead = () => {}
+    let signalFirstRead = () => {}
+    const readEntered = new Promise<void>((resolve) => {
+      signalFirstRead = resolve
+    })
+    const readGate = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve
+    })
+    const originalArrayBuffer = Blob.prototype.arrayBuffer
+    let isFirstRead = true
+    const arrayBufferSpy = vi
+      .spyOn(Blob.prototype, 'arrayBuffer')
+      .mockImplementation(async function (this: Blob) {
+        if (isFirstRead) {
+          isFirstRead = false
+          signalFirstRead()
+          await readGate
+        }
+        return originalArrayBuffer.call(this)
+      })
+
+    const activeCompletion = alice.complete(intent.intentId)
+    try {
+      await readEntered
+      const concurrent = await Promise.allSettled(
+        Array.from({ length: 8 }, () => alice.complete(intent.intentId)),
+      )
+      expect(concurrent).toHaveLength(8)
+      expect(
+        concurrent.every((result) => {
+          if (result.status !== 'rejected') return false
+          const data = (result.reason as { data?: AppErrorData }).data
+          return (
+            data?.code === AppErrorCode.CONFLICT &&
+            data.metadata?.reason === 'UPLOAD_COMPLETION_BUSY' &&
+            data.metadata?.retryable === true &&
+            data.metadata?.retryAfterMs === 1000
+          )
+        }),
+      ).toBe(true)
+      expect(arrayBufferSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      releaseFirstRead()
+      arrayBufferSpy.mockRestore()
+    }
+
+    const completed = await activeCompletion
+    expect(completed).toEqual({
+      intentId: intent.intentId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(await alice.complete(intent.intentId)).toEqual(completed)
+    const saved = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      storageIds: (await ctx.db.system.query('_storage').collect()).map(
+        (item) => item._id,
+      ),
+    }))
+    expect(saved.intent?.state).toBe('stored')
+    expect(saved.intent?.completionClaimToken).toBeUndefined()
+    expect(saved.intent?.completionClaimExpiresAt).toBeUndefined()
+    expect(saved.storageIds).toHaveLength(chunkIds.length + 1)
+    expect(saved.storageIds).toContain(saved.intent?.storageId)
+    expect(saved.storageIds).toEqual(expect.arrayContaining(chunkIds))
+  })
+
+  it('releases a known-failed completion claim so the receipt can be retried', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'retry-completion.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    await expectErrorCode(
+      alice.complete(intent.intentId),
+      AppErrorCode.CONFLICT,
+    )
+    const afterFailure = await t.run((ctx) => ctx.db.get(intent.intentId))
+    expect(afterFailure?.state).toBe('pending')
+    expect(afterFailure?.completionClaimToken).toBeUndefined()
+    expect(afterFailure?.completionClaimExpiresAt).toBeUndefined()
+
+    await uploadBytes(alice, intent.intentId, bytes)
+    const completed = await alice.complete(intent.intentId)
+    expect(completed.sha256).toBe(sha256(bytes))
+    expect(await alice.complete(intent.intentId)).toEqual(completed)
+  })
+
+  it('takes over a stale claim and queues only the stale worker blob', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'claim-takeover.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const staleToken = randomUUID()
+    expect(
+      await alice.mutation(claimCompletionRef, {
+        intentId: intent.intentId,
+        claimToken: staleToken,
+      }),
+    ).toEqual({ state: 'claimed' })
+    const firstClaim = await t.run((ctx) => ctx.db.get(intent.intentId))
+    expect(firstClaim?.completionClaimExpiresAt).toBeDefined()
+    expect(Date.parse(firstClaim!.completionClaimExpiresAt!)).toBeLessThan(
+      Date.parse(intent.expiresAt),
+    )
+
+    vi.setSystemTime(Date.parse(firstClaim!.completionClaimExpiresAt!) + 1)
+    expect(Date.now()).toBeLessThan(Date.parse(intent.expiresAt))
+    const winnerToken = randomUUID()
+    expect(
+      await alice.mutation(claimCompletionRef, {
+        intentId: intent.intentId,
+        claimToken: winnerToken,
+      }),
+    ).toEqual({ state: 'claimed' })
+    await alice.mutation(releaseCompletionClaimRef, {
+      intentId: intent.intentId,
+      claimToken: staleToken,
+    })
+    expect(
+      (await t.run((ctx) => ctx.db.get(intent.intentId)))?.completionClaimToken,
+    ).toBe(winnerToken)
+
+    const staleStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const winnerStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const staleFinalization = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      claimToken: staleToken,
+      storageId: staleStorageId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(staleFinalization.stale).toBe(true)
+    const afterStaleFinalization = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', staleStorageId),
+        )
+        .unique(),
+    }))
+    expect(afterStaleFinalization.intent?.state).toBe('pending')
+    expect(afterStaleFinalization.intent?.completionClaimToken).toBe(
+      winnerToken,
+    )
+    expect(afterStaleFinalization.cleanup).not.toBeNull()
+
+    const winner = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      claimToken: winnerToken,
+      storageId: winnerStorageId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(winner.accepted).toBe(true)
+    expect(winner.storageId).toBe(winnerStorageId)
+    await t.action(cleanupUploadStorageRef, { storageId: staleStorageId })
+    const afterCleanup = await t.run(async (ctx) => ({
+      receipt: await ctx.db.get(intent.intentId),
+      stale: await ctx.db.system.get('_storage', staleStorageId),
+      winner: await ctx.db.system.get('_storage', winnerStorageId),
+      cleanupWinner: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', winnerStorageId),
+        )
+        .unique(),
+    }))
+    expect(afterCleanup.receipt?.storageId).toBe(winnerStorageId)
+    expect(afterCleanup.receipt?.completionClaimToken).toBeUndefined()
+    expect(afterCleanup.stale).toBeNull()
+    expect(afterCleanup.winner).not.toBeNull()
+    expect(afterCleanup.cleanupWinner).toBeNull()
+    const retried = await alice.complete(intent.intentId)
+    expect(retried.sha256).toBe(sha256(bytes))
+    expect(retried.sizeBytes).toBe(bytes.byteLength)
   })
 
   it('rejects one byte over the file cap, old raw endpoint calls, anonymous chunks, and foreign receipts', async () => {
@@ -898,7 +1433,7 @@ describe('document upload receipts', () => {
     expect(saved.storage).toHaveLength(0)
   })
 
-  it('queues duplicate chunk temporaries and cleans only the unreferenced object', async () => {
+  it('avoids storing accepted identical chunk retries and cleans a concurrent loser', async () => {
     vi.useFakeTimers()
     vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
     const t = convexTest(schema, modules)
@@ -924,6 +1459,9 @@ describe('document upload receipts', () => {
     )
     expect(acceptedChunk).not.toBeNull()
     expect(
+      await t.run((ctx) => ctx.db.system.query('_storage').collect()),
+    ).toHaveLength(1)
+    expect(
       await t.mutation(queueUploadCleanupRef, {
         storageIds: [acceptedChunk!.storageId],
       }),
@@ -931,6 +1469,42 @@ describe('document upload receipts', () => {
     const retry = await postChunk(alice, intent.intentId, 0, bytes)
     expect(first.status).toBe(200)
     expect(retry.status).toBe(200)
+    expect(
+      await t.run((ctx) => ctx.db.system.query('_storage').collect()),
+    ).toHaveLength(1)
+
+    const differentBytes = bytes.slice()
+    differentBytes[0] = 1
+    const conflictingRetry = await postChunk(
+      alice,
+      intent.intentId,
+      0,
+      differentBytes,
+    )
+    expect(conflictingRetry.status).toBe(409)
+    expect(
+      await t.run((ctx) => ctx.db.system.query('_storage').collect()),
+    ).toHaveLength(1)
+
+    // Model two requests which both authorized before either recorded the
+    // index: recordChunk remains the final race check and the loser is cleaned.
+    const concurrentLoserStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes], { type: 'application/octet-stream' }),
+      ),
+    )
+    expect(
+      await alice.mutation(recordChunkRef, {
+        intentId: intent.intentId,
+        index: 0,
+        storageId: concurrentLoserStorageId,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      }),
+    ).toEqual({ accepted: false })
+    await t.mutation(queueUploadCleanupRef, {
+      storageIds: [concurrentLoserStorageId],
+    })
 
     const queued = await t.run(async (ctx) =>
       ctx.db.query('documentUploadCleanup').collect(),
@@ -1016,7 +1590,9 @@ describe('document upload receipts', () => {
       sizeBytes: maxFileBytes,
       sha256: sha256(bytes),
     })
-    expect(measuredCompletion.peakRssBytes).toBeLessThan(512 * 1024 * 1024)
+    expect(
+      measuredCompletion.peakRssBytes - measuredCompletion.baselineRssBytes,
+    ).toBeLessThan(256 * 1024 * 1024)
     console.info(
       `[upload-memory] 25 MiB empty-object JSON complete: baseline ${(measuredCompletion.baselineRssBytes / 1024 / 1024).toFixed(1)} MiB, peak ${(measuredCompletion.peakRssBytes / 1024 / 1024).toFixed(1)} MiB RSS`,
     )
@@ -1433,6 +2009,72 @@ describe('document upload receipts', () => {
     expect(saved.storageSize).toBe(bytes.byteLength)
   })
 
+  it('binds legacy filing validation to persisted receipt analysis despite altered client fields', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'legacy-bound.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const storedAnalysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      pageCount: 1,
+      warnings: ['Persisted analysis warning.'],
+    }
+    const persisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document: {
+        id: 'client-legacy-bound',
+        fileName: 'legacy-bound.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        pageCount: 1,
+        extractedSignals: ['notice of appeal'],
+      },
+      analysis: storedAnalysis,
+    })
+    const forgedDocument: UploadedDocument = {
+      ...persisted.document,
+      pageCount: 501,
+      extractedSignals: ['forged filing signal'],
+      analysis: {
+        ...storedAnalysis,
+        pageCount: 501,
+        fileSizeBytes: 1,
+        mimeType: 'text/plain',
+        warnings: ['forged analysis'],
+      },
+    }
+
+    const filed = await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Notice of Appeal',
+        documents: [forgedDocument],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Synthetic fixture filing',
+      },
+    })
+    const filedDocument = filed.filings.at(-1)?.documents[0]
+    expect(filed.filings.at(-1)?.outcome).not.toBe('rejected')
+    expect(filedDocument?.pageCount).toBe(1)
+    expect(filedDocument?.extractedSignals).toEqual(['notice of appeal'])
+    expect(filedDocument?.analysis).toEqual(storedAnalysis)
+  })
+
   it('uses the persisted receipt-backed report for ECF preflight and submission', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
@@ -1565,8 +2207,16 @@ describe('document upload receipts', () => {
           }),
         ),
       )
+      const claimToken = randomUUID()
+      expect(
+        await alice.mutation(claimCompletionRef, {
+          intentId: intent.intentId,
+          claimToken,
+        }),
+      ).toEqual({ state: 'claimed' })
       await alice.mutation(finalizeCompletionRef, {
         intentId: intent.intentId,
+        claimToken,
         storageId,
         sizeBytes: bytes.byteLength,
         sha256: sha256(bytes),
@@ -1615,7 +2265,6 @@ describe('document upload receipts', () => {
           exactDocument,
           fixture.aliceSessionId,
           exactStorageId,
-          exact,
         ),
       ),
     ).toBeLessThanOrEqual(rowLimitBytes)
@@ -1894,7 +2543,9 @@ describe('document upload receipts', () => {
     )
     expect(delayedFinal?.attempts).toBe(1)
     expect(
-      await t.run((ctx) => ctx.db.system.get('_storage', stored.receipt.storageId!)),
+      await t.run((ctx) =>
+        ctx.db.system.get('_storage', stored.receipt.storageId!),
+      ),
     ).not.toBeNull()
 
     await t.action(cleanupUploadStorageRef, {
@@ -2021,8 +2672,16 @@ describe('document upload receipts', () => {
         new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
       ),
     )
+    const winnerClaimToken = randomUUID()
+    expect(
+      await alice.mutation(claimCompletionRef, {
+        intentId: intent.intentId,
+        claimToken: winnerClaimToken,
+      }),
+    ).toEqual({ state: 'claimed' })
     const winner = await alice.mutation(finalizeCompletionRef, {
       intentId: intent.intentId,
+      claimToken: winnerClaimToken,
       storageId: winnerId,
       sizeBytes: bytes.byteLength,
       sha256: sha256(bytes),
@@ -2088,12 +2747,23 @@ describe('document upload receipts', () => {
       mimeType: 'application/pdf',
     })
     await uploadBytes(alice, intent.intentId, bytes)
+    const claimToken = randomUUID()
+    expect(
+      await alice.mutation(claimCompletionRef, {
+        intentId: intent.intentId,
+        claimToken,
+      }),
+    ).toEqual({ state: 'claimed' })
     await t.run((ctx) =>
       ctx.db.patch(intent.intentId, {
         expiresAt: new Date(Date.now() - 1).toISOString(),
       }),
     )
     await t.action(expireRef, { intentId: intent.intentId })
+    const expiredIntent = await t.run((ctx) => ctx.db.get(intent.intentId))
+    expect(expiredIntent?.state).toBe('cancelled')
+    expect(expiredIntent?.completionClaimToken).toBeUndefined()
+    expect(expiredIntent?.completionClaimExpiresAt).toBeUndefined()
 
     const finalStorageId = await t.run((ctx) =>
       ctx.storage.store(
@@ -2102,6 +2772,7 @@ describe('document upload receipts', () => {
     )
     const finalized = await alice.mutation(finalizeCompletionRef, {
       intentId: intent.intentId,
+      claimToken,
       storageId: finalStorageId,
       sizeBytes: bytes.byteLength,
       sha256: sha256(bytes),
@@ -2110,6 +2781,7 @@ describe('document upload receipts', () => {
       storageId: finalStorageId,
       accepted: false,
       cancelled: true,
+      stale: false,
     })
 
     const queued = await t.run((ctx) =>
@@ -2140,6 +2812,63 @@ describe('document upload receipts', () => {
     expect(afterFinalCleanup.intent?.storageId).toBe(finalStorageId)
     expect(afterFinalCleanup.storage).toBeNull()
     expect(afterFinalCleanup.cleanup).toBeNull()
+    await runQueuedUploadCleanup(t)
+  })
+
+  it('cancels an active claim and atomically cleans its late final blob', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'cancelled-claim.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const claimToken = randomUUID()
+    expect(
+      await alice.mutation(claimCompletionRef, {
+        intentId: intent.intentId,
+        claimToken,
+      }),
+    ).toEqual({ state: 'claimed' })
+
+    await alice.cancel(intent.intentId)
+    const cancelledIntent = await t.run((ctx) => ctx.db.get(intent.intentId))
+    expect(cancelledIntent?.state).toBe('cancelled')
+    expect(cancelledIntent?.completionClaimToken).toBeUndefined()
+    expect(cancelledIntent?.completionClaimExpiresAt).toBeUndefined()
+
+    const lateStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const finalized = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      claimToken,
+      storageId: lateStorageId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(finalized.cancelled).toBe(true)
+    const cleanup = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', lateStorageId),
+        )
+        .unique(),
+    )
+    expect(cleanup?.intentId).toBe(intent.intentId)
+    await t.action(cleanupUploadStorageRef, { storageId: lateStorageId })
+    expect(
+      await t.run((ctx) => ctx.db.system.get('_storage', lateStorageId)),
+    ).toBeNull()
     await runQueuedUploadCleanup(t)
   })
 

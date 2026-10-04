@@ -27,7 +27,10 @@ const maxChunkBytes = 4 * 1024 * 1024
 const authorizeChunkRef = makeFunctionReference<
   'query',
   { intentId: string; index: number },
-  { expectedSize: number }
+  {
+    expectedSize: number
+    existingChunk?: { sizeBytes: number; sha256: string }
+  }
 >('documentUploads:authorizeChunk')
 const recordChunkRef = makeFunctionReference<
   'mutation',
@@ -240,6 +243,34 @@ const chunkRoute = httpAction(async (ctx, request) => {
 
     const bytes = await readBoundedBody(request, authorization.expectedSize)
     const sha256 = await digest(bytes)
+    if (authorization.existingChunk) {
+      const current = await ctx.runQuery(authorizeChunkRef, {
+        intentId: rawIntentId,
+        index,
+      })
+      if (
+        authorization.existingChunk.sizeBytes !== bytes.byteLength ||
+        authorization.existingChunk.sha256 !== sha256 ||
+        current.existingChunk?.sizeBytes !==
+          authorization.existingChunk.sizeBytes ||
+        current.existingChunk.sha256 !== authorization.existingChunk.sha256
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Conflicting retry for upload chunk',
+        )
+      }
+      headers.set('Content-Type', 'application/json; charset=utf-8')
+      return new Response(
+        JSON.stringify({
+          intentId,
+          index,
+          sizeBytes: bytes.byteLength,
+          sha256,
+        }),
+        { status: 200, headers },
+      )
+    }
     storageId = await ctx.storage.store(
       new Blob([bytes.buffer as ArrayBuffer], {
         type: 'application/octet-stream',
