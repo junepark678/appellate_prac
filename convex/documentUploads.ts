@@ -49,11 +49,11 @@ const expireUploadRef = makeFunctionReference<
   { intentId: Id<'documentUploadIntents'> },
   null
 >('documentUploadActions:expireUpload')
-const cleanupOrphanedChunkRef = makeFunctionReference<
+const cleanupUploadStorageRef = makeFunctionReference<
   'action',
   { storageId: Id<'_storage'> },
   null
->('documentUploadActions:cleanupOrphanedChunk')
+>('documentUploadActions:cleanupUploadStorage')
 const maxCleanupRetryDelayMs = 60 * 60 * 1000
 
 function uploadExpired(): ConvexError {
@@ -241,28 +241,92 @@ async function removeChunkRows(
   for (const chunk of chunks) await ctx.db.delete(chunk._id)
 }
 
+async function finalStorageIdIsReferenced(
+  ctx: QueryCtx | MutationCtx,
+  storageId: Id<'_storage'>,
+) {
+  const document = await ctx.db
+    .query('documents')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .first()
+  if (document) return true
+  const asset = await ctx.db
+    .query('organizationDatasetAssets')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .first()
+  return Boolean(asset)
+}
+
 async function finalStorageIsReferenced(
   ctx: QueryCtx | MutationCtx,
   intent: Doc<'documentUploadIntents'>,
 ) {
-  if (!intent.storageId) return false
-  const document = await ctx.db
-    .query('documents')
-    .withIndex('by_storage', (index) =>
-      index.eq('storageId', intent.storageId!),
+  return intent.storageId
+    ? finalStorageIdIsReferenced(ctx, intent.storageId)
+    : false
+}
+
+async function uploadStorageIsReferenced(
+  ctx: QueryCtx | MutationCtx,
+  storageId: Id<'_storage'>,
+  cancelledIntentId?: Id<'documentUploadIntents'>,
+) {
+  if (await finalStorageIdIsReferenced(ctx, storageId)) return true
+
+  const intents = await ctx.db
+    .query('documentUploadIntents')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .collect()
+  if (
+    intents.some(
+      (intent) =>
+        intent._id !== cancelledIntentId || intent.state !== 'cancelled',
     )
-    .first()
-  if (document) return true
-  if (intent.scopeKind === 'dataset' && intent.datasetVersionId) {
-    const assets = await ctx.db
-      .query('organizationDatasetAssets')
-      .withIndex('by_version', (index) =>
-        index.eq('versionId', intent.datasetVersionId!),
-      )
-      .collect()
-    return assets.some((asset) => asset.storageId === intent.storageId)
+  ) {
+    return true
   }
-  return false
+
+  const chunks = await ctx.db
+    .query('documentUploadChunks')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .collect()
+  return chunks.some((chunk) => chunk.intentId !== cancelledIntentId)
+}
+
+async function queueUploadStorageCleanup(
+  ctx: MutationCtx,
+  storageIds: Id<'_storage'>[],
+  intentId?: Id<'documentUploadIntents'>,
+) {
+  const intent = intentId ? await ctx.db.get(intentId) : null
+  const cancelledIntentId =
+    intent?.state === 'cancelled' ? intent._id : undefined
+  const queuedIds: Id<'_storage'>[] = []
+  for (const storageId of new Set(storageIds)) {
+    if (
+      await uploadStorageIsReferenced(ctx, storageId, cancelledIntentId)
+    ) {
+      continue
+    }
+    const existing = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (existing) {
+      queuedIds.push(storageId)
+      continue
+    }
+    await ctx.db.insert('documentUploadCleanup', {
+      storageId,
+      ...(cancelledIntentId ? { intentId: cancelledIntentId } : {}),
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      createdAt: new Date().toISOString(),
+    })
+    await ctx.scheduler.runAfter(0, cleanupUploadStorageRef, { storageId })
+    queuedIds.push(storageId)
+  }
+  return queuedIds
 }
 
 export const begin = mutation({
@@ -426,34 +490,17 @@ export const recordChunk = internalMutation({
   },
 })
 
-export const queueOrphanedChunkCleanup = internalMutation({
-  args: { storageId: v.id('_storage') },
-  returns: v.union(v.literal('queued'), v.literal('referenced')),
-  handler: async (ctx, { storageId }) => {
-    const chunk = await ctx.db
-      .query('documentUploadChunks')
-      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-      .first()
-    if (chunk) return 'referenced' as const
-
-    const queued = await ctx.db
-      .query('documentUploadCleanup')
-      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-      .unique()
-    if (queued) return 'queued' as const
-
-    await ctx.db.insert('documentUploadCleanup', {
-      storageId,
-      attempts: 0,
-      nextAttemptAt: Date.now(),
-      createdAt: new Date().toISOString(),
-    })
-    await ctx.scheduler.runAfter(0, cleanupOrphanedChunkRef, { storageId })
-    return 'queued' as const
+export const queueUploadCleanup = internalMutation({
+  args: {
+    storageIds: v.array(v.id('_storage')),
+    intentId: v.optional(v.id('documentUploadIntents')),
   },
+  returns: v.array(v.id('_storage')),
+  handler: async (ctx, args) =>
+    queueUploadStorageCleanup(ctx, args.storageIds, args.intentId),
 })
 
-export const beginOrphanedChunkCleanup = internalMutation({
+export const beginUploadStorageCleanup = internalMutation({
   args: { storageId: v.id('_storage') },
   returns: v.boolean(),
   handler: async (ctx, { storageId }) => {
@@ -462,12 +509,9 @@ export const beginOrphanedChunkCleanup = internalMutation({
       .withIndex('by_storage', (index) => index.eq('storageId', storageId))
       .unique()
     if (!cleanup || cleanup.nextAttemptAt > Date.now()) return false
-
-    const chunk = await ctx.db
-      .query('documentUploadChunks')
-      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-      .first()
-    if (chunk) {
+    if (
+      await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)
+    ) {
       await ctx.db.delete(cleanup._id)
       return false
     }
@@ -475,7 +519,7 @@ export const beginOrphanedChunkCleanup = internalMutation({
   },
 })
 
-export const finishOrphanedChunkCleanup = internalMutation({
+export const finishUploadStorageCleanup = internalMutation({
   args: { storageId: v.id('_storage') },
   returns: v.boolean(),
   handler: async (ctx, { storageId }) => {
@@ -484,17 +528,18 @@ export const finishOrphanedChunkCleanup = internalMutation({
       .withIndex('by_storage', (index) => index.eq('storageId', storageId))
       .unique()
     if (!cleanup) return true
-    const chunk = await ctx.db
-      .query('documentUploadChunks')
-      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-      .first()
-    if (chunk) return false
+    if (
+      await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)
+    ) {
+      await ctx.db.delete(cleanup._id)
+      return false
+    }
     await ctx.db.delete(cleanup._id)
     return true
   },
 })
 
-export const retryOrphanedChunkCleanup = internalMutation({
+export const retryUploadStorageCleanup = internalMutation({
   args: { storageId: v.id('_storage') },
   returns: v.null(),
   handler: async (ctx, { storageId }) => {
@@ -503,11 +548,9 @@ export const retryOrphanedChunkCleanup = internalMutation({
       .withIndex('by_storage', (index) => index.eq('storageId', storageId))
       .unique()
     if (!cleanup) return null
-    const chunk = await ctx.db
-      .query('documentUploadChunks')
-      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-      .first()
-    if (chunk) {
+    if (
+      await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)
+    ) {
       await ctx.db.delete(cleanup._id)
       return null
     }
@@ -519,7 +562,7 @@ export const retryOrphanedChunkCleanup = internalMutation({
     )
     const nextAttemptAt = Date.now() + delayMs
     await ctx.db.patch(cleanup._id, { attempts, nextAttemptAt })
-    await ctx.scheduler.runAt(nextAttemptAt, cleanupOrphanedChunkRef, {
+    await ctx.scheduler.runAt(nextAttemptAt, cleanupUploadStorageRef, {
       storageId,
     })
     return null
@@ -678,6 +721,16 @@ export const finalizeCompletion = internalMutation({
         'Completed upload metadata does not match its intent.',
       )
     }
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', args.storageId))
+      .unique()
+    if (cleanup) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload storage is queued for cleanup',
+      )
+    }
     const metadata = await ctx.db.system.get('_storage', args.storageId)
     if (!metadata || metadata.size !== intent.sizeBytes) {
       throw validationError('Completed upload size does not match stored data.')
@@ -722,9 +775,12 @@ export const cancelIntent = internalMutation({
     if (intent.state !== 'cancelled')
       await ctx.db.patch(intent._id, { state: 'cancelled' })
     const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
-    return intent.storageId
+    const storageIds = intent.storageId
       ? [...chunkStorageIds, intent.storageId]
       : chunkStorageIds
+    await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+    await removeChunkRows(ctx, intent._id)
+    return storageIds
   },
 })
 
@@ -739,7 +795,10 @@ export const takeChunksForCleanup = internalMutation({
       if (Number.isFinite(expiresAt) && expiresAt > Date.now()) return []
       await ctx.db.patch(intent._id, { state: 'cancelled' })
     }
-    return listChunkStorageIds(ctx, intent._id)
+    const storageIds = await listChunkStorageIds(ctx, intent._id)
+    await removeChunkRows(ctx, intent._id)
+    await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+    return storageIds
   },
 })
 
@@ -757,9 +816,12 @@ export const expireIntent = internalMutation({
       const referenced = await finalStorageIsReferenced(ctx, intent)
       await ctx.db.patch(intent._id, { state: 'cancelled' })
       const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
-      return !referenced && intent.storageId
+      const storageIds = !referenced && intent.storageId
         ? [...chunkStorageIds, intent.storageId]
         : chunkStorageIds
+      await removeChunkRows(ctx, intent._id)
+      await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+      return storageIds
     }
     if (
       intent.state === 'consumed' ||
@@ -767,32 +829,16 @@ export const expireIntent = internalMutation({
       intent.state === 'stored'
     ) {
       const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
-      if (
-        intent.state === 'cancelled' &&
+      const storageIds = intent.state === 'cancelled' &&
         intent.storageId &&
         !(await finalStorageIsReferenced(ctx, intent))
-      ) {
-        return [...chunkStorageIds, intent.storageId]
-      }
-      return chunkStorageIds
+        ? [...chunkStorageIds, intent.storageId]
+        : chunkStorageIds
+      await removeChunkRows(ctx, intent._id)
+      await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+      return storageIds
     }
     return []
-  },
-})
-
-export const forgetCleanedChunks = internalMutation({
-  args: { intentId: v.id('documentUploadIntents') },
-  returns: v.null(),
-  handler: async (ctx, { intentId }) => {
-    const intent = await ctx.db.get(intentId)
-    if (!intent) return null
-    if (intent.state === 'pending') {
-      const expiresAt = Date.parse(intent.expiresAt)
-      if (Number.isFinite(expiresAt) && expiresAt > Date.now()) return null
-      await ctx.db.patch(intent._id, { state: 'cancelled' })
-    }
-    await removeChunkRows(ctx, intent._id)
-    return null
   },
 })
 

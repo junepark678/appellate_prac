@@ -109,21 +109,34 @@ const completeRef = makeFunctionReference<
   { intentId: Id<'documentUploadIntents'> },
   { intentId: Id<'documentUploadIntents'>; sizeBytes: number; sha256: string }
 >('documentUploadActions:complete')
-const cleanupOrphanedChunkRef = makeFunctionReference<
+const finalizeCompletionRef = makeFunctionReference<
+  'mutation',
+  {
+    intentId: Id<'documentUploadIntents'>
+    storageId: Id<'_storage'>
+    sizeBytes: number
+    sha256: string
+  },
+  { storageId: Id<'_storage'>; accepted: boolean; cancelled: boolean }
+>('documentUploads:finalizeCompletion')
+const cleanupUploadStorageRef = makeFunctionReference<
   'action',
   { storageId: Id<'_storage'> },
   null
->('documentUploadActions:cleanupOrphanedChunk')
-const queueOrphanedChunkCleanupRef = makeFunctionReference<
+>('documentUploadActions:cleanupUploadStorage')
+const queueUploadCleanupRef = makeFunctionReference<
   'mutation',
-  { storageId: Id<'_storage'> },
-  'queued' | 'referenced'
->('documentUploads:queueOrphanedChunkCleanup')
-const retryOrphanedChunkCleanupRef = makeFunctionReference<
+  {
+    storageIds: Id<'_storage'>[]
+    intentId?: Id<'documentUploadIntents'>
+  },
+  Id<'_storage'>[]
+>('documentUploads:queueUploadCleanup')
+const retryUploadStorageCleanupRef = makeFunctionReference<
   'mutation',
   { storageId: Id<'_storage'> },
   null
->('documentUploads:retryOrphanedChunkCleanup')
+>('documentUploads:retryUploadStorageCleanup')
 const cancelRef = makeFunctionReference<
   'action',
   { intentId: Id<'documentUploadIntents'> },
@@ -506,6 +519,33 @@ async function uploadBytes(
   }
 }
 
+async function failNextUploadStorageDelete(
+  t: TestConvex<typeof schema>,
+  storageId: Id<'_storage'>,
+) {
+  return deleteOrRetryCleanup({
+    objectExists: () =>
+      t.run(async (ctx) =>
+        Boolean(await ctx.db.system.get('_storage', storageId)),
+      ),
+    deleteObject: async () => {
+      throw new Error('temporary storage outage')
+    },
+    markDeleted: async () => undefined,
+    scheduleRetry: () =>
+      t.mutation(retryUploadStorageCleanupRef, { storageId }),
+  })
+}
+
+async function runQueuedUploadCleanup(t: TestConvex<typeof schema>) {
+  const queued = await t.run((ctx) =>
+    ctx.db.query('documentUploadCleanup').collect(),
+  )
+  for (const item of queued) {
+    await t.action(cleanupUploadStorageRef, { storageId: item.storageId })
+  }
+}
+
 beforeEach(() => {
   vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
 })
@@ -821,10 +861,10 @@ describe('document upload receipts', () => {
     )
     expect(acceptedChunk).not.toBeNull()
     expect(
-      await t.mutation(queueOrphanedChunkCleanupRef, {
-        storageId: acceptedChunk!.storageId,
+      await t.mutation(queueUploadCleanupRef, {
+        storageIds: [acceptedChunk!.storageId],
       }),
-    ).toBe('referenced')
+    ).toEqual([])
     const retry = await postChunk(alice, intent.intentId, 0, bytes)
     expect(first.status).toBe(200)
     expect(retry.status).toBe(200)
@@ -848,7 +888,7 @@ describe('document upload receipts', () => {
       },
       markDeleted: async () => undefined,
       scheduleRetry: () =>
-        t.mutation(retryOrphanedChunkCleanupRef, {
+        t.mutation(retryUploadStorageCleanupRef, {
           storageId: queued[0]!.storageId,
         }),
     })
@@ -864,8 +904,12 @@ describe('document upload receipts', () => {
     }))
     expect(retained.cleanup?.attempts).toBe(1)
     expect(retained.tempStorage).not.toBeNull()
-    vi.setSystemTime(retained.cleanup!.nextAttemptAt + 1)
-    await t.action(cleanupOrphanedChunkRef, {
+    await t.run(async (ctx) => {
+      await ctx.db.patch(retained.cleanup!._id, {
+        nextAttemptAt: Date.now() - 1,
+      })
+    })
+    await t.action(cleanupUploadStorageRef, {
       storageId: queued[0]!.storageId,
     })
 
@@ -883,6 +927,7 @@ describe('document upload receipts', () => {
     expect(saved.cleanup).toHaveLength(0)
     expect(saved.storage).toHaveLength(1)
     expect(saved.storage[0]?._id).toBe(saved.chunks[0]?.storageId)
+    await t.finishInProgressScheduledFunctions()
   })
 
   it('validates 25 MiB adversarial JSON in the Node action without a parsed object tree', async () => {
@@ -1549,6 +1594,7 @@ describe('document upload receipts', () => {
   })
 
   it('cancel removes pending chunk objects and rows', async () => {
+    vi.useFakeTimers()
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
     const alice = uploadClient(t)
@@ -1571,6 +1617,29 @@ describe('document upload receipts', () => {
     )
     expect(chunk).not.toBeNull()
     await alice.cancel(intent.intentId)
+    const queued = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', chunk!.storageId),
+        )
+        .unique(),
+    )
+    expect(queued?.intentId).toBe(intent.intentId)
+    expect(await failNextUploadStorageDelete(t, chunk!.storageId)).toBe('retry')
+    const retried = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', chunk!.storageId),
+        )
+        .unique(),
+    )
+    expect(retried?.attempts).toBe(1)
+    await t.run((ctx) =>
+      ctx.db.patch(retried!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.action(cleanupUploadStorageRef, { storageId: chunk!.storageId })
     const after = await t.run(async (ctx) => ({
       intent: await ctx.db.get(intent.intentId),
       chunks: await ctx.db.query('documentUploadChunks').collect(),
@@ -1581,6 +1650,293 @@ describe('document upload receipts', () => {
     expect(after.chunks).toHaveLength(0)
     expect(after.storedSize).toBeUndefined()
     expect(after.storage).toHaveLength(0)
+  })
+
+  it('retries expiry cleanup for both a chunk and an unreferenced final blob', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'expired-stored.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const stored = await t.run(async (ctx) => ({
+      receipt: (await ctx.db.get(intent.intentId))!,
+      chunk: (await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .unique())!,
+    }))
+    await t.run((ctx) =>
+      ctx.db.patch(intent.intentId, {
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      }),
+    )
+
+    await t.action(expireRef, { intentId: intent.intentId })
+    const queued = await t.run((ctx) =>
+      ctx.db.query('documentUploadCleanup').collect(),
+    )
+    expect(queued).toHaveLength(2)
+    expect(queued.map((item) => item.storageId)).toContain(
+      stored.receipt.storageId,
+    )
+    expect(queued.map((item) => item.storageId)).toContain(
+      stored.chunk.storageId,
+    )
+    expect(queued.every((item) => item.intentId === intent.intentId)).toBe(true)
+
+    expect(
+      await failNextUploadStorageDelete(t, stored.receipt.storageId!),
+    ).toBe('retry')
+    const delayedFinal = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', stored.receipt.storageId!),
+        )
+        .unique(),
+    )
+    expect(delayedFinal?.attempts).toBe(1)
+    expect(
+      await t.run((ctx) => ctx.db.system.get('_storage', stored.receipt.storageId!)),
+    ).not.toBeNull()
+
+    await t.action(cleanupUploadStorageRef, {
+      storageId: stored.chunk.storageId,
+    })
+    await t.run((ctx) =>
+      ctx.db.patch(delayedFinal!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.action(cleanupUploadStorageRef, {
+      storageId: stored.receipt.storageId!,
+    })
+
+    const after = await t.run(async (ctx) => ({
+      receipt: await ctx.db.get(intent.intentId),
+      chunks: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(after.receipt?.state).toBe('cancelled')
+    expect(after.chunks).toHaveLength(0)
+    expect(after.cleanup).toHaveLength(0)
+    expect(after.storage).toHaveLength(0)
+  })
+
+  it('retains invalid-completion chunk cleanup across a transient delete failure', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = new TextEncoder().encode('not a PDF')
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'invalid-completion.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const chunk = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .unique(),
+    )
+    expect(chunk).not.toBeNull()
+    await expectErrorCode(
+      alice.complete(intent.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+    const queued = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      chunk: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .collect(),
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', chunk!.storageId),
+        )
+        .unique(),
+    }))
+    expect(queued.intent?.state).toBe('cancelled')
+    expect(queued.chunk).toHaveLength(0)
+    expect(queued.cleanup?.intentId).toBe(intent.intentId)
+
+    expect(await failNextUploadStorageDelete(t, chunk!.storageId)).toBe('retry')
+    const delayed = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', chunk!.storageId),
+        )
+        .unique(),
+    )
+    expect(delayed?.attempts).toBe(1)
+    await t.run((ctx) =>
+      ctx.db.patch(delayed!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.action(cleanupUploadStorageRef, { storageId: chunk!.storageId })
+    const after = await t.run(async (ctx) => ({
+      storage: await ctx.db.system.get('_storage', chunk!.storageId),
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', chunk!.storageId),
+        )
+        .unique(),
+    }))
+    expect(after.storage).toBeNull()
+    expect(after.cleanup).toBeNull()
+  })
+
+  it('preserves a finalized winner and retries an unreferenced completion loser', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'completion-race.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const winnerId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const loserId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const winner = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      storageId: winnerId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    const loser = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      storageId: loserId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(winner.accepted).toBe(true)
+    expect(loser.accepted).toBe(false)
+    expect(loser.storageId).toBe(winnerId)
+
+    expect(
+      await t.mutation(queueUploadCleanupRef, {
+        storageIds: [winnerId],
+        intentId: intent.intentId,
+      }),
+    ).toEqual([])
+    expect(
+      await t.mutation(queueUploadCleanupRef, {
+        storageIds: [loserId],
+        intentId: intent.intentId,
+      }),
+    ).toEqual([loserId])
+    expect(await failNextUploadStorageDelete(t, loserId)).toBe('retry')
+    const delayed = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', loserId))
+        .unique(),
+    )
+    expect(delayed?.attempts).toBe(1)
+    await t.run((ctx) =>
+      ctx.db.patch(delayed!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.action(cleanupUploadStorageRef, { storageId: loserId })
+
+    const after = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      winner: await ctx.db.system.get('_storage', winnerId),
+      loser: await ctx.db.system.get('_storage', loserId),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+    }))
+    expect(after.intent?.storageId).toBe(winnerId)
+    expect(after.winner).not.toBeNull()
+    expect(after.loser).toBeNull()
+    expect(after.cleanup).toHaveLength(0)
+  })
+
+  it('keeps dataset asset storage referenced during expired receipt cleanup', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = new TextEncoder().encode('draft asset')
+    const intent = await alice.begin({
+      scope: { kind: 'dataset', versionId: fixture.versionId },
+      fileName: 'draft-asset.txt',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'text/plain',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const finalStorageId = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      expect(receipt?.storageId).toBeDefined()
+      await ctx.db.insert('organizationDatasetAssets', {
+        versionId: fixture.versionId,
+        institutionId: fixture.institutionId,
+        fileName: 'draft-asset.txt',
+        normalizedFileName: 'draft-asset.txt',
+        mediaType: 'text/plain',
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        storageId: receipt!.storageId!,
+      })
+      await ctx.db.patch(intent.intentId, {
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      })
+      return receipt!.storageId!
+    })
+
+    await t.action(expireRef, { intentId: intent.intentId })
+    await runQueuedUploadCleanup(t)
+    const after = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      asset: await ctx.db
+        .query('organizationDatasetAssets')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', finalStorageId),
+        )
+        .unique(),
+      file: await ctx.db.system.get('_storage', finalStorageId),
+    }))
+    expect(after.intent?.state).toBe('cancelled')
+    expect(after.asset?.storageId).toBe(finalStorageId)
+    expect(after.file).not.toBeNull()
   })
 
   it('serializes cancel against complete and against exactly-once consumption', async () => {
@@ -1618,6 +1974,7 @@ describe('document upload receipts', () => {
     expect(['fulfilled', 'rejected']).toContain(cancelResult.status)
     expect(['fulfilled', 'rejected']).toContain(completeResult.status)
     await t.action(expireRef, { intentId: cancelVsComplete.intentId })
+    await runQueuedUploadCleanup(t)
     const cancelledState = await t.run(async (ctx) => ({
       intent: await ctx.db.get(cancelVsComplete.intentId),
       chunks: await ctx.db.query('documentUploadChunks').collect(),
@@ -1664,6 +2021,7 @@ describe('document upload receipts', () => {
       }),
     ])
     await t.action(expireRef, { intentId: cancelVsConsume.intentId })
+    await runQueuedUploadCleanup(t)
     const consumedState = await t.run(async (ctx) => {
       const intent = await ctx.db.get(cancelVsConsume.intentId)
       const documents = await ctx.db

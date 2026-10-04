@@ -76,31 +76,31 @@ const expireIntentRef = makeFunctionReference<
   { intentId: Id<'documentUploadIntents'> },
   Id<'_storage'>[]
 >('documentUploads:expireIntent')
-const forgetCleanedChunksRef = makeFunctionReference<
-  'mutation',
-  { intentId: Id<'documentUploadIntents'> },
-  null
->('documentUploads:forgetCleanedChunks')
 const storageObjectExistsRef = makeFunctionReference<
   'query',
   { storageId: Id<'_storage'> },
   boolean
 >('documentUploads:storageObjectExists')
-const beginOrphanedChunkCleanupRef = makeFunctionReference<
+const queueUploadCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageIds: Id<'_storage'>[]; intentId?: Id<'documentUploadIntents'> },
+  Id<'_storage'>[]
+>('documentUploads:queueUploadCleanup')
+const beginUploadStorageCleanupRef = makeFunctionReference<
   'mutation',
   { storageId: Id<'_storage'> },
   boolean
->('documentUploads:beginOrphanedChunkCleanup')
-const finishOrphanedChunkCleanupRef = makeFunctionReference<
+>('documentUploads:beginUploadStorageCleanup')
+const finishUploadStorageCleanupRef = makeFunctionReference<
   'mutation',
   { storageId: Id<'_storage'> },
   boolean
->('documentUploads:finishOrphanedChunkCleanup')
-const retryOrphanedChunkCleanupRef = makeFunctionReference<
+>('documentUploads:finishUploadStorageCleanup')
+const retryUploadStorageCleanupRef = makeFunctionReference<
   'mutation',
   { storageId: Id<'_storage'> },
   null
->('documentUploads:retryOrphanedChunkCleanup')
+>('documentUploads:retryUploadStorageCleanup')
 
 function sha256(bytes: Uint8Array) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -486,21 +486,15 @@ function assertContentType(bytes: Uint8Array, mimeType: string) {
   }
 }
 
-async function deleteUnreferenced(ctx: ActionCtx, ids: Id<'_storage'>[]) {
-  for (const storageId of ids) {
-    const exists = () => ctx.runQuery(storageObjectExistsRef, { storageId })
-    if (!(await exists())) continue
-    try {
-      await ctx.storage.delete(storageId)
-    } catch (error) {
-      // A racing cleanup may already have removed this object. Treat that as
-      // success, but surface errors while the system storage row is present.
-      if (await exists()) throw error
-    }
-    if (await exists()) {
-      throw new Error('Temporary upload storage cleanup did not complete.')
-    }
-  }
+async function queueStorageCleanup(
+  ctx: ActionCtx,
+  storageIds: Id<'_storage'>[],
+  intentId?: Id<'documentUploadIntents'>,
+) {
+  await ctx.runMutation(queueUploadCleanupRef, {
+    storageIds,
+    ...(intentId ? { intentId } : {}),
+  })
 }
 
 export async function deleteOrRetryCleanup(operations: {
@@ -618,7 +612,8 @@ export const complete = action({
         sizeBytes: totalBytes,
         sha256: digest,
       })
-      if (!result.accepted) await deleteUnreferenced(ctx, [storedId])
+      if (!result.accepted)
+        await queueStorageCleanup(ctx, [storedId], intentId)
       storedId = undefined
       if (result.cancelled) {
         throw new ConvexError(
@@ -628,17 +623,13 @@ export const complete = action({
       }
       return { intentId, sizeBytes: totalBytes, sha256: digest }
     } catch (error) {
-      if (storedId) await deleteUnreferenced(ctx, [storedId])
+      if (storedId) await queueStorageCleanup(ctx, [storedId], intentId)
       if (
         error instanceof ConvexError &&
         error.code === AppErrorCode.VALIDATION_ERROR
       ) {
         try {
-          const temporaryIds = await ctx.runMutation(cancelIntentRef, {
-            intentId,
-          })
-          await deleteUnreferenced(ctx, temporaryIds)
-          await ctx.runMutation(forgetCleanedChunksRef, { intentId })
+          await ctx.runMutation(cancelIntentRef, { intentId })
         } catch {
           // Expiry cleanup is still scheduled and cannot remove referenced data.
         }
@@ -655,9 +646,7 @@ export const cancel = action({
   args: { intentId: v.id('documentUploadIntents') },
   returns: v.null(),
   handler: async (ctx, { intentId }) => {
-    const storageIds = await ctx.runMutation(cancelIntentRef, { intentId })
-    await deleteUnreferenced(ctx, storageIds)
-    await ctx.runMutation(forgetCleanedChunksRef, { intentId })
+    await ctx.runMutation(cancelIntentRef, { intentId })
     return null
   },
 })
@@ -666,26 +655,22 @@ export const cleanupChunks = internalAction({
   args: { intentId: v.id('documentUploadIntents') },
   returns: v.null(),
   handler: async (ctx, { intentId }) => {
-    const storageIds = await ctx.runMutation(takeChunksForCleanupRef, {
-      intentId,
-    })
-    await deleteUnreferenced(ctx, storageIds)
-    await ctx.runMutation(forgetCleanedChunksRef, { intentId })
+    await ctx.runMutation(takeChunksForCleanupRef, { intentId })
     return null
   },
 })
 
-export const cleanupOrphanedChunk = internalAction({
+export const cleanupUploadStorage = internalAction({
   args: { storageId: v.id('_storage') },
   returns: v.null(),
   handler: async (ctx, { storageId }) => {
     let shouldDelete: boolean
     try {
-      shouldDelete = await ctx.runMutation(beginOrphanedChunkCleanupRef, {
+      shouldDelete = await ctx.runMutation(beginUploadStorageCleanupRef, {
         storageId,
       })
     } catch {
-      await ctx.runMutation(retryOrphanedChunkCleanupRef, { storageId })
+      await ctx.runMutation(retryUploadStorageCleanupRef, { storageId })
       return null
     }
     if (!shouldDelete) return null
@@ -695,9 +680,9 @@ export const cleanupOrphanedChunk = internalAction({
         ctx.runQuery(storageObjectExistsRef, { storageId }),
       deleteObject: () => ctx.storage.delete(storageId),
       markDeleted: () =>
-        ctx.runMutation(finishOrphanedChunkCleanupRef, { storageId }),
+        ctx.runMutation(finishUploadStorageCleanupRef, { storageId }),
       scheduleRetry: () =>
-        ctx.runMutation(retryOrphanedChunkCleanupRef, { storageId }),
+        ctx.runMutation(retryUploadStorageCleanupRef, { storageId }),
     })
     return null
   },
@@ -707,9 +692,7 @@ export const expireUpload = internalAction({
   args: { intentId: v.id('documentUploadIntents') },
   returns: v.null(),
   handler: async (ctx, { intentId }) => {
-    const storageIds = await ctx.runMutation(expireIntentRef, { intentId })
-    await deleteUnreferenced(ctx, storageIds)
-    await ctx.runMutation(forgetCleanedChunksRef, { intentId })
+    await ctx.runMutation(expireIntentRef, { intentId })
     return null
   },
 })

@@ -1096,7 +1096,8 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_case", ["caseSessionId"])
     .index("by_dataset_version", ["datasetVersionId"])
-    .index("by_expiry", ["expiresAt"]),
+    .index("by_expiry", ["expiresAt"])
+    .index("by_storage", ["storageId"]),
 
   documentUploadChunks: defineTable(
     organizationRecordValidators.documentUploadChunks,
@@ -1107,6 +1108,7 @@ export default defineSchema({
   documentUploadCleanup: defineTable(
     v.object({
       storageId: v.id("_storage"),
+      intentId: v.optional(v.id("documentUploadIntents")),
       attempts: v.number(),
       nextAttemptAt: v.number(),
       createdAt: v.string(),

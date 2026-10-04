@@ -40,11 +40,11 @@ const recordChunkRef = makeFunctionReference<
   },
   { accepted: boolean }
 >('documentUploads:recordChunk')
-const queueOrphanedChunkCleanupRef = makeFunctionReference<
+const queueUploadCleanupRef = makeFunctionReference<
   'mutation',
-  { storageId: Id<'_storage'> },
-  'queued' | 'referenced'
->('documentUploads:queueOrphanedChunkCleanup')
+  { storageIds: Id<'_storage'>[] },
+  Id<'_storage'>[]
+>('documentUploads:queueUploadCleanup')
 
 function allowedOrigins() {
   return new Set(
@@ -253,7 +253,7 @@ const chunkRoute = httpAction(async (ctx, request) => {
       sha256,
     })
     if (!record.accepted) {
-      await ctx.runMutation(queueOrphanedChunkCleanupRef, { storageId })
+      await ctx.runMutation(queueUploadCleanupRef, { storageIds: [storageId] })
       storageId = undefined
     } else {
       storageId = undefined
@@ -269,7 +269,9 @@ const chunkRoute = httpAction(async (ctx, request) => {
   } catch (error) {
     if (storageId) {
       try {
-        await ctx.runMutation(queueOrphanedChunkCleanupRef, { storageId })
+        await ctx.runMutation(queueUploadCleanupRef, {
+          storageIds: [storageId],
+        })
       } catch (cleanupError) {
         // Never delete here: the record mutation may have committed before an
         // action transport failure, so this object may already be referenced.
