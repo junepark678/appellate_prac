@@ -97,6 +97,17 @@ const draftSummaryValidator = v.object({
   updatedAt: v.string(),
 });
 
+const listMinePaginationOptsValidator = v.object({
+  cursor: v.union(v.string(), v.null()),
+  numItems: v.number(),
+});
+
+const listMineResultValidator = v.object({
+  page: v.array(draftSummaryValidator),
+  isDone: v.boolean(),
+  continueCursor: v.string(),
+});
+
 const getDraftDTOValidator = v.object({
   datasetId: v.id("organizationDatasets"),
   versionId: v.id("organizationDatasetVersions"),
@@ -365,6 +376,17 @@ async function requireVersion(
 function requireDraft(version: Doc<"organizationDatasetVersions">) {
   if (version.state !== "draft") {
     throw conflict("Only a draft version can be edited.");
+  }
+}
+
+function requireExpectedDraftRevision(
+  version: Doc<"organizationDatasetVersions">,
+  expectedRevision: number,
+) {
+  assertSafeInteger(expectedRevision);
+  assertSafeInteger(version.draftRevision);
+  if (version.draftRevision !== expectedRevision) {
+    throw conflict("Dataset draft changed; reload it before editing.");
   }
 }
 
@@ -688,6 +710,7 @@ export const newVersion = mutation({
 export const updateDraft = mutation({
   args: {
     versionId: v.id("organizationDatasetVersions"),
+    expectedRevision: v.number(),
     title: v.string(),
     description: v.string(),
     tags: v.array(v.string()),
@@ -701,6 +724,7 @@ export const updateDraft = mutation({
       ["instructor"],
     );
     requireDraft(version);
+    requireExpectedDraftRevision(version, args.expectedRevision);
     const { manifest: currentManifest, assets } = await readAndValidateVersion(
       ctx,
       version,
@@ -921,16 +945,18 @@ export const attachAsset = mutation({
 export const reviewDraft = mutation({
   args: {
     versionId: v.id("organizationDatasetVersions"),
+    expectedRevision: v.number(),
     reviewNote: v.string(),
   },
   returns: v.null(),
-  handler: async (ctx, { versionId, reviewNote }) => {
+  handler: async (ctx, { versionId, expectedRevision, reviewNote }) => {
     const { dataset, version, user, institution } = await requireVersion(
       ctx,
       versionId,
       ["instructor"],
     );
     requireDraft(version);
+    requireExpectedDraftRevision(version, expectedRevision);
     if (reviewNote.length > maxReviewNoteLength) {
       throw validationError(
         "Review note must be at most 4000 characters.",
@@ -983,20 +1009,25 @@ export const reviewDraft = mutation({
 });
 
 export const listMine = query({
-  args: { institutionId: v.id("institutions") },
-  returns: v.array(draftSummaryValidator),
-  handler: async (ctx, { institutionId }) => {
+  args: {
+    institutionId: v.id("institutions"),
+    paginationOpts: listMinePaginationOptsValidator,
+  },
+  returns: listMineResultValidator,
+  handler: async (ctx, { institutionId, paginationOpts }) => {
     const { institution } = await requireInstitutionRole(ctx, institutionId, [
       "learner",
     ]);
-    const datasets = await ctx.db
+    assertSafeInteger(paginationOpts.numItems, 1, 50);
+    const datasetPage = await ctx.db
       .query("organizationDatasets")
       .withIndex("by_institution", (index) =>
         index.eq("institutionId", institution._id),
       )
-      .collect();
+      .order("desc")
+      .paginate(paginationOpts);
     const summaries = await Promise.all(
-      datasets.map(async (dataset) => {
+      datasetPage.page.map(async (dataset) => {
         const latest = await ctx.db
           .query("organizationDatasetVersions")
           .withIndex("by_dataset_version", (index) =>
@@ -1024,13 +1055,11 @@ export const listMine = query({
         };
       }),
     );
-    return summaries.sort((left, right) =>
-      left.updatedAt !== right.updatedAt
-        ? left.updatedAt < right.updatedAt
-          ? 1
-          : -1
-        : String(left.datasetId).localeCompare(String(right.datasetId)),
-    );
+    return {
+      page: summaries,
+      isDone: datasetPage.isDone,
+      continueCursor: datasetPage.continueCursor,
+    };
   },
 });
 

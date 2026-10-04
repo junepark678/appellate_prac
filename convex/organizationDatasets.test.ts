@@ -55,6 +55,7 @@ type CreateArgs = {
 };
 type UpdateArgs = {
   versionId: Id<"organizationDatasetVersions">;
+  expectedRevision: number;
   title: string;
   description: string;
   tags: string[];
@@ -89,6 +90,11 @@ type DraftSummary = {
   createdAt: string;
   updatedAt: string;
 };
+type ListMineResult = {
+  page: DraftSummary[];
+  isDone: boolean;
+  continueCursor: string;
+};
 
 const createRef = makeFunctionReference<
   "mutation",
@@ -117,13 +123,20 @@ const attachAssetRef = makeFunctionReference<
 >("organizationDatasets:attachAsset");
 const reviewDraftRef = makeFunctionReference<
   "mutation",
-  { versionId: Id<"organizationDatasetVersions">; reviewNote: string },
+  {
+    versionId: Id<"organizationDatasetVersions">;
+    expectedRevision: number;
+    reviewNote: string;
+  },
   null
 >("organizationDatasets:reviewDraft");
 const listMineRef = makeFunctionReference<
   "query",
-  { institutionId: Id<"institutions"> },
-  DraftSummary[]
+  {
+    institutionId: Id<"institutions">;
+    paginationOpts: { cursor: string | null; numItems: number };
+  },
+  ListMineResult
 >("organizationDatasets:listMine");
 const getDraftRef = makeFunctionReference<
   "query",
@@ -282,6 +295,7 @@ function updateArgs(
 ): UpdateArgs {
   return {
     versionId,
+    expectedRevision: overrides.expectedRevision ?? 0,
     title: overrides.title ?? "Revised Record Sources",
     description: overrides.description ?? "Updated training sources.",
     tags: overrides.tags ?? ["records", "training"],
@@ -353,9 +367,10 @@ describe("private organization dataset drafts", () => {
     const alice = t.withIdentity(identity("alice"));
     const listed = await alice.query(listMineRef, {
       institutionId: fixture.institutionId,
+      paginationOpts: { numItems: 20, cursor: null },
     });
-    expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({
+    expect(listed).toMatchObject({ isDone: true, page: [expect.anything()] });
+    expect(listed.page[0]).toMatchObject({
       datasetId: created.datasetId,
       versionId: created.versionId,
       version: 1,
@@ -398,7 +413,10 @@ describe("private organization dataset drafts", () => {
 
     const foreign = t.withIdentity(identity("foreign"));
     await expect(
-      foreign.query(listMineRef, { institutionId: fixture.institutionId }),
+      foreign.query(listMineRef, {
+        institutionId: fixture.institutionId,
+        paginationOpts: { numItems: 20, cursor: null },
+      }),
     ).rejects.toMatchObject({
       code: AppErrorCode.NOT_FOUND,
     });
@@ -416,6 +434,165 @@ describe("private organization dataset drafts", () => {
     await expect(
       alice.mutation(newVersionRef, { datasetId: created.datasetId }),
     ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
+  });
+
+  it("paginates organization datasets in bounded pages and validates page size", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await seedWorkspace(t);
+    const created: Array<{
+      datasetId: Id<"organizationDatasets">;
+      versionId: Id<"organizationDatasetVersions">;
+    }> = [];
+    for (let index = 0; index < 5; index += 1) {
+      created.push(
+        await createDataset(
+          t,
+          "alice",
+          fixture.institutionId,
+          `Paginated Draft ${index}`,
+        ),
+      );
+    }
+    const alice = t.withIdentity(identity("alice"));
+    const first = await alice.query(listMineRef, {
+      institutionId: fixture.institutionId,
+      paginationOpts: { numItems: 2, cursor: null },
+    });
+    expect(first.page).toHaveLength(2);
+    expect(first.isDone).toBe(false);
+    expect(first.continueCursor).not.toBe("");
+    const second = await alice.query(listMineRef, {
+      institutionId: fixture.institutionId,
+      paginationOpts: { numItems: 2, cursor: first.continueCursor },
+    });
+    expect(second.page).toHaveLength(2);
+    expect(second.isDone).toBe(false);
+    const third = await alice.query(listMineRef, {
+      institutionId: fixture.institutionId,
+      paginationOpts: { numItems: 2, cursor: second.continueCursor },
+    });
+    expect(third.page).toHaveLength(1);
+    expect(third.isDone).toBe(true);
+    expect(
+      [...first.page, ...second.page, ...third.page].map((item) =>
+        String(item.datasetId),
+      ),
+    ).toEqual(created.map((item) => String(item.datasetId)).reverse());
+
+    for (const numItems of [0, 51, 1.5]) {
+      await expect(
+        alice.query(listMineRef, {
+          institutionId: fixture.institutionId,
+          paginationOpts: { numItems, cursor: null },
+        }),
+      ).rejects.toMatchObject({ code: AppErrorCode.VALIDATION_ERROR });
+    }
+  });
+
+  it("atomically rejects stale edits and reviews across instructors", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await seedWorkspace(t);
+    const created = await createDataset(t, "alice", fixture.institutionId);
+    const alice = t.withIdentity(identity("alice"));
+    const collaborator = t.withIdentity(identity("collaborator"));
+
+    const firstRace = await Promise.allSettled([
+      alice.mutation(
+        updateDraftRef,
+        updateArgs(created.versionId, [], {
+          title: "Instructor Alice Edit",
+          expectedRevision: 0,
+        }),
+      ),
+      collaborator.mutation(
+        updateDraftRef,
+        updateArgs(created.versionId, [], {
+          title: "Instructor Collaborator Edit",
+          expectedRevision: 0,
+        }),
+      ),
+    ]);
+    expect(
+      firstRace.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    const staleEdit = firstRace.find((result) => result.status === "rejected");
+    expect(staleEdit).toMatchObject({
+      status: "rejected",
+      reason: { code: AppErrorCode.CONFLICT },
+    });
+
+    const versionAfterFirstRace = await t.run((ctx) =>
+      ctx.db.get(created.versionId),
+    );
+    expect(versionAfterFirstRace?.draftRevision).toBe(1);
+    expect(["Instructor Alice Edit", "Instructor Collaborator Edit"]).toContain(
+      versionAfterFirstRace?.title,
+    );
+    const datasetAfterFirstRace = await t.run((ctx) =>
+      ctx.db.get(created.datasetId),
+    );
+    await expect(
+      alice.mutation(
+        updateDraftRef,
+        updateArgs(created.versionId, [], { expectedRevision: 0 }),
+      ),
+    ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
+    await expect(
+      collaborator.mutation(reviewDraftRef, {
+        versionId: created.versionId,
+        expectedRevision: 0,
+        reviewNote: "This stale review must not apply.",
+      }),
+    ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
+    expect(await t.run((ctx) => ctx.db.get(created.versionId))).toEqual(
+      versionAfterFirstRace,
+    );
+    expect(await t.run((ctx) => ctx.db.get(created.datasetId))).toEqual(
+      datasetAfterFirstRace,
+    );
+
+    const secondRace = await Promise.allSettled([
+      collaborator.mutation(reviewDraftRef, {
+        versionId: created.versionId,
+        expectedRevision: 1,
+        reviewNote: "Reviewed revision one only.",
+      }),
+      alice.mutation(
+        updateDraftRef,
+        updateArgs(created.versionId, [], {
+          expectedRevision: 1,
+          title: "Revision Two Edit",
+        }),
+      ),
+    ]);
+    expect(
+      secondRace.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      secondRace.find((result) => result.status === "rejected"),
+    ).toMatchObject({
+      status: "rejected",
+      reason: { code: AppErrorCode.CONFLICT },
+    });
+    const versionAfterSecondRace = await t.run((ctx) =>
+      ctx.db.get(created.versionId),
+    );
+    expect(versionAfterSecondRace?.draftRevision).toBe(2);
+    if (secondRace[0]?.status === "fulfilled") {
+      expect(versionAfterSecondRace).toMatchObject({
+        reviewStatus: "organization_reviewed",
+        reviewNote: "Reviewed revision one only.",
+        reviewedByUserId: fixture.collaboratorId,
+      });
+      expect(versionAfterSecondRace?.title).toBe(versionAfterFirstRace?.title);
+    } else {
+      expect(versionAfterSecondRace).toMatchObject({
+        title: "Revision Two Edit",
+        reviewStatus: "unreviewed",
+      });
+      expect(versionAfterSecondRace).not.toHaveProperty("reviewNote");
+      expect(versionAfterSecondRace).not.toHaveProperty("reviewedByUserId");
+    }
   });
 
   it("attaches stored receipts atomically, makes retries idempotent, and resets review and preview", async () => {
@@ -479,11 +656,12 @@ describe("private organization dataset drafts", () => {
     });
     await alice.mutation(
       updateDraftRef,
-      updateArgs(created.versionId, [proprietary]),
+      updateArgs(created.versionId, [proprietary], { expectedRevision: 1 }),
     );
     await seedPreviewFields(t, created.versionId);
     await alice.mutation(reviewDraftRef, {
       versionId: created.versionId,
+      expectedRevision: 2,
       reviewNote: "Reviewed for this organization only.",
     });
     const reviewed = await t.run((ctx) => ctx.db.get(created.versionId));
@@ -545,7 +723,7 @@ describe("private organization dataset drafts", () => {
             sha256: followupReceipt.sha256,
           }),
         ],
-        { title: "Updated Sources" },
+        { title: "Updated Sources", expectedRevision: 4 },
       ),
     );
     const edited = await alice.query(getDraftRef, {
@@ -613,6 +791,7 @@ describe("private organization dataset drafts", () => {
     await alice.mutation(
       updateDraftRef,
       updateArgs(created.versionId, assets, {
+        expectedRevision: 3,
         title: "Rights Checked Sources",
         description: "Rights metadata is retained as publisher supplied.",
         tags: ["rights", "sources"],
@@ -620,6 +799,7 @@ describe("private organization dataset drafts", () => {
     );
     await alice.mutation(reviewDraftRef, {
       versionId: created.versionId,
+      expectedRevision: 4,
       reviewNote: "Organization review only; no court approval.",
     });
     await freezeAsPublishedFixture(
@@ -704,6 +884,42 @@ describe("private organization dataset drafts", () => {
     });
     const sourceAfter = await t.run((ctx) => ctx.db.get(created.versionId));
     expect(sourceAfter).toEqual(sourceBefore);
+  });
+
+  it("creates only one open draft when multiple instructors start a version together", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await seedWorkspace(t);
+    const created = await createDataset(t, "alice", fixture.institutionId);
+    await freezeAsPublishedFixture(t, created.versionId);
+    const alice = t.withIdentity(identity("alice"));
+    const collaborator = t.withIdentity(identity("collaborator"));
+
+    const attempts = await Promise.allSettled([
+      alice.mutation(newVersionRef, { datasetId: created.datasetId }),
+      collaborator.mutation(newVersionRef, { datasetId: created.datasetId }),
+    ]);
+    expect(
+      attempts.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      attempts.find((result) => result.status === "rejected"),
+    ).toMatchObject({
+      status: "rejected",
+      reason: { code: AppErrorCode.CONFLICT },
+    });
+
+    const versions = await t.run((ctx) =>
+      ctx.db
+        .query("organizationDatasetVersions")
+        .withIndex("by_dataset_version", (index) =>
+          index.eq("datasetId", created.datasetId),
+        )
+        .collect(),
+    );
+    expect(versions.map((version) => version.version).sort()).toEqual([1, 2]);
+    expect(
+      versions.filter((version) => version.state === "draft"),
+    ).toHaveLength(1);
   });
 
   it("rejects unsafe names, case collisions, hidden/mismatched assets, invalid limits, and unknown manifest keys", async () => {
@@ -821,34 +1037,46 @@ describe("private organization dataset drafts", () => {
     await expect(
       alice.mutation(
         updateDraftRef,
-        updateArgs(attached.versionId, [
-          {
-            ...matching,
-            sha256: "b".repeat(64),
-          },
-        ]),
+        updateArgs(
+          attached.versionId,
+          [
+            {
+              ...matching,
+              sha256: "b".repeat(64),
+            },
+          ],
+          { expectedRevision: 1 },
+        ),
       ),
     ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
     await expect(
       alice.mutation(
         updateDraftRef,
-        updateArgs(attached.versionId, [
-          {
-            ...matching,
-            mediaType: "application/pdf",
-          },
-        ]),
+        updateArgs(
+          attached.versionId,
+          [
+            {
+              ...matching,
+              mediaType: "application/pdf",
+            },
+          ],
+          { expectedRevision: 1 },
+        ),
       ),
     ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
     await expect(
       alice.mutation(
         updateDraftRef,
-        updateArgs(attached.versionId, [
-          {
-            ...matching,
-            sizeBytes: matching.sizeBytes + 1,
-          },
-        ]),
+        updateArgs(
+          attached.versionId,
+          [
+            {
+              ...matching,
+              sizeBytes: matching.sizeBytes + 1,
+            },
+          ],
+          { expectedRevision: 1 },
+        ),
       ),
     ).rejects.toMatchObject({ code: AppErrorCode.CONFLICT });
 
