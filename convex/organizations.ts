@@ -291,6 +291,9 @@ export const getContext = query({
     const item = memberDTO(institution, membership.role);
     return {
       ...item,
+      ...(membership.expiresAt !== undefined
+        ? { expiresAt: membership.expiresAt }
+        : {}),
       capabilities: {
         manageMembers: membership.role === "admin",
         teach: membership.role === "admin" || membership.role === "instructor",
