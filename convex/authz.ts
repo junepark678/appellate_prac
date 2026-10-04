@@ -113,7 +113,7 @@ async function requireScopedMembership(
     .withIndex("by_institution_user", (index) =>
       index.eq("institutionId", institution._id).eq("userId", user._id),
     )
-    .collect();
+    .take(2);
   if (memberships.length > 1) {
     throw new ConvexError(
       AppErrorCode.CONFLICT,

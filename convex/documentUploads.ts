@@ -1,0 +1,1159 @@
+/*
+ * Appellate Practice Simulator — federal appellate procedure training.
+ * Copyright (C) 2026 Rhajune Park
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+import { makeFunctionReference } from 'convex/server'
+import { v } from 'convex/values'
+
+import { internalMutation, internalQuery, mutation } from './_generated/server'
+import type { Doc, Id } from './_generated/dataModel'
+import type { MutationCtx, QueryCtx } from './_generated/server'
+import { requireCurrentUser } from './authHelpers'
+import { requireInstitutionRole } from './authz'
+import { requireOwnedSession } from './caseSessions'
+import {
+  AppErrorCode,
+  ConvexError,
+  notFound,
+  sessionLocked,
+  validationError,
+} from './errors'
+import {
+  uploadScopeValidator,
+  validateUploadIntentTransition,
+} from './organizationContracts'
+import type { UploadScope } from './organizationContracts'
+
+const maxFileBytes = 25 * 1024 * 1024
+const chunkBytes = 4 * 1024 * 1024
+const maxChunks = 7
+const intentLifetimeMs = 15 * 60 * 1000
+const maxCleanupRetryDelayMs = 60 * 60 * 1000
+const maxCleanupRetryAttempts = 31
+const cleanupWatchdogIntervalMs = 60 * 60 * 1000
+// Convex Node actions are capped at ten minutes, so this lease cannot expire
+// while a healthy completion action is still running.
+const completionClaimLeaseMs = 11 * 60 * 1000
+
+const expireUploadRef = makeFunctionReference<
+  'action',
+  { intentId: Id<'documentUploadIntents'> },
+  null
+>('documentUploadActions:expireUpload')
+const cleanupUploadStorageRef = makeFunctionReference<
+  'action',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploadActions:cleanupUploadStorage')
+const cleanupWatchdogRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:watchUploadStorageCleanup')
+
+function uploadExpired(): ConvexError {
+  return new ConvexError(AppErrorCode.CONFLICT, 'Upload intent expired', {
+    reason: 'UPLOAD_EXPIRED',
+  })
+}
+
+function completionClaimLost(): ConvexError {
+  return new ConvexError(
+    AppErrorCode.CONFLICT,
+    'Upload completion claim is no longer active',
+    {
+      reason: 'UPLOAD_COMPLETION_CLAIM_LOST',
+      retryable: true,
+      retryAfterMs: 1000,
+    },
+  )
+}
+
+function expectedChunkSize(sizeBytes: number, index: number) {
+  return Math.min(chunkBytes, sizeBytes - index * chunkBytes)
+}
+
+function intentContractRow(
+  intent: Omit<Doc<'documentUploadIntents'>, '_id' | '_creationTime'>,
+) {
+  return {
+    institutionId: intent.institutionId,
+    scopeKind: intent.scopeKind,
+    ...(intent.caseSessionId ? { caseSessionId: intent.caseSessionId } : {}),
+    ...(intent.datasetVersionId
+      ? { datasetVersionId: intent.datasetVersionId }
+      : {}),
+    userId: intent.userId,
+    fileName: intent.fileName,
+    sizeBytes: intent.sizeBytes,
+    sha256: intent.sha256,
+    mimeType: intent.mimeType,
+    chunkCount: intent.chunkCount,
+    state: intent.state,
+    expiresAt: intent.expiresAt,
+    createdAt: intent.createdAt,
+    ...(intent.completionClaimToken
+      ? { completionClaimToken: intent.completionClaimToken }
+      : {}),
+    ...(intent.completionClaimExpiresAt
+      ? { completionClaimExpiresAt: intent.completionClaimExpiresAt }
+      : {}),
+    ...(intent.storageId ? { storageId: intent.storageId } : {}),
+    ...(intent.documentId ? { documentId: intent.documentId } : {}),
+    ...(intent.analysisId ? { analysisId: intent.analysisId } : {}),
+    ...(intent.datasetAssetId ? { datasetAssetId: intent.datasetAssetId } : {}),
+  }
+}
+
+function assertFileMetadata(file: {
+  fileName: string
+  sizeBytes: number
+  sha256: string
+}) {
+  if (!file.fileName.trim() || file.fileName.length > 200) {
+    throw validationError(
+      'File name must be between 1 and 200 characters.',
+      'fileName',
+    )
+  }
+  if (
+    !Number.isSafeInteger(file.sizeBytes) ||
+    file.sizeBytes < 1 ||
+    file.sizeBytes > maxFileBytes
+  ) {
+    throw validationError(
+      'File size must be between 1 byte and 25 MiB.',
+      'sizeBytes',
+    )
+  }
+  if (!/^[0-9a-f]{64}$/.test(file.sha256)) {
+    throw validationError(
+      'SHA-256 must be 64 lowercase hexadecimal characters.',
+      'sha256',
+    )
+  }
+}
+
+async function assertSessionWritable(
+  ctx: QueryCtx | MutationCtx,
+  sessionId: Id<'caseSessions'>,
+) {
+  const assignmentSessions = await ctx.db
+    .query('assignmentSessions')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', sessionId))
+    .collect()
+  const isLocked = assignmentSessions.some(
+    (link) =>
+      link.submittedAt &&
+      (!link.reopenedAt || link.reopenedAt <= link.submittedAt),
+  )
+  if (isLocked) throw sessionLocked()
+}
+
+async function requireMutableScope(
+  ctx: QueryCtx | MutationCtx,
+  scope: UploadScope,
+) {
+  if (scope.kind === 'session') {
+    const { user, session } = await requireOwnedSession(
+      ctx,
+      scope.caseSessionId,
+    )
+    await assertSessionWritable(ctx, session._id)
+    if (!session.institutionId) throw notFound('Case session')
+    return { user, institutionId: session.institutionId }
+  }
+
+  const version = await ctx.db.get(scope.versionId)
+  if (!version || version.state !== 'draft') throw notFound('Dataset version')
+  const { user, institution } = await requireInstitutionRole(
+    ctx,
+    version.institutionId,
+    ['instructor'],
+  )
+  const dataset = await ctx.db.get(version.datasetId)
+  if (!dataset || dataset.institutionId !== institution._id)
+    throw notFound('Dataset version')
+  return { user, institutionId: institution._id }
+}
+
+async function requireOwnedIntent(
+  ctx: QueryCtx | MutationCtx,
+  intent: Doc<'documentUploadIntents'>,
+  requireMutableParent: boolean,
+) {
+  const { user } = await requireCurrentUser(ctx)
+  if (intent.userId !== user._id) throw notFound('Upload intent')
+
+  if (intent.scopeKind === 'session') {
+    if (!intent.caseSessionId || intent.datasetVersionId)
+      throw notFound('Upload intent')
+    const { session, institution } = await requireOwnedSession(
+      ctx,
+      intent.caseSessionId,
+    )
+    if (
+      session.institutionId !== intent.institutionId ||
+      institution._id !== intent.institutionId
+    ) {
+      throw notFound('Upload intent')
+    }
+    if (requireMutableParent) await assertSessionWritable(ctx, session._id)
+    return { user, parentId: session._id }
+  }
+
+  if (!intent.datasetVersionId || intent.caseSessionId)
+    throw notFound('Upload intent')
+  const version = await ctx.db.get(intent.datasetVersionId)
+  if (!version || version.institutionId !== intent.institutionId)
+    throw notFound('Upload intent')
+  const { user: authorizedUser, institution } = await requireInstitutionRole(
+    ctx,
+    intent.institutionId,
+    ['instructor'],
+  )
+  if (
+    authorizedUser._id !== user._id ||
+    institution._id !== intent.institutionId
+  ) {
+    throw notFound('Upload intent')
+  }
+  const dataset = await ctx.db.get(version.datasetId)
+  if (!dataset || dataset.institutionId !== institution._id)
+    throw notFound('Upload intent')
+  if (requireMutableParent && version.state !== 'draft')
+    throw notFound('Dataset version')
+  return { user, parentId: version._id }
+}
+
+function assertNotExpired(intent: Doc<'documentUploadIntents'>) {
+  const expiresAt = Date.parse(intent.expiresAt)
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+    throw uploadExpired()
+}
+
+async function listChunkStorageIds(
+  ctx: QueryCtx | MutationCtx,
+  intentId: Id<'documentUploadIntents'>,
+) {
+  const chunks = await ctx.db
+    .query('documentUploadChunks')
+    .withIndex('by_intent_index', (index) => index.eq('intentId', intentId))
+    .collect()
+  return chunks.map((chunk) => chunk.storageId)
+}
+
+async function removeChunkRows(
+  ctx: MutationCtx,
+  intentId: Id<'documentUploadIntents'>,
+) {
+  const chunks = await ctx.db
+    .query('documentUploadChunks')
+    .withIndex('by_intent_index', (index) => index.eq('intentId', intentId))
+    .collect()
+  for (const chunk of chunks) await ctx.db.delete(chunk._id)
+}
+
+async function finalStorageIdIsReferenced(
+  ctx: QueryCtx | MutationCtx,
+  storageId: Id<'_storage'>,
+) {
+  const document = await ctx.db
+    .query('documents')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .first()
+  if (document) return true
+  const asset = await ctx.db
+    .query('organizationDatasetAssets')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .first()
+  return Boolean(asset)
+}
+
+async function finalStorageIsReferenced(
+  ctx: QueryCtx | MutationCtx,
+  intent: Doc<'documentUploadIntents'>,
+) {
+  return intent.storageId
+    ? finalStorageIdIsReferenced(ctx, intent.storageId)
+    : false
+}
+
+async function uploadStorageIsReferenced(
+  ctx: QueryCtx | MutationCtx,
+  storageId: Id<'_storage'>,
+  cancelledIntentId?: Id<'documentUploadIntents'>,
+) {
+  if (await finalStorageIdIsReferenced(ctx, storageId)) return true
+
+  const intents = await ctx.db
+    .query('documentUploadIntents')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .collect()
+  if (
+    intents.some(
+      (intent) =>
+        intent._id !== cancelledIntentId || intent.state !== 'cancelled',
+    )
+  ) {
+    return true
+  }
+
+  const chunks = await ctx.db
+    .query('documentUploadChunks')
+    .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+    .collect()
+  return chunks.some((chunk) => chunk.intentId !== cancelledIntentId)
+}
+
+async function queueUploadStorageCleanup(
+  ctx: MutationCtx,
+  storageIds: Id<'_storage'>[],
+  intentId?: Id<'documentUploadIntents'>,
+) {
+  const intent = intentId ? await ctx.db.get(intentId) : null
+  const cancelledIntentId =
+    intent?.state === 'cancelled' ? intent._id : undefined
+  const queuedIds: Id<'_storage'>[] = []
+  for (const storageId of new Set(storageIds)) {
+    if (await uploadStorageIsReferenced(ctx, storageId, cancelledIntentId)) {
+      continue
+    }
+    const existing = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (existing) {
+      queuedIds.push(storageId)
+      continue
+    }
+    await ctx.db.insert('documentUploadCleanup', {
+      storageId,
+      ...(cancelledIntentId ? { intentId: cancelledIntentId } : {}),
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      createdAt: new Date().toISOString(),
+    })
+    await ctx.scheduler.runAfter(0, cleanupUploadStorageRef, { storageId })
+    // This durable mutation re-arms the at-most-once action if its first
+    // attempt and the action's retry mutation both fail. Scheduling it in the
+    // same transaction guarantees every new outbox row has a watchdog.
+    await ctx.scheduler.runAfter(
+      cleanupWatchdogIntervalMs,
+      cleanupWatchdogRef,
+      { storageId },
+    )
+    queuedIds.push(storageId)
+  }
+  return queuedIds
+}
+
+export const begin = mutation({
+  args: {
+    scope: uploadScopeValidator,
+    fileName: v.string(),
+    sizeBytes: v.number(),
+    sha256: v.string(),
+    mimeType: v.union(
+      v.literal('application/pdf'),
+      v.literal('text/plain'),
+      v.literal('application/json'),
+    ),
+  },
+  returns: v.object({
+    intentId: v.id('documentUploadIntents'),
+    chunkBytes: v.number(),
+    expiresAt: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    assertFileMetadata(args)
+    if (args.scope.kind === 'session' && args.mimeType !== 'application/pdf') {
+      throw validationError('Case session uploads must be PDFs.', 'mimeType')
+    }
+    const { user, institutionId } = await requireMutableScope(ctx, args.scope)
+    const now = Date.now()
+    const expiresAt = new Date(now + intentLifetimeMs).toISOString()
+    const chunkCount = Math.ceil(args.sizeBytes / chunkBytes)
+    if (chunkCount < 1 || chunkCount > maxChunks) {
+      throw validationError(
+        'File has an unsupported number of chunks.',
+        'sizeBytes',
+      )
+    }
+    const intentId = await ctx.db.insert('documentUploadIntents', {
+      institutionId,
+      scopeKind: args.scope.kind,
+      ...(args.scope.kind === 'session'
+        ? { caseSessionId: args.scope.caseSessionId }
+        : { datasetVersionId: args.scope.versionId }),
+      userId: user._id,
+      fileName: args.fileName,
+      sizeBytes: args.sizeBytes,
+      sha256: args.sha256,
+      mimeType: args.mimeType,
+      chunkCount,
+      state: 'pending',
+      expiresAt,
+      createdAt: new Date(now).toISOString(),
+    })
+    await ctx.scheduler.runAt(Date.parse(expiresAt), expireUploadRef, {
+      intentId,
+    })
+    return { intentId, chunkBytes, expiresAt }
+  },
+})
+
+export const authorizeChunk = internalQuery({
+  args: { intentId: v.string(), index: v.number() },
+  returns: v.object({
+    expectedSize: v.number(),
+    existingChunk: v.optional(
+      v.object({ sizeBytes: v.number(), sha256: v.string() }),
+    ),
+  }),
+  handler: async (ctx, { intentId: rawIntentId, index }) => {
+    const intentId = ctx.db.normalizeId('documentUploadIntents', rawIntentId)
+    if (!intentId) throw validationError('Invalid upload intent ID.')
+    const intent = await ctx.db.get(intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, true)
+    if (intent.state !== 'pending') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload intent is not pending',
+      )
+    }
+    assertNotExpired(intent)
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= intent.chunkCount ||
+      intent.chunkCount > maxChunks
+    ) {
+      throw validationError('Invalid upload chunk index.', 'index')
+    }
+    const size = expectedChunkSize(intent.sizeBytes, index)
+    if (size < 1 || size > chunkBytes)
+      throw validationError('Invalid upload chunk size.')
+    const existingChunk = await ctx.db
+      .query('documentUploadChunks')
+      .withIndex('by_intent_index', (query) =>
+        query.eq('intentId', intent._id).eq('index', index),
+      )
+      .unique()
+    return {
+      expectedSize: size,
+      ...(existingChunk
+        ? {
+            existingChunk: {
+              sizeBytes: existingChunk.sizeBytes,
+              sha256: existingChunk.sha256,
+            },
+          }
+        : {}),
+    }
+  },
+})
+
+export const recordChunk = internalMutation({
+  args: {
+    intentId: v.id('documentUploadIntents'),
+    index: v.number(),
+    storageId: v.id('_storage'),
+    sizeBytes: v.number(),
+    sha256: v.string(),
+  },
+  returns: v.object({ accepted: v.boolean() }),
+  handler: async (ctx, args) => {
+    const intent = await ctx.db.get(args.intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, true)
+    if (intent.state !== 'pending') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload intent is not pending',
+      )
+    }
+    assertNotExpired(intent)
+    if (
+      !Number.isSafeInteger(args.index) ||
+      args.index < 0 ||
+      args.index >= intent.chunkCount ||
+      intent.chunkCount > maxChunks
+    ) {
+      throw validationError('Invalid upload chunk index.', 'index')
+    }
+    const sizeBytes = expectedChunkSize(intent.sizeBytes, args.index)
+    if (args.sizeBytes !== sizeBytes || !/^[0-9a-f]{64}$/.test(args.sha256)) {
+      throw validationError('Upload chunk size or checksum is invalid.')
+    }
+    const metadata = await ctx.db.system.get('_storage', args.storageId)
+    if (!metadata || metadata.size !== sizeBytes) {
+      throw validationError('Uploaded chunk size does not match its receipt.')
+    }
+    const existing = await ctx.db
+      .query('documentUploadChunks')
+      .withIndex('by_intent_index', (index) =>
+        index.eq('intentId', intent._id).eq('index', args.index),
+      )
+      .unique()
+    if (existing) {
+      if (existing.sizeBytes !== sizeBytes || existing.sha256 !== args.sha256) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Conflicting retry for upload chunk',
+        )
+      }
+      return { accepted: false }
+    }
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', args.storageId))
+      .unique()
+    if (cleanup) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload chunk storage is queued for cleanup',
+      )
+    }
+    await ctx.db.insert('documentUploadChunks', {
+      intentId: intent._id,
+      index: args.index,
+      storageId: args.storageId,
+      sizeBytes,
+      sha256: args.sha256,
+    })
+    return { accepted: true }
+  },
+})
+
+export const queueUploadCleanup = internalMutation({
+  args: {
+    storageIds: v.array(v.id('_storage')),
+    intentId: v.optional(v.id('documentUploadIntents')),
+  },
+  returns: v.array(v.id('_storage')),
+  handler: async (ctx, args) =>
+    queueUploadStorageCleanup(ctx, args.storageIds, args.intentId),
+})
+
+export const beginUploadStorageCleanup = internalMutation({
+  args: { storageId: v.id('_storage') },
+  returns: v.boolean(),
+  handler: async (ctx, { storageId }) => {
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (!cleanup || cleanup.nextAttemptAt > Date.now()) return false
+    if (await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)) {
+      await ctx.db.delete(cleanup._id)
+      return false
+    }
+    return true
+  },
+})
+
+export const finishUploadStorageCleanup = internalMutation({
+  args: { storageId: v.id('_storage') },
+  returns: v.boolean(),
+  handler: async (ctx, { storageId }) => {
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (!cleanup) return true
+    if (await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)) {
+      await ctx.db.delete(cleanup._id)
+      return false
+    }
+    await ctx.db.delete(cleanup._id)
+    return true
+  },
+})
+
+export const watchUploadStorageCleanup = internalMutation({
+  args: { storageId: v.id('_storage') },
+  returns: v.null(),
+  handler: async (ctx, { storageId }) => {
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (!cleanup) return null
+    if (await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)) {
+      await ctx.db.delete(cleanup._id)
+      return null
+    }
+
+    // Actions are at-most-once. Re-arm only due work and keep one bounded
+    // hourly watchdog chain while the same unreferenced outbox row exists.
+    if (cleanup.nextAttemptAt <= Date.now()) {
+      await ctx.scheduler.runAfter(0, cleanupUploadStorageRef, { storageId })
+    }
+    await ctx.scheduler.runAfter(
+      cleanupWatchdogIntervalMs,
+      cleanupWatchdogRef,
+      { storageId },
+    )
+    return null
+  },
+})
+
+export const retryUploadStorageCleanup = internalMutation({
+  args: { storageId: v.id('_storage') },
+  returns: v.null(),
+  handler: async (ctx, { storageId }) => {
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (!cleanup) return null
+
+    // Keep retrying durable cleanup records indefinitely. Saturate the counter
+    // and backoff so transient storage/database failures cannot overflow it or
+    // silently strand an object after a fixed attempt count. Reference checks
+    // stay in begin/finish, where an error leaves this durable record intact.
+    const attempts = Math.min(cleanup.attempts + 1, maxCleanupRetryAttempts)
+    const delayMs = Math.min(
+      maxCleanupRetryDelayMs,
+      1000 * 2 ** Math.min(attempts - 1, 12),
+    )
+    const nextAttemptAt = Date.now() + delayMs
+    await ctx.db.patch(cleanup._id, { attempts, nextAttemptAt })
+    await ctx.scheduler.runAt(nextAttemptAt, cleanupUploadStorageRef, {
+      storageId,
+    })
+    return null
+  },
+})
+
+export const claimCompletion = internalMutation({
+  args: {
+    intentId: v.id('documentUploadIntents'),
+    claimToken: v.string(),
+  },
+  returns: v.union(
+    v.object({ state: v.literal('claimed') }),
+    v.object({ state: v.literal('busy') }),
+    v.object({
+      state: v.literal('existing'),
+      sizeBytes: v.number(),
+      sha256: v.string(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    if (!/^[0-9a-f-]{36}$/i.test(args.claimToken)) {
+      throw validationError('Invalid upload completion claim token.')
+    }
+    const intent = await ctx.db.get(args.intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, intent.state === 'pending')
+    if (intent.state === 'stored' || intent.state === 'consumed') {
+      return {
+        state: 'existing' as const,
+        sizeBytes: intent.sizeBytes,
+        sha256: intent.sha256,
+      }
+    }
+    if (intent.state !== 'pending') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload intent is not completable',
+      )
+    }
+    assertNotExpired(intent)
+    const now = Date.now()
+    const existingClaimExpiry = Date.parse(
+      intent.completionClaimExpiresAt ?? '',
+    )
+    if (intent.completionClaimToken && existingClaimExpiry > now) {
+      return intent.completionClaimToken === args.claimToken
+        ? { state: 'claimed' as const }
+        : { state: 'busy' as const }
+    }
+    if (intent.completionClaimToken === args.claimToken) {
+      throw completionClaimLost()
+    }
+
+    const claimExpiresAt = new Date(
+      Math.min(now + completionClaimLeaseMs, Date.parse(intent.expiresAt)),
+    ).toISOString()
+    const next = {
+      ...intent,
+      completionClaimToken: args.claimToken,
+      completionClaimExpiresAt: claimExpiresAt,
+    }
+    validateUploadIntentTransition(
+      intentContractRow(intent),
+      intentContractRow(next),
+    )
+    await ctx.db.patch(intent._id, {
+      completionClaimToken: args.claimToken,
+      completionClaimExpiresAt: claimExpiresAt,
+    })
+    return { state: 'claimed' as const }
+  },
+})
+
+export const releaseCompletionClaim = internalMutation({
+  args: {
+    intentId: v.id('documentUploadIntents'),
+    claimToken: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, { intentId, claimToken }) => {
+    const intent = await ctx.db.get(intentId)
+    if (!intent || intent.completionClaimToken !== claimToken) return null
+    const next = {
+      ...intent,
+      completionClaimToken: undefined,
+      completionClaimExpiresAt: undefined,
+    }
+    validateUploadIntentTransition(
+      intentContractRow(intent),
+      intentContractRow(next),
+    )
+    await ctx.db.patch(intent._id, {
+      completionClaimToken: undefined,
+      completionClaimExpiresAt: undefined,
+    })
+    return null
+  },
+})
+
+export const prepareCompletion = internalQuery({
+  args: {
+    intentId: v.id('documentUploadIntents'),
+    claimToken: v.string(),
+  },
+  returns: v.union(
+    v.object({
+      state: v.literal('existing'),
+      sizeBytes: v.number(),
+      sha256: v.string(),
+    }),
+    v.object({
+      state: v.literal('pending'),
+      sizeBytes: v.number(),
+      sha256: v.string(),
+      mimeType: v.string(),
+      chunks: v.array(
+        v.object({
+          index: v.number(),
+          storageId: v.id('_storage'),
+          sizeBytes: v.number(),
+          sha256: v.string(),
+        }),
+      ),
+    }),
+  ),
+  handler: async (ctx, { intentId, claimToken }) => {
+    const intent = await ctx.db.get(intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, intent.state === 'pending')
+    if (intent.state === 'stored' || intent.state === 'consumed') {
+      return {
+        state: 'existing' as const,
+        sizeBytes: intent.sizeBytes,
+        sha256: intent.sha256,
+      }
+    }
+    if (intent.state !== 'pending') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload intent is not completable',
+      )
+    }
+    assertNotExpired(intent)
+    if (
+      intent.completionClaimToken !== claimToken ||
+      Date.parse(intent.completionClaimExpiresAt ?? '') <= Date.now()
+    ) {
+      throw completionClaimLost()
+    }
+    const chunks = await ctx.db
+      .query('documentUploadChunks')
+      .withIndex('by_intent_index', (index) => index.eq('intentId', intent._id))
+      .collect()
+    if (chunks.length !== intent.chunkCount) {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'Upload is incomplete')
+    }
+    chunks.sort((a, b) => a.index - b.index)
+    for (let index = 0; index < intent.chunkCount; index += 1) {
+      const chunk = chunks[index]
+      if (
+        !chunk ||
+        chunk.index !== index ||
+        chunk.sizeBytes !== expectedChunkSize(intent.sizeBytes, index)
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Upload chunks are incomplete',
+        )
+      }
+    }
+    return {
+      state: 'pending' as const,
+      sizeBytes: intent.sizeBytes,
+      sha256: intent.sha256,
+      mimeType: intent.mimeType,
+      chunks: chunks.map(({ index, storageId, sizeBytes, sha256 }) => ({
+        index,
+        storageId,
+        sizeBytes,
+        sha256,
+      })),
+    }
+  },
+})
+
+export const finalizeCompletion = internalMutation({
+  args: {
+    intentId: v.id('documentUploadIntents'),
+    claimToken: v.optional(v.string()),
+    storageId: v.id('_storage'),
+    sizeBytes: v.number(),
+    sha256: v.string(),
+  },
+  returns: v.object({
+    storageId: v.id('_storage'),
+    accepted: v.boolean(),
+    cancelled: v.boolean(),
+    stale: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const intent = await ctx.db.get(args.intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, intent.state === 'pending')
+    if (intent.state === 'stored' || intent.state === 'consumed') {
+      if (
+        intent.storageId &&
+        intent.sizeBytes === args.sizeBytes &&
+        intent.sha256 === args.sha256
+      ) {
+        if (intent.storageId !== args.storageId) {
+          const metadata = await ctx.db.system.get('_storage', args.storageId)
+          if (!metadata || metadata.size !== intent.sizeBytes) {
+            throw validationError(
+              'Completed upload size does not match stored data.',
+            )
+          }
+          await queueUploadStorageCleanup(ctx, [args.storageId], intent._id)
+        }
+        return {
+          storageId: intent.storageId,
+          accepted: false,
+          cancelled: false,
+          stale: false,
+        }
+      }
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Conflicting upload completion',
+      )
+    }
+    if (intent.state === 'cancelled') {
+      if (
+        args.sizeBytes !== intent.sizeBytes ||
+        args.sha256 !== intent.sha256
+      ) {
+        throw validationError(
+          'Completed upload metadata does not match its intent.',
+        )
+      }
+      const metadata = await ctx.db.system.get('_storage', args.storageId)
+      if (!metadata || metadata.size !== intent.sizeBytes) {
+        throw validationError(
+          'Completed upload size does not match stored data.',
+        )
+      }
+      if (!intent.storageId) {
+        const next = {
+          ...intent,
+          storageId: args.storageId,
+          completionClaimToken: undefined,
+          completionClaimExpiresAt: undefined,
+        }
+        validateUploadIntentTransition(
+          intentContractRow(intent),
+          intentContractRow(next),
+        )
+        await ctx.db.patch(intent._id, {
+          storageId: args.storageId,
+          completionClaimToken: undefined,
+          completionClaimExpiresAt: undefined,
+        })
+      }
+      await queueUploadStorageCleanup(ctx, [args.storageId], intent._id)
+      return {
+        storageId: intent.storageId ?? args.storageId,
+        accepted: false,
+        cancelled: true,
+        stale: false,
+      }
+    }
+    if (intent.state !== 'pending') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload intent is not completable',
+      )
+    }
+    if (args.sizeBytes !== intent.sizeBytes || args.sha256 !== intent.sha256) {
+      throw validationError(
+        'Completed upload metadata does not match its intent.',
+      )
+    }
+    const metadata = await ctx.db.system.get('_storage', args.storageId)
+    if (!metadata || metadata.size !== intent.sizeBytes) {
+      throw validationError('Completed upload size does not match stored data.')
+    }
+    const expiresAt = Date.parse(intent.expiresAt)
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
+      const next = {
+        ...intent,
+        state: 'cancelled' as const,
+        storageId: intent.storageId ?? args.storageId,
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      }
+      validateUploadIntentTransition(
+        intentContractRow(intent),
+        intentContractRow(next),
+      )
+      await ctx.db.patch(intent._id, {
+        state: 'cancelled',
+        storageId: intent.storageId ?? args.storageId,
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      })
+      await removeChunkRows(ctx, intent._id)
+      await queueUploadStorageCleanup(
+        ctx,
+        [...chunkStorageIds, args.storageId],
+        intent._id,
+      )
+      return {
+        storageId: intent.storageId ?? args.storageId,
+        accepted: false,
+        cancelled: true,
+        stale: false,
+      }
+    }
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', args.storageId))
+      .unique()
+    if (cleanup) {
+      if (
+        intent.completionClaimToken === args.claimToken &&
+        Date.parse(intent.completionClaimExpiresAt ?? '') > Date.now()
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Upload storage is queued for cleanup',
+        )
+      }
+      await queueUploadStorageCleanup(ctx, [args.storageId], intent._id)
+      return {
+        storageId: args.storageId,
+        accepted: false,
+        cancelled: false,
+        stale: true,
+      }
+    }
+    if (
+      intent.completionClaimToken !== args.claimToken ||
+      Date.parse(intent.completionClaimExpiresAt ?? '') <= Date.now()
+    ) {
+      await queueUploadStorageCleanup(ctx, [args.storageId], intent._id)
+      return {
+        storageId: args.storageId,
+        accepted: false,
+        cancelled: false,
+        stale: true,
+      }
+    }
+    const next = {
+      ...intent,
+      state: 'stored' as const,
+      storageId: args.storageId,
+      completionClaimToken: undefined,
+      completionClaimExpiresAt: undefined,
+    }
+    validateUploadIntentTransition(
+      intentContractRow(intent),
+      intentContractRow(next),
+    )
+    await ctx.db.patch(intent._id, {
+      state: 'stored',
+      storageId: args.storageId,
+      completionClaimToken: undefined,
+      completionClaimExpiresAt: undefined,
+    })
+    return {
+      storageId: args.storageId,
+      accepted: true,
+      cancelled: false,
+      stale: false,
+    }
+  },
+})
+
+export const cancelIntent = internalMutation({
+  args: { intentId: v.id('documentUploadIntents') },
+  returns: v.array(v.id('_storage')),
+  handler: async (ctx, { intentId }) => {
+    const intent = await ctx.db.get(intentId)
+    if (!intent) throw notFound('Upload intent')
+    await requireOwnedIntent(ctx, intent, false)
+    if (intent.state === 'consumed') {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Consumed uploads cannot be cancelled',
+      )
+    }
+    const referenced = await finalStorageIsReferenced(ctx, intent)
+    if (referenced) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload storage is already referenced',
+      )
+    }
+    if (intent.state !== 'cancelled') {
+      const next = {
+        ...intent,
+        state: 'cancelled' as const,
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      }
+      validateUploadIntentTransition(
+        intentContractRow(intent),
+        intentContractRow(next),
+      )
+      await ctx.db.patch(intent._id, {
+        state: 'cancelled',
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      })
+    }
+    const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
+    const storageIds = intent.storageId
+      ? [...chunkStorageIds, intent.storageId]
+      : chunkStorageIds
+    await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+    await removeChunkRows(ctx, intent._id)
+    return storageIds
+  },
+})
+
+export const takeChunksForCleanup = internalMutation({
+  args: { intentId: v.id('documentUploadIntents') },
+  returns: v.array(v.id('_storage')),
+  handler: async (ctx, { intentId }) => {
+    const intent = await ctx.db.get(intentId)
+    if (!intent) return []
+    if (intent.state === 'pending') {
+      const expiresAt = Date.parse(intent.expiresAt)
+      if (Number.isFinite(expiresAt) && expiresAt > Date.now()) return []
+      const next = {
+        ...intent,
+        state: 'cancelled' as const,
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      }
+      validateUploadIntentTransition(
+        intentContractRow(intent),
+        intentContractRow(next),
+      )
+      await ctx.db.patch(intent._id, {
+        state: 'cancelled',
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      })
+    }
+    const storageIds = await listChunkStorageIds(ctx, intent._id)
+    await removeChunkRows(ctx, intent._id)
+    await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+    return storageIds
+  },
+})
+
+export const expireIntent = internalMutation({
+  args: { intentId: v.id('documentUploadIntents') },
+  returns: v.array(v.id('_storage')),
+  handler: async (ctx, { intentId }) => {
+    const intent = await ctx.db.get(intentId)
+    if (!intent) return []
+    const now = Date.now()
+    const expired =
+      !Number.isFinite(Date.parse(intent.expiresAt)) ||
+      Date.parse(intent.expiresAt) <= now
+    if ((intent.state === 'pending' || intent.state === 'stored') && expired) {
+      const referenced = await finalStorageIsReferenced(ctx, intent)
+      const next = {
+        ...intent,
+        state: 'cancelled' as const,
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      }
+      validateUploadIntentTransition(
+        intentContractRow(intent),
+        intentContractRow(next),
+      )
+      await ctx.db.patch(intent._id, {
+        state: 'cancelled',
+        completionClaimToken: undefined,
+        completionClaimExpiresAt: undefined,
+      })
+      const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
+      const storageIds =
+        !referenced && intent.storageId
+          ? [...chunkStorageIds, intent.storageId]
+          : chunkStorageIds
+      await removeChunkRows(ctx, intent._id)
+      await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+      return storageIds
+    }
+    if (
+      intent.state === 'consumed' ||
+      intent.state === 'cancelled' ||
+      intent.state === 'stored'
+    ) {
+      const chunkStorageIds = await listChunkStorageIds(ctx, intent._id)
+      const storageIds =
+        intent.state === 'cancelled' &&
+        intent.storageId &&
+        !(await finalStorageIsReferenced(ctx, intent))
+          ? [...chunkStorageIds, intent.storageId]
+          : chunkStorageIds
+      await removeChunkRows(ctx, intent._id)
+      await queueUploadStorageCleanup(ctx, storageIds, intent._id)
+      return storageIds
+    }
+    return []
+  },
+})
+
+export const storageObjectExists = internalQuery({
+  args: { storageId: v.id('_storage') },
+  returns: v.boolean(),
+  handler: async (ctx, { storageId }) =>
+    Boolean(await ctx.db.system.get('_storage', storageId)),
+})

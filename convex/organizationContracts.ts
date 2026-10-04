@@ -314,6 +314,9 @@ export const documentUploadIntentsValidator = v.object({
   ),
   expiresAt: v.string(),
   createdAt: v.string(),
+  // Internal lease fields; user-visible upload states remain unchanged.
+  completionClaimToken: v.optional(v.string()),
+  completionClaimExpiresAt: v.optional(v.string()),
   storageId: v.optional(v.id("_storage")),
   documentId: v.optional(v.id("documents")),
   analysisId: v.optional(v.id("documentAnalyses")),
@@ -595,6 +598,20 @@ export function validateUploadIntent(
   value: OrganizationRecords["documentUploadIntents"],
 ): void {
   validateContract(documentUploadIntentsValidator, value);
+  if (
+    (value.completionClaimToken === undefined) !==
+    (value.completionClaimExpiresAt === undefined)
+  ) {
+    throw validationError("Upload completion claim linkage is incomplete");
+  }
+  if (
+    value.completionClaimToken !== undefined &&
+    (value.state !== "pending" ||
+      !isUtcTimestamp(value.completionClaimExpiresAt!) ||
+      Date.parse(value.completionClaimExpiresAt!) > Date.parse(value.expiresAt))
+  ) {
+    throw validationError("Invalid upload completion claim");
+  }
   if (value.scopeKind === "session") {
     if (
       !value.caseSessionId ||
@@ -819,6 +836,29 @@ export function validateUploadIntentTransition(
         AppErrorCode.CONFLICT,
         "Immutable upload scope mismatch",
       );
+  }
+  if (
+    before.state === "pending" &&
+    after.state === "pending" &&
+    before.completionClaimToken !== undefined &&
+    after.completionClaimToken !== undefined &&
+    before.completionClaimToken !== after.completionClaimToken &&
+    Date.parse(before.completionClaimExpiresAt ?? "") > Date.now()
+  ) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "A live upload completion claim cannot be replaced",
+    );
+  }
+  if (
+    before.completionClaimToken !== undefined &&
+    before.completionClaimToken === after.completionClaimToken &&
+    before.completionClaimExpiresAt !== after.completionClaimExpiresAt
+  ) {
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      "Upload completion claim lease is immutable",
+    );
   }
   for (const field of [
     "storageId",

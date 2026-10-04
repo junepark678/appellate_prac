@@ -88,7 +88,7 @@ export async function appendCaseSessionEvent(
           .eq('institutionId', institution._id)
           .eq('userId', session.userId),
       )
-      .collect()
+      .take(2)
     if (ownerMemberships.length > 1) {
       throw new ConvexError(AppErrorCode.CONFLICT, 'Organization membership is ambiguous')
     }
@@ -98,7 +98,7 @@ export async function appendCaseSessionEvent(
     const assignmentSessions = await ctx.db
       .query('assignmentSessions')
       .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-      .collect()
+      .take(2)
     const exactReviewSession = assignmentSessions.find(
       (assignmentSession) =>
         assignmentSession._id === payload.assignmentSessionId &&
@@ -122,7 +122,7 @@ export async function appendCaseSessionEvent(
   const assignmentSessions = await ctx.db
     .query('assignmentSessions')
     .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
+    .take(2)
   if (
     isOwner &&
     assignmentSessions.some(

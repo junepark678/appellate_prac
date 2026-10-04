@@ -502,6 +502,7 @@ export default defineSchema({
     legalTrainingDisclaimerAcceptedAt: v.optional(v.string()),
     simulatedDate: v.string(),
     nextEventSequence: v.optional(v.number()),
+    sessionAdmissionRevision: v.optional(v.number()),
   })
     .index("by_user", ["userId"])
     .index("by_scenario", ["scenarioId"])
@@ -1095,12 +1096,27 @@ export default defineSchema({
   )
     .index("by_user", ["userId"])
     .index("by_case", ["caseSessionId"])
+    .index("by_case_state", ["caseSessionId", "state"])
     .index("by_dataset_version", ["datasetVersionId"])
-    .index("by_expiry", ["expiresAt"]),
+    .index("by_expiry", ["expiresAt"])
+    .index("by_storage", ["storageId"]),
 
   documentUploadChunks: defineTable(
     organizationRecordValidators.documentUploadChunks,
-  ).index("by_intent_index", ["intentId", "index"]),
+  )
+    .index("by_intent_index", ["intentId", "index"])
+    .index("by_storage", ["storageId"]),
+
+  documentUploadCleanup: defineTable(
+    v.object({
+      storageId: v.id("_storage"),
+      intentId: v.optional(v.id("documentUploadIntents")),
+      attempts: v.number(),
+      nextAttemptAt: v.number(),
+      createdAt: v.string(),
+    }),
+  )
+    .index("by_storage", ["storageId"]),
 
   organizationMigrationFindings: defineTable(
     organizationRecordValidators.organizationMigrationFindings,
