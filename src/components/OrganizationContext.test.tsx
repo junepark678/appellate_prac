@@ -1076,6 +1076,37 @@ describe("OrganizationContextProvider", () => {
     },
   );
 
+  it.each(["Appellate Practice Simulator", "Study"])(
+    "clears a stale public-route organization ID through the %s link",
+    async (linkName) => {
+      getOrganizationContext = async (id) => {
+        if (id === "org-personal") {
+          return organization(id, "Personal workspace", "admin", "personal");
+        }
+        throw new Error("NOT_FOUND");
+      };
+      const { router } = renderOrganizationApp(
+        "/legal/privacy?organizationId=stale-org&view=records",
+      );
+
+      expect(
+        await screen.findByRole("heading", { name: "Privacy Notice" }),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("link", { name: linkName }));
+
+      expect(router.state.location.pathname).toBe("/app");
+      expect(
+        await screen.findByText("Personal workspace content (admin)"),
+      ).toBeTruthy();
+      expect(
+        (router.state.location.search as Record<string, unknown>)
+          .organizationId,
+      ).toBe("org-personal");
+      expect(contextWatches.has("stale-org")).toBe(false);
+      expect(mocks.client.mutation).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each([
     {
       path: "/app",
