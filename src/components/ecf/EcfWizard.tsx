@@ -30,6 +30,7 @@ import type {
   FilingDraft,
   FilingMetadata,
   ParticipantRole,
+  UploadedDocument,
   ValidationIssue,
 } from '../../domain/types'
 
@@ -71,11 +72,14 @@ export function EcfWizard({
   documentPending,
   draft,
   eventAvailability,
+  availableDocuments,
   learnerRole,
   metadata,
   session,
   validationIssues,
   onDocumentsSelected,
+  onSelectRecoveredDocument,
+  onRemoveDocument,
   onDraftChange,
   onMetadataChange,
   onReset,
@@ -86,11 +90,14 @@ export function EcfWizard({
   documentPending: boolean
   draft: FilingDraft
   eventAvailability: EcfEventAvailability[]
+  availableDocuments: UploadedDocument[]
   learnerRole: ParticipantRole
   metadata: FilingMetadata
   session: CaseSession
   validationIssues: ValidationIssue[]
-  onDocumentsSelected: (files: FileList | null) => void
+  onDocumentsSelected: (files: File[]) => void
+  onSelectRecoveredDocument: (documentId: string) => void
+  onRemoveDocument: (documentId: string) => void
   onDraftChange: (draft: FilingDraft) => void
   onMetadataChange: (metadata: FilingMetadata) => void
   onReset: (eventId?: string) => void
@@ -172,8 +179,11 @@ export function EcfWizard({
             documentError={documentError}
             documentPending={documentPending}
             draft={draft}
+            availableDocuments={availableDocuments}
             metadata={metadata}
             onDocumentsSelected={onDocumentsSelected}
+            onSelectRecoveredDocument={onSelectRecoveredDocument}
+            onRemoveDocument={onRemoveDocument}
             onDraftChange={onDraftChange}
             onMetadataChange={onMetadataChange}
           />
