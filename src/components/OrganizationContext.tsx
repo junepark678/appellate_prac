@@ -53,6 +53,8 @@ type OrganizationContextValue = {
   capabilities: OrganizationCapabilities;
   status: OrganizationContextStatus;
   unavailableMessage: string | null;
+  canRecoverUnavailableOrganization: boolean;
+  recoverToPersonalWorkspace: () => void;
   canRetryOrganizationBootstrap: boolean;
   retryOrganizationBootstrap: () => void;
   organizations: OrganizationMemberDTO[];
@@ -76,7 +78,7 @@ const OrganizationContext = createContext<OrganizationContextValue | null>(
 );
 
 type PendingSelection = {
-  organizationId: string;
+  organizationId: string | null;
   sequence: number;
   pathname: string;
   targetPathname: string;
@@ -260,7 +262,9 @@ export function OrganizationContextProvider({
       ? pendingSelection
       : null;
   const selectedOrganizationId = inOrganizationScope
-    ? (activePendingSelection?.organizationId ?? urlOrganizationId)
+    ? activePendingSelection
+      ? activePendingSelection.organizationId
+      : urlOrganizationId
     : null;
 
   const invalidateContext = useCallback(() => {
@@ -413,10 +417,9 @@ export function OrganizationContextProvider({
 
   const selectOrganization = useCallback(
     (nextOrganizationId: Id<"institutions">) => {
-      if (!userReady || !sessionKey) return;
+      if (!userReady || !sessionKey || pendingSelectionRef.current) return;
       const nextId = String(nextOrganizationId);
-      const currentIntent =
-        pendingSelectionRef.current?.organizationId ?? urlOrganizationId;
+      const currentIntent = urlOrganizationId;
       if (nextId === currentIntent) return;
 
       const targetPathname = organizationSectionRoot(pathname);
@@ -464,6 +467,7 @@ export function OrganizationContextProvider({
   const bootstrapAttemptRef = useRef<string | null>(null);
   const shouldBootstrapPersonal =
     !selectedOrganizationId &&
+    !activePendingSelection &&
     (isStudyPath(pathname) ||
       (organizationsStatus === "ready" && organizations.length === 0));
   const retryOrganizationBootstrap = useCallback(() => {
@@ -669,6 +673,74 @@ export function OrganizationContextProvider({
     bootstrapErrorSession !== null &&
     bootstrapErrorSession === sessionKey;
 
+  const canRecoverUnavailableOrganization =
+    inOrganizationScope &&
+    userReady &&
+    selectedOrganizationId !== null &&
+    currentResolvedContext?.status === "unavailable" &&
+    !activePendingSelection &&
+    pendingSelection === null;
+
+  const recoverToPersonalWorkspace = useCallback(() => {
+    if (
+      !canRecoverUnavailableOrganization ||
+      !sessionKey ||
+      !selectedOrganizationId ||
+      pendingSelectionRef.current
+    ) {
+      return;
+    }
+
+    const previousOrganizationId = selectedOrganizationId;
+    const nextSelection: PendingSelection = {
+      organizationId: null,
+      sequence: ++sequenceRef.current,
+      pathname,
+      targetPathname: "/app",
+    };
+
+    // Invalidate captures and cancel local work before clearing the selection.
+    invalidateContext();
+    identityRef.current = { organizationId: null, sessionKey };
+    pendingSelectionRef.current = nextSelection;
+    setPendingSelection(nextSelection);
+
+    const search = { organizationId: undefined };
+    void router
+      .navigate({ to: "/app", search, replace: false } as never)
+      .catch(() => {
+        if (
+          pendingSelectionRef.current?.sequence !== nextSelection.sequence
+        ) {
+          return;
+        }
+        pendingSelectionRef.current = null;
+        setPendingSelection(null);
+        identityRef.current = {
+          organizationId: previousOrganizationId,
+          sessionKey,
+        };
+        invalidateContext();
+        setResolvedContext((current) =>
+          current?.sessionKey === sessionKey &&
+          current.organizationId === previousOrganizationId
+            ? {
+                ...current,
+                generation: generationRef.current,
+                status: "unavailable",
+              }
+            : current,
+        );
+      });
+  }, [
+    canRecoverUnavailableOrganization,
+    invalidateContext,
+    pathname,
+    router,
+    selectedOrganizationId,
+    sessionKey,
+  ]);
+
   const organization =
     status === "ready" ? (currentResolvedContext?.organization ?? null) : null;
   const captureOrganizationContext = useCallback(() => {
@@ -719,6 +791,8 @@ export function OrganizationContextProvider({
       unavailableMessage,
       canRetryOrganizationBootstrap,
       retryOrganizationBootstrap,
+      canRecoverUnavailableOrganization,
+      recoverToPersonalWorkspace,
       organizations,
       organizationsStatus,
       selectOrganization,
@@ -728,6 +802,7 @@ export function OrganizationContextProvider({
     }),
     [
       activePendingSelection,
+      canRecoverUnavailableOrganization,
       canRetryOrganizationBootstrap,
       captureOrganizationContext,
       isCurrentOrganizationContext,
@@ -736,6 +811,7 @@ export function OrganizationContextProvider({
       organizationsStatus,
       registerOrganizationCancellation,
       retryOrganizationBootstrap,
+      recoverToPersonalWorkspace,
       selectOrganization,
       selectedOrganizationId,
       status,
