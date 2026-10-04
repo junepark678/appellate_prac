@@ -271,6 +271,12 @@ export function OrganizationContextProvider({
       ? activePendingSelection.organizationId
       : urlOrganizationId
     : null;
+  const currentResolvedContext =
+    resolvedContext?.sessionKey === sessionKey &&
+    resolvedContext.organizationId === selectedOrganizationId &&
+    resolvedContext.generation === generation
+      ? resolvedContext
+      : null;
 
   const invalidateContext = useCallback(() => {
     generationRef.current += 1;
@@ -407,7 +413,13 @@ export function OrganizationContextProvider({
     organizationList?.sessionKey === sessionKey &&
     organizationList.scopeEpoch === scopeEpoch &&
     organizationList.status === "ready"
-      ? (organizationList.value ?? [])
+      ? (organizationList.value ?? []).filter(
+          (item) =>
+            !(
+              currentResolvedContext?.status === "unavailable" &&
+              item.institutionId === selectedOrganizationId
+            ),
+        )
       : [];
   const organizationsStatus: OrganizationContextStatus = !inOrganizationScope
     ? "unavailable"
@@ -591,6 +603,8 @@ export function OrganizationContextProvider({
     let active = true;
     let watchFailed = false;
     let contextExpired = false;
+    let lastAuthorizationSnapshot: string | null = null;
+    let organizationListRefreshStarted = false;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimerSequence = 0;
     const clearExpiryTimer = () => {
@@ -600,12 +614,37 @@ export function OrganizationContextProvider({
         expiryTimer = null;
       }
     };
+    const refreshOrganizationList = () => {
+      if (organizationListRefreshStarted) return;
+      organizationListRefreshStarted = true;
+      void convex
+        .query(api.organizations.listMine, {})
+        .then((items) => {
+          if (
+            !active ||
+            identityRef.current.organizationId !== request.organizationId ||
+            identityRef.current.sessionKey !== request.sessionKey
+          ) {
+            return;
+          }
+          setOrganizationList({
+            sessionKey,
+            scopeEpoch,
+            status: "ready",
+            value: sortOrganizations(items),
+          });
+        })
+        .catch(() => {
+          // The selected context stays unavailable if the refresh also fails.
+        });
+    };
     const setContextUnavailable = () => {
       if (!contextExpired) {
         contextExpired = true;
         generationRef.current += 1;
         setGeneration(generationRef.current);
         cancelRegisteredWork(cancellationsRef.current);
+        refreshOrganizationList();
       }
       setResolvedContext({
         sessionKey,
@@ -671,6 +710,20 @@ export function OrganizationContextProvider({
           }
           watchFailed = false;
           contextExpired = false;
+          const authorizationSnapshot = JSON.stringify({
+            kind: organization.kind,
+            role: organization.role,
+            capabilities: organization.capabilities,
+          });
+          if (
+            lastAuthorizationSnapshot !== null &&
+            authorizationSnapshot !== lastAuthorizationSnapshot
+          ) {
+            generationRef.current += 1;
+            setGeneration(generationRef.current);
+            cancelRegisteredWork(cancellationsRef.current);
+          }
+          lastAuthorizationSnapshot = authorizationSnapshot;
           if (expiresAt === null) clearExpiryTimer();
           else scheduleExpiration(expiresAt);
           setResolvedContext({
@@ -688,6 +741,7 @@ export function OrganizationContextProvider({
           generationRef.current += 1;
           setGeneration(generationRef.current);
           cancelRegisteredWork(cancellationsRef.current);
+          refreshOrganizationList();
         }
         setResolvedContext({
           sessionKey,
@@ -713,12 +767,6 @@ export function OrganizationContextProvider({
     userReady,
   ]);
 
-  const currentResolvedContext =
-    resolvedContext?.sessionKey === sessionKey &&
-    resolvedContext.organizationId === selectedOrganizationId &&
-    resolvedContext.generation === generation
-      ? resolvedContext
-      : null;
   const organizationExpiryRef = useRef<{
     organizationId: string;
     sessionKey: string;
