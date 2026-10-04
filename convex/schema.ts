@@ -779,6 +779,7 @@ export default defineSchema({
     institutionId: v.optional(v.id("institutions")),
     userId: v.id("users"),
     caseSessionId: v.optional(v.id("caseSessions")),
+    scopeProvenance: v.optional(v.literal("active_membership_v1")),
     provider: v.union(v.literal("openrouter"), v.literal("courtlistener")),
     action: v.string(),
     accepted: v.boolean(),
