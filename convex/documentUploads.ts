@@ -57,7 +57,8 @@ const cleanupUploadStorageRef = makeFunctionReference<
   { storageId: Id<'_storage'> },
   null
 >('documentUploadActions:cleanupUploadStorage')
-const maxCleanupRetryDelayMs = 60 * 60 * 1000
+const cleanupRetryDelayMs = [100, 500] as const
+const maxCleanupAttempts = cleanupRetryDelayMs.length + 1
 
 function uploadExpired(): ConvexError {
   return new ConvexError(AppErrorCode.CONFLICT, 'Upload intent expired', {
@@ -586,11 +587,15 @@ export const retryUploadStorageCleanup = internalMutation({
       return null
     }
 
-    const attempts = Math.min(cleanup.attempts + 1, 31)
-    const delayMs = Math.min(
-      maxCleanupRetryDelayMs,
-      1000 * 2 ** Math.min(attempts - 1, 12),
-    )
+    const attempts = cleanup.attempts + 1
+    if (attempts >= maxCleanupAttempts) {
+      // Keep the policy bounded. If reference checks or storage deletion fail
+      // through all three attempts, leave the blob untouched and stop
+      // scheduling; recovery requires a separately authorized operation.
+      await ctx.db.delete(cleanup._id)
+      return null
+    }
+    const delayMs = cleanupRetryDelayMs[attempts - 1]!
     const nextAttemptAt = Date.now() + delayMs
     await ctx.db.patch(cleanup._id, { attempts, nextAttemptAt })
     await ctx.scheduler.runAt(nextAttemptAt, cleanupUploadStorageRef, {

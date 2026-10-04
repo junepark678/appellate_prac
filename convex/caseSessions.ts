@@ -18,14 +18,28 @@
  */
 
 // TODO: Import from './errors' once error module is integrated
-import { makeFunctionReference } from 'convex/server'
+import {
+  makeFunctionReference,
+  paginationOptsValidator,
+  paginationResultValidator,
+} from 'convex/server'
 import { v } from 'convex/values'
 
-import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
+import {
+  action,
+  internalMutation,
+  internalQuery,
+  mutation,
+  query,
+} from './_generated/server'
 import { internal } from './_generated/api'
 import type { Doc, Id } from './_generated/dataModel'
 import type { MutationCtx, QueryCtx } from './_generated/server'
-import { requireCurrentUser, requireIdentity, upsertCurrentUserDoc } from './authHelpers'
+import {
+  requireCurrentUser,
+  requireIdentity,
+  upsertCurrentUserDoc,
+} from './authHelpers'
 import { requireInstitutionRole } from './authz'
 import { appendCaseSessionEvent } from './caseSessionEventLog'
 import {
@@ -40,9 +54,17 @@ import {
   validateUploadIntentTransition,
 } from './organizationContracts'
 import {
-  fitsSessionDocumentAnalysisReadBudget,
-  maxSessionDocumentAnalysisReadBytes,
+  fitsSessionAdmission,
+  fitsSessionGrowth,
+  fitsSessionOperationFootprint,
+  fitsSessionProjection,
+  maxSessionGrowthBytes,
+  maxSessionOperationFootprintBytes,
+  maxSessionProjectionBytes,
+  serializedJsonUtf8Bytes,
+  withSessionTransactionBudget,
 } from './documentAnalysisBudget'
+import type { SessionAdmissionMetrics } from './documentAnalysisBudget'
 import {
   actorWorkProductKindValidator,
   actorWorkProductValidator,
@@ -62,9 +84,7 @@ import {
   validationIssueValidator,
 } from './validators'
 import { generateActorWorkProductWithProvider } from '../src/domain/actors/orchestration'
-import {
-  canAcceptActorWorkProduct,
-} from '../src/domain/actors/work-products'
+import { canAcceptActorWorkProduct } from '../src/domain/actors/work-products'
 import { applyAcceptedActorWorkProduct } from '../src/domain/actors/effects'
 import {
   applyToolCall,
@@ -139,6 +159,7 @@ const maxDocumentRowBytes = 960 * 1024
 const documentRowEncoder = new TextEncoder()
 // Sizing runs before inserts, so reserve room for each generated Convex ID.
 const generatedDocumentIdBudgetPlaceholder = 'x'.repeat(128)
+const generatedCreationTimeBudgetPlaceholder = Number.MAX_SAFE_INTEGER
 const seedScenarios = scenarioSeed as Scenario[]
 
 function fitsDocumentRowByteBudget(payload: unknown) {
@@ -147,41 +168,524 @@ function fitsDocumentRowByteBudget(payload: unknown) {
   const boundedBytes = new Uint8Array(maxDocumentRowBytes + 1)
   const encoded = documentRowEncoder.encodeInto(serialized, boundedBytes)
   return (
-    encoded.read === serialized.length &&
-    encoded.written <= maxDocumentRowBytes
+    encoded.read === serialized.length && encoded.written <= maxDocumentRowBytes
   )
 }
 
-function sessionDocumentAnalysisBudgetError() {
+function sessionAdmissionError(metric: string, limit: number) {
   return validationError(
-    `Case session document analyses exceed the ${maxSessionDocumentAnalysisReadBytes / (1024 * 1024)} MiB read budget.`,
+    `Case session ${metric} exceed the ${limit / (1024 * 1024)} MiB admission limit.`,
   )
 }
 
-async function assertSessionDocumentAnalysisReadBudget(
+type SessionStorageRows = {
+  scenarioIssues: Doc<'scenarioIssues'>[]
+  scenarioRecordExcerpts: Doc<'scenarioRecordExcerpts'>[]
+  scenarioDocumentAssets: Doc<'scenarioDocumentAssets'>[]
+  participants: Doc<'participants'>[]
+  documents: Doc<'documents'>[]
+  documentAnalyses: Doc<'documentAnalyses'>[]
+  filings: Doc<'filings'>[]
+  docketEntries: Doc<'docketEntries'>[]
+  deadlines: Doc<'deadlines'>[]
+  receipts: Doc<'ecfReceipts'>[]
+  counterpartyStrategies: Doc<'counterpartyStrategies'>[]
+  amicusCandidates: Doc<'amicusCandidates'>[]
+  amicusParticipations: Doc<'amicusParticipations'>[]
+  panelDeliberations: Doc<'panelDeliberations'>[]
+  panelDispositions: Doc<'panelDispositions'>[]
+  panelVotes: Doc<'panelVotes'>[]
+  assessments: Doc<'assessments'>[]
+  actorWorkProducts: Doc<'actorWorkProducts'>[]
+  simulationTurns: Doc<'simulationTurns'>[]
+  actorPackets: Doc<'actorPackets'>[]
+  actorDecisions: Doc<'actorDecisions'>[]
+}
+
+const sessionStorageTableValidator = v.union(
+  v.literal('scenarioIssues'),
+  v.literal('scenarioRecordExcerpts'),
+  v.literal('scenarioDocumentAssets'),
+  v.literal('participants'),
+  v.literal('documents'),
+  v.literal('documentAnalyses'),
+  v.literal('filings'),
+  v.literal('docketEntries'),
+  v.literal('deadlines'),
+  v.literal('ecfReceipts'),
+  v.literal('counterpartyStrategies'),
+  v.literal('amicusCandidates'),
+  v.literal('amicusParticipations'),
+  v.literal('panelDeliberations'),
+  v.literal('panelDispositions'),
+  v.literal('panelVotes'),
+  v.literal('assessments'),
+  v.literal('actorWorkProducts'),
+  v.literal('simulationTurns'),
+  v.literal('actorPackets'),
+  v.literal('actorDecisions'),
+  v.literal('documentUploadIntents'),
+)
+type SessionStorageTable =
+  | 'scenarioIssues'
+  | 'scenarioRecordExcerpts'
+  | 'scenarioDocumentAssets'
+  | 'participants'
+  | 'documents'
+  | 'documentAnalyses'
+  | 'filings'
+  | 'docketEntries'
+  | 'deadlines'
+  | 'ecfReceipts'
+  | 'counterpartyStrategies'
+  | 'amicusCandidates'
+  | 'amicusParticipations'
+  | 'panelDeliberations'
+  | 'panelDispositions'
+  | 'panelVotes'
+  | 'assessments'
+  | 'actorWorkProducts'
+  | 'simulationTurns'
+  | 'actorPackets'
+  | 'actorDecisions'
+  | 'documentUploadIntents'
+type SessionStorageTableRows = {
+  [Table in SessionStorageTable]: Doc<Table>[]
+}
+
+type SessionAssemblySnapshot = {
+  caseSession: Doc<'caseSessions'>
+  rows: SessionStorageRows
+  metrics: SessionAdmissionMetrics
+}
+
+const assembledSnapshots = new WeakMap<CaseSession, SessionAssemblySnapshot>()
+
+function metricsForSession(session: CaseSession): SessionAdmissionMetrics {
+  const snapshot = assembledSnapshots.get(session)
+  if (!snapshot) throw new Error('Session admission metrics are unavailable')
+  return snapshot.metrics
+}
+
+function assertSessionAdmission(previous: CaseSession, resulting: CaseSession) {
+  if (
+    !fitsSessionAdmission(
+      metricsForSession(previous),
+      metricsForSession(resulting),
+    )
+  ) {
+    throw sessionAdmissionError(
+      'resulting row material or full CaseSession projection',
+      maxSessionGrowthBytes,
+    )
+  }
+}
+
+function nextSessionAdmissionRevision(caseSession: Doc<'caseSessions'>) {
+  const revision = caseSession.sessionAdmissionRevision ?? 0
+  if (!Number.isSafeInteger(revision) || revision >= Number.MAX_SAFE_INTEGER) {
+    throw validationError('Case session admission revision is invalid.')
+  }
+  return revision + 1
+}
+
+async function bumpSessionAdmissionRevision(
+  ctx: WriteCtx,
+  caseSession: Doc<'caseSessions'>,
+) {
+  await ctx.db.patch(caseSession._id, {
+    sessionAdmissionRevision: nextSessionAdmissionRevision(caseSession),
+  })
+}
+
+function serializedRowsBytes(rows: unknown[]) {
+  let bytes = 0
+  for (const row of rows) {
+    const rowBytes = serializedJsonUtf8Bytes(row)
+    if (rowBytes === undefined) continue
+    bytes += rowBytes
+  }
+  return bytes
+}
+
+export const readSessionStorageRowsPage = internalQuery({
+  args: {
+    table: sessionStorageTableValidator,
+    caseSessionId: v.optional(v.id('caseSessions')),
+    scenarioId: v.optional(v.id('scenarios')),
+    paginationOpts: paginationOptsValidator,
+  },
+  returns: paginationResultValidator(v.any()),
+  handler: async (ctx, args) => {
+    switch (args.table) {
+      case 'scenarioIssues':
+        if (!args.scenarioId)
+          throw validationError('Scenario row scope is required.')
+        return ctx.db
+          .query('scenarioIssues')
+          .withIndex('by_scenario', (index) =>
+            index.eq('scenarioId', args.scenarioId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'scenarioRecordExcerpts':
+        if (!args.scenarioId)
+          throw validationError('Scenario row scope is required.')
+        return ctx.db
+          .query('scenarioRecordExcerpts')
+          .withIndex('by_scenario', (index) =>
+            index.eq('scenarioId', args.scenarioId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'scenarioDocumentAssets':
+        if (!args.scenarioId)
+          throw validationError('Scenario row scope is required.')
+        return ctx.db
+          .query('scenarioDocumentAssets')
+          .withIndex('by_scenario', (index) =>
+            index.eq('scenarioId', args.scenarioId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'documentUploadIntents':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('documentUploadIntents')
+          .withIndex('by_case_state', (index) =>
+            index
+              .eq('caseSessionId', args.caseSessionId!)
+              .eq('state', 'consumed'),
+          )
+          .paginate(args.paginationOpts)
+      case 'participants':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('participants')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'documents':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('documents')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'documentAnalyses':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('documentAnalyses')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'filings':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('filings')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'docketEntries':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('docketEntries')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'deadlines':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('deadlines')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'ecfReceipts':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('ecfReceipts')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'counterpartyStrategies':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('counterpartyStrategies')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'amicusCandidates':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('amicusCandidates')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'amicusParticipations':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('amicusParticipations')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'panelDeliberations':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('panelDeliberations')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'panelDispositions':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('panelDispositions')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'panelVotes':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('panelVotes')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'assessments':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('assessments')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'actorWorkProducts':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('actorWorkProducts')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'simulationTurns':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('simulationTurns')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'actorPackets':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('actorPackets')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+      case 'actorDecisions':
+        if (!args.caseSessionId)
+          throw validationError('Case session row scope is required.')
+        return ctx.db
+          .query('actorDecisions')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', args.caseSessionId!),
+          )
+          .paginate(args.paginationOpts)
+    }
+  },
+})
+
+function sessionRootMaterialBytes(caseSession: Doc<'caseSessions'>) {
+  // Event sequencing and the OCC admission token are transaction metadata;
+  // their reads and rewrites are counted by SessionTransactionBudget below.
+  const {
+    nextEventSequence: _nextEventSequence,
+    sessionAdmissionRevision: _sessionAdmissionRevision,
+    ...materialFields
+  } = caseSession
+  return serializedJsonUtf8Bytes(materialFields) ?? 0
+}
+
+function sessionRowMaterialBytes(
+  caseSession: Doc<'caseSessions'>,
+  rows: SessionStorageRows,
+) {
+  return (
+    sessionRootMaterialBytes(caseSession) +
+    serializedRowsBytes([
+      ...rows.participants,
+      ...rows.documents,
+      ...rows.documentAnalyses,
+      ...rows.filings,
+      ...rows.docketEntries,
+      ...rows.deadlines,
+      ...rows.receipts,
+      ...rows.counterpartyStrategies,
+      ...rows.amicusCandidates,
+      ...rows.amicusParticipations,
+      ...rows.panelDeliberations,
+      ...rows.panelDispositions,
+      ...rows.panelVotes,
+      ...rows.assessments,
+      ...rows.actorWorkProducts,
+      ...rows.simulationTurns,
+      ...rows.actorPackets,
+      ...rows.actorDecisions,
+    ])
+  )
+}
+
+function sessionProjectionBytes(session: CaseSession) {
+  const bytes = serializedJsonUtf8Bytes(session)
+  if (bytes === undefined)
+    throw sessionAdmissionError(
+      'projection serialization',
+      maxSessionProjectionBytes,
+    )
+  return bytes
+}
+
+async function collectRowsIncrementally<Table extends SessionStorageTable>(
+  rawCtx: ReadCtx,
+  table: Table,
+  scope: { caseSessionId?: Id<'caseSessions'>; scenarioId?: Id<'scenarios'> },
+): Promise<SessionStorageTableRows[Table]> {
+  const { ctx, budget } = withSessionTransactionBudget(rawCtx)
+  const rows: SessionStorageTableRows[Table] = []
+  let cursor: string | null = null
+  while (true) {
+    const result = await budget.readPage(
+      () =>
+        ctx.runQuery(internal.caseSessions.readSessionStorageRowsPage, {
+          table,
+          ...scope,
+          paginationOpts: { numItems: 1, cursor },
+        }),
+      1,
+    )
+    rows.push(...(result.page as SessionStorageTableRows[Table]))
+    if (result.isDone) return rows
+    cursor = result.continueCursor
+  }
+}
+
+async function loadSessionStorageRows(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
-) {
-  let readBytes = 0
-  const addRow = (row: unknown) => {
-    const serialized = JSON.stringify(row)
-    if (serialized === undefined) return
-    readBytes += documentRowEncoder.encode(serialized).byteLength
-    if (!fitsSessionDocumentAnalysisReadBudget(readBytes)) {
-      throw sessionDocumentAnalysisBudgetError()
-    }
-  }
-
-  const documents = await ctx.db
-    .query('documents')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
-  const analyses = await ctx.db
-    .query('documentAnalyses')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
-  for (const document of documents) addRow(document)
-  for (const analysis of analyses) addRow(analysis)
+  scenarioId: Id<'scenarios'>,
+): Promise<SessionStorageRows> {
+  const rows = {} as SessionStorageRows
+  rows.scenarioIssues = await collectRowsIncrementally(ctx, 'scenarioIssues', {
+    scenarioId,
+  })
+  rows.scenarioRecordExcerpts = await collectRowsIncrementally(
+    ctx,
+    'scenarioRecordExcerpts',
+    { scenarioId },
+  )
+  rows.scenarioDocumentAssets = await collectRowsIncrementally(
+    ctx,
+    'scenarioDocumentAssets',
+    { scenarioId },
+  )
+  rows.participants = await collectRowsIncrementally(ctx, 'participants', {
+    caseSessionId,
+  })
+  rows.documents = await collectRowsIncrementally(ctx, 'documents', {
+    caseSessionId,
+  })
+  rows.documentAnalyses = await collectRowsIncrementally(
+    ctx,
+    'documentAnalyses',
+    { caseSessionId },
+  )
+  rows.filings = await collectRowsIncrementally(ctx, 'filings', {
+    caseSessionId,
+  })
+  rows.docketEntries = await collectRowsIncrementally(ctx, 'docketEntries', {
+    caseSessionId,
+  })
+  rows.deadlines = await collectRowsIncrementally(ctx, 'deadlines', {
+    caseSessionId,
+  })
+  rows.receipts = await collectRowsIncrementally(ctx, 'ecfReceipts', {
+    caseSessionId,
+  })
+  rows.counterpartyStrategies = await collectRowsIncrementally(
+    ctx,
+    'counterpartyStrategies',
+    { caseSessionId },
+  )
+  rows.amicusCandidates = await collectRowsIncrementally(
+    ctx,
+    'amicusCandidates',
+    { caseSessionId },
+  )
+  rows.amicusParticipations = await collectRowsIncrementally(
+    ctx,
+    'amicusParticipations',
+    { caseSessionId },
+  )
+  rows.panelDeliberations = await collectRowsIncrementally(
+    ctx,
+    'panelDeliberations',
+    { caseSessionId },
+  )
+  rows.panelDispositions = await collectRowsIncrementally(
+    ctx,
+    'panelDispositions',
+    { caseSessionId },
+  )
+  rows.panelVotes = await collectRowsIncrementally(ctx, 'panelVotes', {
+    caseSessionId,
+  })
+  rows.assessments = await collectRowsIncrementally(ctx, 'assessments', {
+    caseSessionId,
+  })
+  rows.actorWorkProducts = await collectRowsIncrementally(
+    ctx,
+    'actorWorkProducts',
+    { caseSessionId },
+  )
+  rows.simulationTurns = await collectRowsIncrementally(
+    ctx,
+    'simulationTurns',
+    { caseSessionId },
+  )
+  rows.actorPackets = await collectRowsIncrementally(ctx, 'actorPackets', {
+    caseSessionId,
+  })
+  rows.actorDecisions = await collectRowsIncrementally(ctx, 'actorDecisions', {
+    caseSessionId,
+  })
+  return rows
 }
 
 function rejectClientStorageClaims(documents: UploadedDocument[]) {
@@ -196,7 +700,8 @@ function withAiTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
     promise,
     new Promise<never>((_, reject) =>
       setTimeout(
-        () => reject(new Error(`${label} timed out after ${AI_CALL_TIMEOUT_MS}ms`)),
+        () =>
+          reject(new Error(`${label} timed out after ${AI_CALL_TIMEOUT_MS}ms`)),
         AI_CALL_TIMEOUT_MS,
       ),
     ),
@@ -219,7 +724,9 @@ async function expireStaleAiReservations(
         ctx.db.patch(run._id, {
           costCents: 0,
           errorClass: 'reservation_expired',
-          issues: run.issues.includes('AI reservation expired before completion.')
+          issues: run.issues.includes(
+            'AI reservation expired before completion.',
+          )
             ? run.issues
             : [...run.issues, 'AI reservation expired before completion.'],
         }),
@@ -232,7 +739,10 @@ function requireActiveAiReservation(run: Doc<'aiRuns'>) {
     run.errorClass !== 'in_flight' ||
     isStaleAiReservation(run, new Date().toISOString())
   ) {
-    throw new ConvexError(AppErrorCode.CONFLICT, 'AI run reservation is no longer active')
+    throw new ConvexError(
+      AppErrorCode.CONFLICT,
+      'AI run reservation is no longer active',
+    )
   }
 }
 
@@ -263,11 +773,16 @@ function parseJsonField<T>(json: string, label: string): T {
   }
 }
 
-function parseOptionalJsonField<T>(json: string | undefined, label: string): T | undefined {
+function parseOptionalJsonField<T>(
+  json: string | undefined,
+  label: string,
+): T | undefined {
   return json ? parseJsonField<T>(json, label) : undefined
 }
 
-function scenarioDocumentAssetFromDoc(doc: Doc<'scenarioDocumentAssets'>): ScenarioDocumentAsset {
+function scenarioDocumentAssetFromDoc(
+  doc: Doc<'scenarioDocumentAssets'>,
+): ScenarioDocumentAsset {
   return {
     id: doc.assetKey,
     label: doc.label,
@@ -284,7 +799,10 @@ function scenarioDocumentAssetFromDoc(doc: Doc<'scenarioDocumentAssets'>): Scena
 }
 
 function bundledDocumentAssetsForScenario(scenarioKey: string) {
-  return seedScenarios.find((scenario) => scenario.id === scenarioKey)?.documentAssets ?? []
+  return (
+    seedScenarios.find((scenario) => scenario.id === scenarioKey)
+      ?.documentAssets ?? []
+  )
 }
 
 function mergeDocumentAssets(
@@ -304,7 +822,9 @@ function scenarioFromDoc(
   recordExcerpts: ScenarioRecordExcerpt[] = [],
   assets: ScenarioDocumentAsset[] = [],
 ): Scenario {
-  const sourceCaseUrl = doc.sourceCaseUrl ? { sourceCaseUrl: doc.sourceCaseUrl } : {}
+  const sourceCaseUrl = doc.sourceCaseUrl
+    ? { sourceCaseUrl: doc.sourceCaseUrl }
+    : {}
   const training = parseOptionalJsonField<Scenario['training']>(
     doc.trainingJson,
     `scenario ${doc._id} training`,
@@ -317,8 +837,11 @@ function scenarioFromDoc(
     doc.documentAssetsJson,
     `scenario ${doc._id} document assets`,
   )?.map((asset) => {
-    const { publicUrl: _publicUrl, fileUrl: _fileUrl, ...assetWithoutUrls } =
-      asset as ScenarioDocumentAsset & { publicUrl?: string }
+    const {
+      publicUrl: _publicUrl,
+      fileUrl: _fileUrl,
+      ...assetWithoutUrls
+    } = asset as ScenarioDocumentAsset & { publicUrl?: string }
     return assetWithoutUrls
   })
   const mergedDocumentAssets = mergeDocumentAssets(
@@ -327,13 +850,19 @@ function scenarioFromDoc(
   )
   return {
     id: doc.scenarioKey,
-    visibility: doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template'),
+    visibility:
+      doc.visibility ?? (doc.ownerUserId ? 'private' : 'public_template'),
     ...(doc.ownerUserId ? { ownerUserId: doc.ownerUserId } : {}),
     scenarioFamilyKey: doc.scenarioFamilyKey ?? doc.scenarioKey,
     revision: doc.revision ?? 1,
-    revisionStatus: doc.revisionStatus ?? (doc.published ? 'published' : 'draft'),
-    ...(doc.createdFromScenarioId ? { createdFromScenarioId: doc.createdFromScenarioId } : {}),
-    ...(doc.supersededByScenarioId ? { supersededByScenarioId: doc.supersededByScenarioId } : {}),
+    revisionStatus:
+      doc.revisionStatus ?? (doc.published ? 'published' : 'draft'),
+    ...(doc.createdFromScenarioId
+      ? { createdFromScenarioId: doc.createdFromScenarioId }
+      : {}),
+    ...(doc.supersededByScenarioId
+      ? { supersededByScenarioId: doc.supersededByScenarioId }
+      : {}),
     title: doc.title,
     source: doc.source,
     courtPackId: doc.courtPackId,
@@ -360,23 +889,28 @@ async function ensureScenarioDoc(
 ) {
   const existing = await ctx.db
     .query('scenarios')
-    .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+    .withIndex('by_scenario_key', (index) =>
+      index.eq('scenarioKey', scenarioKey),
+    )
     .unique()
 
   if (existing) {
-    const visibility = existing.visibility ?? (existing.ownerUserId ? 'private' : 'public_template')
+    const visibility =
+      existing.visibility ??
+      (existing.ownerUserId ? 'private' : 'public_template')
     if (
       visibility === 'private' &&
-      (existing.ownerUserId !== userId || existing.institutionId !== institutionId)
+      (existing.ownerUserId !== userId ||
+        existing.institutionId !== institutionId)
     ) {
       throw notFound('Scenario')
     }
     if (
       visibility === 'public_template' &&
-      (
-        (existing.revisionStatus ?? (existing.published ? 'published' : 'draft')) !== 'published' ||
-        (existing.institutionId !== undefined && existing.institutionId !== institutionId)
-      )
+      ((existing.revisionStatus ??
+        (existing.published ? 'published' : 'draft')) !== 'published' ||
+        (existing.institutionId !== undefined &&
+          existing.institutionId !== institutionId))
     ) {
       throw notFound('Scenario')
     }
@@ -406,8 +940,12 @@ async function ensureScenarioDoc(
     proceduralPosture: bundled.proceduralPosture,
     issuesPresented: bundled.issuesPresented,
     meritsRecord: bundled.meritsRecord,
-    ...(bundled.training ? { trainingJson: JSON.stringify(bundled.training) } : {}),
-    ...(bundled.trialDocket ? { trialDocketJson: JSON.stringify(bundled.trialDocket) } : {}),
+    ...(bundled.training
+      ? { trainingJson: JSON.stringify(bundled.training) }
+      : {}),
+    ...(bundled.trialDocket
+      ? { trialDocketJson: JSON.stringify(bundled.trialDocket) }
+      : {}),
     ...(bundled.sourceCaseUrl ? { sourceCaseUrl: bundled.sourceCaseUrl } : {}),
     published: true,
   })
@@ -449,7 +987,9 @@ async function requireSessionScenarioLink(
 ) {
   const scenario = await ctx.db.get(session.scenarioId)
   if (!scenario) throw notFound('Case session')
-  const visibility = scenario.visibility ?? (scenario.ownerUserId ? 'private' : 'public_template')
+  const visibility =
+    scenario.visibility ??
+    (scenario.ownerUserId ? 'private' : 'public_template')
   if (visibility === 'private') {
     if (
       !scenario.ownerUserId ||
@@ -462,18 +1002,22 @@ async function requireSessionScenarioLink(
       const links = await ctx.db
         .query('assignmentSessions')
         .withIndex('by_case', (index) => index.eq('caseSessionId', session._id))
-        .collect()
-      const authorizedAssignment = await Promise.all(links.map(async (link) => {
-        if (link.userId !== userId) return false
-        const assignment = await ctx.db.get(link.assignmentId)
-        const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null
-        return Boolean(
-          assignment &&
-          cohort &&
-          assignment.scenarioId === scenario._id &&
-          cohort.institutionId === session.institutionId,
-        )
-      }))
+        .take(2)
+      const authorizedAssignment = await Promise.all(
+        links.map(async (link) => {
+          if (link.userId !== userId) return false
+          const assignment = await ctx.db.get(link.assignmentId)
+          const cohort = assignment
+            ? await ctx.db.get(assignment.cohortId)
+            : null
+          return Boolean(
+            assignment &&
+            cohort &&
+            assignment.scenarioId === scenario._id &&
+            cohort.institutionId === session.institutionId,
+          )
+        }),
+      )
       if (!authorizedAssignment.some(Boolean)) throw notFound('Case session')
       const institution = await ctx.db.get(session.institutionId)
       if (
@@ -487,31 +1031,49 @@ async function requireSessionScenarioLink(
       const ownerMemberships = await ctx.db
         .query('institutionMemberships')
         .withIndex('by_institution_user', (index) =>
-          index.eq('institutionId', session.institutionId!).eq('userId', scenario.ownerUserId!),
+          index
+            .eq('institutionId', session.institutionId!)
+            .eq('userId', scenario.ownerUserId!),
         )
-        .collect()
+        .take(2)
       if (ownerMemberships.length > 1) {
-        throw new ConvexError(AppErrorCode.CONFLICT, 'Organization membership is ambiguous')
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Organization membership is ambiguous',
+        )
       }
-      if (!isOrganizationMembershipActive(institution, ownerMemberships[0] ?? null, Date.now())) {
+      if (
+        !isOrganizationMembershipActive(
+          institution,
+          ownerMemberships[0] ?? null,
+          Date.now(),
+        )
+      ) {
         throw notFound('Case session')
       }
     }
     return scenario
   }
   if (
-    (scenario.revisionStatus ?? (scenario.published ? 'published' : 'draft')) !== 'published'
+    (scenario.revisionStatus ??
+      (scenario.published ? 'published' : 'draft')) !== 'published'
   ) {
     throw notFound('Case session')
   }
-  if (scenario.institutionId && scenario.institutionId !== session.institutionId) {
+  if (
+    scenario.institutionId &&
+    scenario.institutionId !== session.institutionId
+  ) {
     throw notFound('Case session')
   }
   return scenario
 }
 
 function sessionLinkConflict(): never {
-  throw new ConvexError(AppErrorCode.CONFLICT, 'Session linkage is inconsistent')
+  throw new ConvexError(
+    AppErrorCode.CONFLICT,
+    'Session linkage is inconsistent',
+  )
 }
 
 async function requireSessionAssignmentLinks(
@@ -521,7 +1083,7 @@ async function requireSessionAssignmentLinks(
   const links = await ctx.db
     .query('assignmentSessions')
     .withIndex('by_case', (index) => index.eq('caseSessionId', session._id))
-    .collect()
+    .take(2)
   if (links.length > 1) sessionLinkConflict()
   for (const link of links) {
     if (link.caseSessionId !== session._id || link.userId !== session.userId) {
@@ -542,7 +1104,7 @@ async function requireSessionAssignmentLinks(
       .withIndex('by_assignment_user', (index) =>
         index.eq('assignmentId', assignment._id).eq('userId', link.userId),
       )
-      .collect()
+      .take(2)
     if (
       assignmentUserLinks.length !== 1 ||
       assignmentUserLinks[0]?._id !== link._id
@@ -559,11 +1121,7 @@ export async function requireOwnedSession(
 ) {
   const { user } = await requireCurrentUser(ctx)
   const session = await ctx.db.get(caseSessionId)
-  if (
-    !session ||
-    session.userId !== user._id ||
-    !session.institutionId
-  ) {
+  if (!session || session.userId !== user._id || !session.institutionId) {
     throw notFound('Case session')
   }
   const { institution, membership } = await requireInstitutionRole(
@@ -586,11 +1144,14 @@ async function requireAuthorizedSessionDoc(
   return session
 }
 
-async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseSessions'>) {
+async function requireWritableCaseSession(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
   const assignmentSessions = await ctx.db
     .query('assignmentSessions')
     .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
+    .take(2)
   const isLocked = assignmentSessions.some(
     (assignmentSession) =>
       assignmentSession.submittedAt &&
@@ -604,7 +1165,10 @@ async function requireWritableCaseSession(ctx: ReadCtx, caseSessionId: Id<'caseS
 
 function analysisFromDoc(doc: Doc<'documentAnalyses'>): DocumentAnalysis {
   if (doc.analysisJson) {
-    return parseJsonField<DocumentAnalysis>(doc.analysisJson, `document analysis ${doc._id}`)
+    return parseJsonField<DocumentAnalysis>(
+      doc.analysisJson,
+      `document analysis ${doc._id}`,
+    )
   }
 
   return {
@@ -634,7 +1198,9 @@ function documentFromDoc(
     ...(doc.sha256 ? { sha256: doc.sha256 } : {}),
     ...(typeof doc.pageCount === 'number' ? { pageCount: doc.pageCount } : {}),
     ...(doc.extractedText ? { extractedText: doc.extractedText } : {}),
-    ...(doc.textExtractionStatus ? { textExtractionStatus: doc.textExtractionStatus } : {}),
+    ...(doc.textExtractionStatus
+      ? { textExtractionStatus: doc.textExtractionStatus }
+      : {}),
     ...(typeof doc.wordCount === 'number' ? { wordCount: doc.wordCount } : {}),
     ...(doc.analysisId ? { analysisId: doc.analysisId } : {}),
     ...(parsedAnalysis ? { analysis: parsedAnalysis } : {}),
@@ -642,24 +1208,9 @@ function documentFromDoc(
   }
 }
 
-async function requireDocumentAnalysisBinding(
-  ctx: ReadCtx,
-  caseSessionId: Id<'caseSessions'>,
-  document: Doc<'documents'>,
-) {
-  if (!document.analysisId) return null
-  const analysis = await ctx.db.get(document.analysisId)
-  if (
-    !analysis ||
-    analysis.caseSessionId !== caseSessionId ||
-    analysis.documentId !== document._id
-  ) {
-    throw notFound('Document analysis')
-  }
-  return analysis
-}
-
-function actorWorkProductFromDoc(product: Doc<'actorWorkProducts'>): ActorWorkProduct {
+function actorWorkProductFromDoc(
+  product: Doc<'actorWorkProducts'>,
+): ActorWorkProduct {
   const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
     product.workProductJson,
     `actor work product ${product._id}`,
@@ -687,7 +1238,8 @@ function actorWorkProductFromDoc(product: Doc<'actorWorkProducts'>): ActorWorkPr
     ruleRefs: product.ruleRefs ?? workProduct.ruleRefs,
     recordRefs: product.recordRefs ?? workProduct.recordRefs ?? [],
     confidence: product.confidence ?? workProduct.confidence ?? 0.75,
-    roleAuthority: product.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
+    roleAuthority:
+      product.roleAuthority ?? workProduct.roleAuthority ?? 'simulator_actor',
     sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds,
     sourceFilingIds: product.sourceFilingIds,
     createdAt: product.createdAt,
@@ -701,14 +1253,19 @@ function ecfReceiptFromDoc(receipt: Doc<'ecfReceipts'>): EcfReceiptRecord {
   )
   const nextExpectedDeadline = parseOptionalJsonField<
     NonNullable<EcfReceiptRecord['nextExpectedDeadline']>
-  >(receipt.nextExpectedDeadlineJson, `ECF receipt ${receipt._id} next deadline`)
+  >(
+    receipt.nextExpectedDeadlineJson,
+    `ECF receipt ${receipt._id} next deadline`,
+  )
 
   return {
     id: receipt._id,
     caseSessionId: receipt.caseSessionId,
     filingId: receipt.filingId,
     receiptNumber: receipt.receiptNumber,
-    ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
+    ...(receipt.filedTimestamp
+      ? { filedTimestamp: receipt.filedTimestamp }
+      : {}),
     ...(receipt.filer ? { filer: receipt.filer } : {}),
     ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
     ...(documentList ? { documentList } : {}),
@@ -725,7 +1282,9 @@ function ecfReceiptFromDoc(receipt: Doc<'ecfReceipts'>): EcfReceiptRecord {
   }
 }
 
-function simulationTurnFromDoc(turn: Doc<'simulationTurns'>): SimulationTurnRecord {
+function simulationTurnFromDoc(
+  turn: Doc<'simulationTurns'>,
+): SimulationTurnRecord {
   const payload = parseJsonField<SimulationTurnPayload>(
     turn.payloadJson,
     `simulation turn ${turn._id} payload`,
@@ -741,11 +1300,14 @@ function simulationTurnFromDoc(turn: Doc<'simulationTurns'>): SimulationTurnReco
     startedAt: payload.startedAt ?? turn.createdAt,
     ...(payload.completedAt ? { completedAt: payload.completedAt } : {}),
     effects: payload.effects ?? [],
-    inputSnapshotHash: turn.inputSnapshotHash ?? payload.inputSnapshotHash ?? 'legacy',
-    outputSnapshotHash: turn.outputSnapshotHash ?? payload.outputSnapshotHash ?? 'legacy',
-    validatorVersion: turn.validatorVersion ?? payload.validatorVersion ?? 'legacy',
+    inputSnapshotHash:
+      turn.inputSnapshotHash ?? payload.inputSnapshotHash ?? 'legacy',
+    outputSnapshotHash:
+      turn.outputSnapshotHash ?? payload.outputSnapshotHash ?? 'legacy',
+    validatorVersion:
+      turn.validatorVersion ?? payload.validatorVersion ?? 'legacy',
     retryCount: turn.retryCount ?? payload.retryCount ?? 0,
-    ...(turn.stoppedReason ?? payload.stoppedReason
+    ...((turn.stoppedReason ?? payload.stoppedReason)
       ? { stoppedReason: turn.stoppedReason ?? payload.stoppedReason }
       : {}),
     ...(turn.rawActorPacketStorageId
@@ -779,10 +1341,15 @@ async function requireActorWorkProductSources(
       } else {
         const analyses = await ctx.db
           .query('documentAnalyses')
-          .withIndex('by_document', (index) => index.eq('documentId', document._id))
-          .collect()
+          .withIndex('by_document', (index) =>
+            index.eq('documentId', document._id),
+          )
+          .take(2)
         if (analyses.length > 1) {
-          throw new ConvexError(AppErrorCode.CONFLICT, 'Document analysis linkage is ambiguous')
+          throw new ConvexError(
+            AppErrorCode.CONFLICT,
+            'Document analysis linkage is ambiguous',
+          )
         }
         analysis = analyses[0] ?? null
       }
@@ -814,10 +1381,9 @@ async function requireActorWorkProductSources(
         throw notFound('Document analysis')
       }
     } else {
-      const documents = await ctx.db
-        .query('documents')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect()
+      const documents = await collectRowsIncrementally(ctx, 'documents', {
+        caseSessionId,
+      })
       if (documents.some((document) => document.analysisId === analysis._id)) {
         throw notFound('Document analysis')
       }
@@ -829,12 +1395,78 @@ async function requireActorWorkProductSources(
   for (const rawId of sourceFilingIds) {
     const filingId = ctx.db.normalizeId('filings', rawId)
     const filing = filingId ? await ctx.db.get(filingId) : null
-    if (!filing || filing.caseSessionId !== caseSessionId) throw notFound('Filing')
+    if (!filing || filing.caseSessionId !== caseSessionId)
+      throw notFound('Filing')
     canonicalFilingIds.add(filing._id)
   }
   return {
     sourceDocumentAnalysisIds: [...canonicalAnalysisIds],
     sourceFilingIds: [...canonicalFilingIds],
+  }
+}
+
+function validateActorWorkProductSourcesInRows(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+  sourceDocumentAnalysisIds: string[],
+  sourceFilingIds: string[],
+  documents: Map<Id<'documents'>, Doc<'documents'>>,
+  analyses: Map<Id<'documentAnalyses'>, Doc<'documentAnalyses'>>,
+  filingIds: Set<Id<'filings'>>,
+) {
+  for (const rawId of sourceDocumentAnalysisIds) {
+    if (rawId.endsWith(':analysis')) {
+      const documentId = ctx.db.normalizeId(
+        'documents',
+        rawId.slice(0, -':analysis'.length),
+      )
+      const document = documentId ? documents.get(documentId) : null
+      const analysis = document?.analysisId
+        ? analyses.get(document.analysisId)
+        : document
+          ? [...analyses.values()].find(
+              (candidate) => candidate.documentId === document._id,
+            )
+          : null
+      if (
+        !document ||
+        !analysis ||
+        document.caseSessionId !== caseSessionId ||
+        analysis.caseSessionId !== caseSessionId ||
+        analysis.documentId !== document._id ||
+        document.analysisId !== analysis._id
+      ) {
+        throw notFound('Document analysis')
+      }
+      continue
+    }
+
+    const analysisId = ctx.db.normalizeId('documentAnalyses', rawId)
+    const analysis = analysisId ? analyses.get(analysisId) : null
+    if (!analysis || analysis.caseSessionId !== caseSessionId) {
+      throw notFound('Document analysis')
+    }
+    if (analysis.documentId) {
+      const document = documents.get(analysis.documentId)
+      if (
+        !document ||
+        document.caseSessionId !== caseSessionId ||
+        document.analysisId !== analysis._id
+      ) {
+        throw notFound('Document analysis')
+      }
+    } else if (
+      [...documents.values()].some(
+        (document) => document.analysisId === analysis._id,
+      )
+    ) {
+      throw notFound('Document analysis')
+    }
+  }
+
+  for (const rawId of sourceFilingIds) {
+    const filingId = ctx.db.normalizeId('filings', rawId)
+    if (!filingId || !filingIds.has(filingId)) throw notFound('Filing')
   }
 }
 
@@ -860,7 +1492,8 @@ function remapActorSourceId(
     }
     return sourceId
   }
-  if (sourceType === 'docket_entry') return maps.docketEntryIds.get(sourceId) ?? sourceId
+  if (sourceType === 'docket_entry')
+    return maps.docketEntryIds.get(sourceId) ?? sourceId
   return sourceId
 }
 
@@ -868,14 +1501,21 @@ function remapWorkProductJson(
   json: string,
   maps: Parameters<typeof remapActorSourceId>[2],
 ) {
-  const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(json, 'actor work product')
+  const workProduct = parseJsonField<ActorWorkProduct['workProduct']>(
+    json,
+    'actor work product',
+  )
   return JSON.stringify({
     ...workProduct,
     citations: workProduct.citations.map((citation) => ({
       ...citation,
       ...(citation.sourceId
         ? {
-            sourceId: remapActorSourceId(citation.sourceType, citation.sourceId, maps) as string,
+            sourceId: remapActorSourceId(
+              citation.sourceType,
+              citation.sourceId,
+              maps,
+            ) as string,
           }
         : {}),
     })),
@@ -893,13 +1533,20 @@ function remapCitationsJson(
   json: string,
   maps: Parameters<typeof remapActorSourceId>[2],
 ) {
-  const citations = parseJsonField<ActorWorkProduct['citations']>(json, 'actor work product citations')
+  const citations = parseJsonField<ActorWorkProduct['citations']>(
+    json,
+    'actor work product citations',
+  )
   return JSON.stringify(
     citations.map((citation) => ({
       ...citation,
       ...(citation.sourceId
         ? {
-            sourceId: remapActorSourceId(citation.sourceType, citation.sourceId, maps) as string,
+            sourceId: remapActorSourceId(
+              citation.sourceType,
+              citation.sourceId,
+              maps,
+            ) as string,
           }
         : {}),
     })),
@@ -910,6 +1557,7 @@ async function assembleCaseSession(
   ctx: ReadCtx,
   caseSession: Doc<'caseSessions'>,
 ): Promise<CaseSession> {
+  ctx = withSessionTransactionBudget(ctx).ctx
   if (!caseSession.institutionId) throw notFound('Case session')
   await requireSessionScenarioLink(ctx, caseSession, caseSession.userId)
   const scenarioDoc = await ctx.db.get(caseSession.scenarioId)
@@ -917,13 +1565,19 @@ async function assembleCaseSession(
     throw notFound('Case session')
   }
 
-  const [
+  const rows = await loadSessionStorageRows(
+    ctx,
+    caseSession._id,
+    scenarioDoc._id,
+  )
+  const {
     scenarioIssues,
     scenarioRecordExcerpts,
     scenarioDocumentAssets,
     participants,
-    filings,
+    documents,
     documentAnalyses,
+    filings,
     docketEntries,
     deadlines,
     receipts,
@@ -934,78 +1588,30 @@ async function assembleCaseSession(
     assessments,
     actorWorkProducts,
     simulationTurns,
-  ] = await Promise.all([
-    ctx.db
-      .query('scenarioIssues')
-      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
-      .collect(),
-    ctx.db
-      .query('scenarioRecordExcerpts')
-      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
-      .collect(),
-    ctx.db
-      .query('scenarioDocumentAssets')
-      .withIndex('by_scenario', (index) => index.eq('scenarioId', scenarioDoc._id))
-      .collect(),
-    ctx.db
-      .query('participants')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('filings')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('documentAnalyses')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('docketEntries')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('deadlines')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('ecfReceipts')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('counterpartyStrategies')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('amicusParticipations')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('panelDeliberations')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('panelDispositions')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('assessments')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('actorWorkProducts')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-    ctx.db
-      .query('simulationTurns')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSession._id))
-      .collect(),
-  ])
+  } = rows
   const filingIds = new Set(filings.map((filing) => filing._id))
   const docketEntryIds = new Set(docketEntries.map((entry) => entry._id))
+  const documentsById = new Map(
+    documents.map((document) => [document._id, document]),
+  )
+  const analysesById = new Map(
+    documentAnalyses.map((analysis) => [analysis._id, analysis]),
+  )
+  const analysisByDocumentId = new Map(
+    documentAnalyses
+      .filter(
+        (
+          analysis,
+        ): analysis is Doc<'documentAnalyses'> & {
+          documentId: Id<'documents'>
+        } => Boolean(analysis.documentId),
+      )
+      .map((analysis) => [analysis.documentId, analysis]),
+  )
 
   for (const analysis of documentAnalyses) {
     if (!analysis.documentId) continue
-    const document = await ctx.db.get(analysis.documentId)
+    const document = documentsById.get(analysis.documentId)
     if (
       !document ||
       document.caseSessionId !== caseSession._id ||
@@ -1015,32 +1621,50 @@ async function assembleCaseSession(
     }
   }
   for (const filing of filings) {
-    const documents = await Promise.all(filing.documentIds.map((id) => ctx.db.get(id)))
-    if (documents.some((document) => !document || document.caseSessionId !== caseSession._id)) {
+    const filingDocuments = filing.documentIds.map((id) =>
+      documentsById.get(id),
+    )
+    if (
+      filingDocuments.some(
+        (document) => !document || document.caseSessionId !== caseSession._id,
+      )
+    ) {
       throw notFound('Filing')
     }
-    for (const document of documents) {
-      if (document) await requireDocumentAnalysisBinding(ctx, caseSession._id, document)
-    }
-    for (const analysisId of filing.documentAnalysisIds ?? []) {
-      const analysis = await ctx.db.get(analysisId)
+    for (const document of filingDocuments) {
+      if (!document?.analysisId) continue
+      const analysis = analysesById.get(document.analysisId)
       if (
         !analysis ||
         analysis.caseSessionId !== caseSession._id ||
-        (analysis.documentId && !filing.documentIds.includes(analysis.documentId))
+        analysis.documentId !== document._id
+      ) {
+        throw notFound('Document analysis')
+      }
+    }
+    for (const analysisId of filing.documentAnalysisIds ?? []) {
+      const analysis = analysesById.get(analysisId)
+      if (
+        !analysis ||
+        analysis.caseSessionId !== caseSession._id ||
+        (analysis.documentId &&
+          !filing.documentIds.includes(analysis.documentId))
       ) {
         throw notFound('Filing')
       }
     }
   }
   for (const receipt of receipts) {
-    const filing = await ctx.db.get(receipt.filingId)
+    const filing = filings.find(
+      (candidate) => candidate._id === receipt.filingId,
+    )
     if (!filing || filing.caseSessionId !== caseSession._id) {
       throw notFound('ECF receipt')
     }
   }
   for (const entry of docketEntries) {
-    if (entry.filingId && !filingIds.has(entry.filingId)) throw notFound('Docket entry')
+    if (entry.filingId && !filingIds.has(entry.filingId))
+      throw notFound('Docket entry')
   }
   for (const deadline of deadlines) {
     if (deadline.sourceEntryId && !docketEntryIds.has(deadline.sourceEntryId)) {
@@ -1048,70 +1672,84 @@ async function assembleCaseSession(
     }
   }
   for (const product of actorWorkProducts) {
-    await requireActorWorkProductSources(
+    validateActorWorkProductSourcesInRows(
       ctx,
       caseSession._id,
       product.sourceDocumentAnalysisIds,
       product.sourceFilingIds,
+      documentsById,
+      analysesById,
+      filingIds,
     )
   }
   if (simulationTurns.some((turn) => turn.caseSessionId !== caseSession._id)) {
     throw notFound('Simulation turn')
   }
-  const analysisByDocumentId = new Map(
-    documentAnalyses
-      .filter((analysis): analysis is Doc<'documentAnalyses'> & { documentId: Id<'documents'> } =>
-        Boolean(analysis.documentId),
-      )
-      .map((analysis) => [analysis.documentId, analysis]),
-  )
-
-  const filingRecords = await Promise.all(
-    filings
-      .slice()
-      .sort((a, b) => a.filedAt.localeCompare(b.filedAt))
-      .map(async (filing): Promise<FilingRecord> => {
-        const documents = await Promise.all(filing.documentIds.map((id) => ctx.db.get(id)))
-        const persistedDocuments = documents.filter(
-          (document): document is Doc<'documents'> => document !== null,
-        )
-        return {
-          id: filing._id,
-          eventId: filing.eventId,
-          participantRole: filing.participantRole,
-          title: filing.title,
-          documents: persistedDocuments.map((document) =>
-            documentFromDoc(document, analysisByDocumentId.get(document._id)),
-          ),
-          certificateOfService: filing.certificateOfService,
-          certificateOfCompliance: filing.certificateOfCompliance,
-          sealed: filing.sealed,
-          notes: filing.notes,
-          filedAt: filing.filedAt,
-          outcome: filing.outcome,
-          validationIssues: filing.validationIssues,
-          ...(filing.submissionJson ? { submissionJson: filing.submissionJson } : {}),
-          ...(filing.documentAnalysisIds
-            ? { documentAnalysisIds: filing.documentAnalysisIds }
-            : {}),
-        }
+  const filingRecords: FilingRecord[] = []
+  let filingProjectionBytes = 2
+  for (const filing of filings
+    .slice()
+    .sort((a, b) => a.filedAt.localeCompare(b.filedAt))) {
+    const filingRecord: FilingRecord = {
+      id: filing._id,
+      eventId: filing.eventId,
+      participantRole: filing.participantRole,
+      title: filing.title,
+      documents: filing.documentIds.map((id) => {
+        const document = documentsById.get(id)
+        if (!document) throw notFound('Filing')
+        return documentFromDoc(document, analysisByDocumentId.get(document._id))
       }),
-  )
+      certificateOfService: filing.certificateOfService,
+      certificateOfCompliance: filing.certificateOfCompliance,
+      sealed: filing.sealed,
+      notes: filing.notes,
+      filedAt: filing.filedAt,
+      outcome: filing.outcome,
+      validationIssues: filing.validationIssues,
+      ...(filing.submissionJson
+        ? { submissionJson: filing.submissionJson }
+        : {}),
+      ...(filing.documentAnalysisIds
+        ? { documentAnalysisIds: filing.documentAnalysisIds }
+        : {}),
+    }
+    const recordBytes = serializedJsonUtf8Bytes(filingRecord) ?? 0
+    filingProjectionBytes += recordBytes + (filingRecords.length ? 1 : 0)
+    if (!fitsSessionProjection(filingProjectionBytes)) {
+      throw sessionAdmissionError(
+        'hydrated filing projection',
+        maxSessionProjectionBytes,
+      )
+    }
+    filingRecords.push(filingRecord)
+  }
 
   const assessment = assessments[0]
-  const latestStrategy = counterpartyStrategies.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-  const latestAmicus = amicusParticipations.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-  const latestPanel = panelDeliberations.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
-  const latestDisposition = panelDispositions.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+  const latestStrategy = counterpartyStrategies.sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  )[0]
+  const latestAmicus = amicusParticipations.sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  )[0]
+  const latestPanel = panelDeliberations.sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  )[0]
+  const latestDisposition = panelDispositions.sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  )[0]
   const panelAssignment =
     latestPanel?.assignment && latestPanel.assignment.judgeActorIds.length >= 3
       ? {
           ...latestPanel.assignment,
-          judgeActorIds: latestPanel.assignment.judgeActorIds.slice(0, 3) as PanelAssignment['judgeActorIds'],
+          judgeActorIds: latestPanel.assignment.judgeActorIds.slice(
+            0,
+            3,
+          ) as PanelAssignment['judgeActorIds'],
         }
       : undefined
 
-  return {
+  const assembled: CaseSession = {
     id: caseSession._id,
     institutionId: caseSession.institutionId,
     scenario: scenarioFromDoc(
@@ -1137,13 +1775,20 @@ async function assembleCaseSession(
     ),
     courtPackId: caseSession.courtPackId,
     status: caseSession.status,
-    ...(caseSession.procedureState ? { procedureState: caseSession.procedureState } : {}),
+    ...(caseSession.procedureState
+      ? { procedureState: caseSession.procedureState }
+      : {}),
     autonomyMode: caseSession.autonomyMode ?? 'supervised',
     turnPolicy: caseSession.turnPolicy ?? defaultTurnPolicy,
-    ...(caseSession.sourceProfileId ? { sourceProfileId: caseSession.sourceProfileId } : {}),
+    ...(caseSession.sourceProfileId
+      ? { sourceProfileId: caseSession.sourceProfileId }
+      : {}),
     qualityState: caseSession.qualityState ?? 'source_review_pending',
     ...(caseSession.legalTrainingDisclaimerAcceptedAt
-      ? { legalTrainingDisclaimerAcceptedAt: caseSession.legalTrainingDisclaimerAcceptedAt }
+      ? {
+          legalTrainingDisclaimerAcceptedAt:
+            caseSession.legalTrainingDisclaimerAcceptedAt,
+        }
       : {}),
     simulatedDate: caseSession.simulatedDate,
     participants: participants.map((participant) => ({
@@ -1181,12 +1826,20 @@ async function assembleCaseSession(
       .slice()
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map(ecfReceiptFromDoc),
-    ...(latestStrategy ? { counterpartyStrategy: latestStrategy.strategy } : {}),
-    ...(latestAmicus ? { amicusParticipation: latestAmicus.participation } : {}),
+    ...(latestStrategy
+      ? { counterpartyStrategy: latestStrategy.strategy }
+      : {}),
+    ...(latestAmicus
+      ? { amicusParticipation: latestAmicus.participation }
+      : {}),
     ...(panelAssignment ? { panelAssignment } : {}),
     ...(latestPanel?.benchMemo ? { benchMemo: latestPanel.benchMemo } : {}),
-    ...(latestPanel?.deliberation ? { panelDeliberation: latestPanel.deliberation } : {}),
-    ...(latestDisposition ? { panelDisposition: latestDisposition.disposition } : {}),
+    ...(latestPanel?.deliberation
+      ? { panelDeliberation: latestPanel.deliberation }
+      : {}),
+    ...(latestDisposition
+      ? { panelDisposition: latestDisposition.disposition }
+      : {}),
     ...(assessment
       ? {
           assessment: {
@@ -1207,11 +1860,23 @@ async function assembleCaseSession(
       .sort((a, b) => a.turnNumber - b.turnNumber)
       .map(simulationTurnFromDoc),
   }
+  const metrics = {
+    rowMaterialBytes: sessionRowMaterialBytes(caseSession, rows),
+    projectionBytes: sessionProjectionBytes(assembled),
+  }
+  if (!fitsSessionProjection(metrics.projectionBytes)) {
+    throw sessionAdmissionError(
+      'full CaseSession projection',
+      maxSessionProjectionBytes,
+    )
+  }
+  assembledSnapshots.set(assembled, { caseSession, rows, metrics })
+  return assembled
 }
 
 async function deleteExistingSessionState(
   ctx: WriteCtx,
-  caseSessionId: Id<'caseSessions'>,
+  rows: SessionStorageRows,
   preservedDocuments: Map<
     string,
     {
@@ -1220,7 +1885,7 @@ async function deleteExistingSessionState(
     }
   >,
 ) {
-  const [
+  const {
     participants,
     documents,
     documentAnalyses,
@@ -1238,77 +1903,7 @@ async function deleteExistingSessionState(
     simulationTurns,
     actorPackets,
     actorDecisions,
-  ] =
-    await Promise.all([
-      ctx.db
-        .query('participants')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('documents')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('documentAnalyses')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('filings')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('docketEntries')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('deadlines')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('ecfReceipts')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('counterpartyStrategies')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('amicusCandidates')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('amicusParticipations')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('panelDeliberations')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('panelDispositions')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('panelVotes')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('assessments')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('simulationTurns')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('actorPackets')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-      ctx.db
-        .query('actorDecisions')
-        .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-        .collect(),
-    ])
+  } = rows
 
   const preservedAnalysisIds = new Set(
     [...preservedDocuments.values()].map((preserved) => preserved.analysis._id),
@@ -1317,7 +1912,9 @@ async function deleteExistingSessionState(
     [
       ...participants,
       ...documents.filter((document) => !preservedDocuments.has(document._id)),
-      ...documentAnalyses.filter((analysis) => !preservedAnalysisIds.has(analysis._id)),
+      ...documentAnalyses.filter(
+        (analysis) => !preservedAnalysisIds.has(analysis._id),
+      ),
       ...filings,
       ...docketEntries,
       ...deadlines,
@@ -1339,13 +1936,19 @@ async function deleteExistingSessionState(
 async function loadReceiptBackedDocuments(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
+  rows?: SessionStorageRows,
 ) {
-  const receipts = await ctx.db
-    .query('documentUploadIntents')
-    .withIndex('by_case_state', (index) =>
-      index.eq('caseSessionId', caseSessionId).eq('state', 'consumed'),
-    )
-    .collect()
+  const receipts = await collectRowsIncrementally(
+    ctx,
+    'documentUploadIntents',
+    { caseSessionId },
+  )
+  const documentsById = new Map(
+    rows?.documents.map((doc) => [doc._id, doc]) ?? [],
+  )
+  const analysesById = new Map(
+    rows?.documentAnalyses.map((doc) => [doc._id, doc]) ?? [],
+  )
   const preserved = new Map<
     string,
     { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
@@ -1363,8 +1966,12 @@ async function loadReceiptBackedDocuments(
         'Consumed upload linkage is incomplete',
       )
     }
-    const document = await ctx.db.get(receipt.documentId)
-    const analysis = await ctx.db.get(receipt.analysisId)
+    const document =
+      documentsById.get(receipt.documentId) ??
+      (await ctx.db.get(receipt.documentId))
+    const analysis =
+      analysesById.get(receipt.analysisId) ??
+      (await ctx.db.get(receipt.analysisId))
     if (
       !document ||
       !analysis ||
@@ -1388,10 +1995,12 @@ async function bindReceiptBackedFilingSubmission(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
   submission: FilingSubmission,
+  rows?: SessionStorageRows,
 ): Promise<FilingSubmission> {
   const receiptBackedDocuments = await loadReceiptBackedDocuments(
     ctx,
     caseSessionId,
+    rows,
   )
 
   return {
@@ -1428,36 +2037,73 @@ function bindReceiptBackedDocument(
 }
 
 async function replaceSessionState(
-  ctx: WriteCtx,
+  rawCtx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
   session: CaseSession,
+  previousSession?: CaseSession,
 ) {
+  const { ctx, budget } = withSessionTransactionBudget(rawCtx)
+  const previousSnapshot = previousSession
+    ? assembledSnapshots.get(previousSession)
+    : undefined
+  const previousMetrics = previousSnapshot?.metrics ?? {
+    rowMaterialBytes: 0,
+    projectionBytes: 0,
+  }
+  const prospectiveProjectionBytes = sessionProjectionBytes(session)
+  if (!fitsSessionProjection(prospectiveProjectionBytes)) {
+    throw sessionAdmissionError(
+      'full CaseSession projection',
+      maxSessionProjectionBytes,
+    )
+  }
+  if (
+    !fitsSessionGrowth(
+      previousMetrics.projectionBytes,
+      prospectiveProjectionBytes,
+    )
+  ) {
+    throw sessionAdmissionError(
+      'full CaseSession projection',
+      maxSessionGrowthBytes,
+    )
+  }
+  const caseSessionDoc =
+    previousSnapshot?.caseSession ?? (await ctx.db.get(caseSessionId))
+  if (!caseSessionDoc) throw notFound('Case session')
+  const rows =
+    previousSnapshot?.rows ??
+    (await loadSessionStorageRows(
+      ctx,
+      caseSessionId,
+      caseSessionDoc.scenarioId,
+    ))
   const receiptBackedDocuments = await loadReceiptBackedDocuments(
     ctx,
     caseSessionId,
+    rows,
   )
-  const actorWorkProducts = await ctx.db
-    .query('actorWorkProducts')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
-    .collect()
+  const actorWorkProducts = rows.actorWorkProducts
   await ctx.db.patch(caseSessionId, {
+    sessionAdmissionRevision: nextSessionAdmissionRevision(caseSessionDoc),
     status: session.status,
     procedureState: session.procedureState ?? inferProcedureState(session),
     simulatedDate: session.simulatedDate,
     courtPackId: session.courtPackId,
     autonomyMode: session.autonomyMode,
     turnPolicy: session.turnPolicy,
-    ...(session.sourceProfileId ? { sourceProfileId: session.sourceProfileId } : {}),
+    ...(session.sourceProfileId
+      ? { sourceProfileId: session.sourceProfileId }
+      : {}),
     qualityState: session.qualityState,
     ...(session.legalTrainingDisclaimerAcceptedAt
-      ? { legalTrainingDisclaimerAcceptedAt: session.legalTrainingDisclaimerAcceptedAt }
+      ? {
+          legalTrainingDisclaimerAcceptedAt:
+            session.legalTrainingDisclaimerAcceptedAt,
+        }
       : {}),
   })
-  await deleteExistingSessionState(
-    ctx,
-    caseSessionId,
-    receiptBackedDocuments,
-  )
+  await deleteExistingSessionState(ctx, rows, receiptBackedDocuments)
 
   await Promise.all(
     session.participants.map((participant) =>
@@ -1501,10 +2147,7 @@ async function replaceSessionState(
           String(receiptBacked.analysis._id),
           receiptBacked.analysis._id,
         )
-        analysisIdMap.set(
-          `${document.id}:analysis`,
-          receiptBacked.analysis._id,
-        )
+        analysisIdMap.set(`${document.id}:analysis`, receiptBacked.analysis._id)
       } else {
         documentId = await ctx.db.insert('documents', {
           caseSessionId,
@@ -1539,19 +2182,26 @@ async function replaceSessionState(
           caseSessionId,
           documentId,
           analyzerId: analysis.analyzerId,
-          ...(typeof analysis.pageCount === 'number' ? { pageCount: analysis.pageCount } : {}),
+          ...(typeof analysis.pageCount === 'number'
+            ? { pageCount: analysis.pageCount }
+            : {}),
           fileSizeBytes: analysis.fileSizeBytes,
           mimeType: analysis.mimeType,
           searchableText: analysis.searchableText,
           certificateOfServiceDetected: analysis.certificateOfServiceDetected,
-          certificateOfComplianceDetected: analysis.certificateOfComplianceDetected,
+          certificateOfComplianceDetected:
+            analysis.certificateOfComplianceDetected,
           sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
           // analysisJson is canonical. Keep this compatibility field small;
           // analysisFromDoc reads the complete warnings from analysisJson.
           warnings: [],
           analysisJson: JSON.stringify(analysis),
-          ...(analysis.normalizedText ? { extractedTextHash: hashText(analysis.normalizedText) } : {}),
-          ...(typeof analysis.wordCount === 'number' ? { wordCount: analysis.wordCount } : {}),
+          ...(analysis.normalizedText
+            ? { extractedTextHash: hashText(analysis.normalizedText) }
+            : {}),
+          ...(typeof analysis.wordCount === 'number'
+            ? { wordCount: analysis.wordCount }
+            : {}),
           ...(analysis.legalCitations
             ? { citationCount: analysis.legalCitations.length }
             : {}),
@@ -1564,7 +2214,8 @@ async function replaceSessionState(
           createdAt: filing.filedAt,
         })
         documentAnalysisIds.push(analysisId)
-        if (document.analysisId) analysisIdMap.set(document.analysisId, analysisId)
+        if (document.analysisId)
+          analysisIdMap.set(document.analysisId, analysisId)
         analysisIdMap.set(`${document.id}:analysis`, analysisId)
         await ctx.db.patch(documentId, { analysisId })
       }
@@ -1586,7 +2237,9 @@ async function replaceSessionState(
       filedAt: filing.filedAt,
       outcome: filing.outcome,
       validationIssues: filing.validationIssues,
-      ...(filing.submissionJson ? { submissionJson: filing.submissionJson } : {}),
+      ...(filing.submissionJson
+        ? { submissionJson: filing.submissionJson }
+        : {}),
       ...(documentAnalysisIds.length ? { documentAnalysisIds } : {}),
     })
     filingIdMap.set(filing.id, filingId)
@@ -1594,7 +2247,9 @@ async function replaceSessionState(
 
   const docketEntryIdMap = new Map<string, Id<'docketEntries'>>()
   for (const entry of session.docketEntries) {
-    const filingId = entry.filingId ? filingIdMap.get(entry.filingId) : undefined
+    const filingId = entry.filingId
+      ? filingIdMap.get(entry.filingId)
+      : undefined
     const docketEntryId = await ctx.db.insert('docketEntries', {
       caseSessionId,
       entryNumber: entry.entryNumber,
@@ -1617,15 +2272,29 @@ async function replaceSessionState(
   await Promise.all(
     actorWorkProducts.map((product) =>
       ctx.db.patch(product._id, {
-        sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds.map((sourceId) =>
-          remapActorSourceId('document_analysis', sourceId, sourceMaps) as string,
+        sourceDocumentAnalysisIds: product.sourceDocumentAnalysisIds.map(
+          (sourceId) =>
+            remapActorSourceId(
+              'document_analysis',
+              sourceId,
+              sourceMaps,
+            ) as string,
         ),
-        sourceFilingIds: product.sourceFilingIds.map((sourceId) =>
-          remapActorSourceId('filing', sourceId, sourceMaps) as string,
+        sourceFilingIds: product.sourceFilingIds.map(
+          (sourceId) =>
+            remapActorSourceId('filing', sourceId, sourceMaps) as string,
         ),
-        workProductJson: remapWorkProductJson(product.workProductJson, sourceMaps),
+        workProductJson: remapWorkProductJson(
+          product.workProductJson,
+          sourceMaps,
+        ),
         ...(product.citationsJson
-          ? { citationsJson: remapCitationsJson(product.citationsJson, sourceMaps) }
+          ? {
+              citationsJson: remapCitationsJson(
+                product.citationsJson,
+                sourceMaps,
+              ),
+            }
           : {}),
         ...(product.recordRefs
           ? {
@@ -1658,7 +2327,9 @@ async function replaceSessionState(
       caseSessionId,
       filingId,
       receiptNumber: receipt.receiptNumber,
-      ...(receipt.filedTimestamp ? { filedTimestamp: receipt.filedTimestamp } : {}),
+      ...(receipt.filedTimestamp
+        ? { filedTimestamp: receipt.filedTimestamp }
+        : {}),
       ...(receipt.filer ? { filer: receipt.filer } : {}),
       ...(receipt.eventId ? { eventId: receipt.eventId } : {}),
       ...(receipt.documentList
@@ -1670,7 +2341,11 @@ async function replaceSessionState(
       ...(receipt.warnings ? { warnings: receipt.warnings } : {}),
       ...(receipt.deficiencies ? { deficiencies: receipt.deficiencies } : {}),
       ...(receipt.nextExpectedDeadline
-        ? { nextExpectedDeadlineJson: JSON.stringify(receipt.nextExpectedDeadline) }
+        ? {
+            nextExpectedDeadlineJson: JSON.stringify(
+              receipt.nextExpectedDeadline,
+            ),
+          }
         : {}),
       createdAt: receipt.createdAt,
     })
@@ -1680,7 +2355,8 @@ async function replaceSessionState(
     await ctx.db.insert('counterpartyStrategies', {
       caseSessionId,
       strategy: session.counterpartyStrategy,
-      createdAt: session.counterpartyStrategy.updatedAt ?? session.simulatedDate,
+      createdAt:
+        session.counterpartyStrategy.updatedAt ?? session.simulatedDate,
     })
   }
 
@@ -1701,12 +2377,20 @@ async function replaceSessionState(
     )
   }
 
-  if (session.panelAssignment || session.benchMemo || session.panelDeliberation) {
+  if (
+    session.panelAssignment ||
+    session.benchMemo ||
+    session.panelDeliberation
+  ) {
     await ctx.db.insert('panelDeliberations', {
       caseSessionId,
-      ...(session.panelAssignment ? { assignment: session.panelAssignment } : {}),
+      ...(session.panelAssignment
+        ? { assignment: session.panelAssignment }
+        : {}),
       ...(session.benchMemo ? { benchMemo: session.benchMemo } : {}),
-      ...(session.panelDeliberation ? { deliberation: session.panelDeliberation } : {}),
+      ...(session.panelDeliberation
+        ? { deliberation: session.panelDeliberation }
+        : {}),
       createdAt: session.simulatedDate,
     })
   }
@@ -1765,10 +2449,16 @@ async function replaceSessionState(
       retryCount: turn.retryCount,
       ...(turn.stoppedReason ? { stoppedReason: turn.stoppedReason } : {}),
       ...(turn.rawActorPacketStorageId
-        ? { rawActorPacketStorageId: turn.rawActorPacketStorageId as Id<'_storage'> }
+        ? {
+            rawActorPacketStorageId:
+              turn.rawActorPacketStorageId as Id<'_storage'>,
+          }
         : {}),
       ...(turn.rawProviderResultStorageId
-        ? { rawProviderResultStorageId: turn.rawProviderResultStorageId as Id<'_storage'> }
+        ? {
+            rawProviderResultStorageId:
+              turn.rawProviderResultStorageId as Id<'_storage'>,
+          }
         : {}),
       createdAt: turn.startedAt,
     })
@@ -1779,8 +2469,23 @@ async function replaceSessionState(
     // ERROR_CODE: NOT_FOUND
     throw new Error('Case session was removed while saving state')
   }
-  await assertSessionDocumentAnalysisReadBudget(ctx, caseSessionId)
-  return assembleCaseSession(ctx, updated)
+  const saved = await assembleCaseSession(ctx, updated)
+  if (previousSession) {
+    assertSessionAdmission(previousSession, saved)
+  } else if (!fitsSessionAdmission(previousMetrics, metricsForSession(saved))) {
+    throw sessionAdmissionError(
+      'resulting row material or full CaseSession projection',
+      maxSessionGrowthBytes,
+    )
+  }
+  const operationFootprint = budget.snapshot()
+  if (!fitsSessionOperationFootprint(operationFootprint)) {
+    throw sessionAdmissionError(
+      'transaction read/write footprint',
+      maxSessionOperationFootprintBytes,
+    )
+  }
+  return saved
 }
 
 async function persistTurnAudit(
@@ -1788,7 +2493,10 @@ async function persistTurnAudit(
   caseSessionId: Id<'caseSessions'>,
   turnNumber: number,
   packet: unknown,
-  decision: { actorId: string; validationIssues: Array<{ message: string }> } & Record<string, unknown>,
+  decision: {
+    actorId: string
+    validationIssues: Array<{ message: string }>
+  } & Record<string, unknown>,
 ) {
   const turnDoc = await ctx.db
     .query('simulationTurns')
@@ -1847,7 +2555,10 @@ function withRejectedFilingAudit(
 function sourceUrlForCourtListenerResult(result: CourtListenerSearchResult) {
   if (result.absolute_url) {
     try {
-      return new URL(result.absolute_url, 'https://www.courtlistener.com').toString()
+      return new URL(
+        result.absolute_url,
+        'https://www.courtlistener.com',
+      ).toString()
     } catch {
       return 'https://www.courtlistener.com/'
     }
@@ -1859,7 +2570,10 @@ function sourceUrlForCourtListenerResult(result: CourtListenerSearchResult) {
 }
 
 function stripHtml(value: string) {
-  return value.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
+  return value
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function createImportedTrialDocket(
@@ -1868,9 +2582,12 @@ function createImportedTrialDocket(
   sourceUrl: string,
 ): TrialDocket {
   return {
-    caption: result.caseNameFull ?? result.caseName ?? session.scenario.shortCaption,
+    caption:
+      result.caseNameFull ?? result.caseName ?? session.scenario.shortCaption,
     court: result.court ?? session.scenario.lowerTribunal,
-    docketNumber: result.docketNumber ?? `CourtListener docket ${result.docket_id ?? result.id}`,
+    docketNumber:
+      result.docketNumber ??
+      `CourtListener docket ${result.docket_id ?? result.id}`,
     sourceUrl,
     entries: [
       {
@@ -1923,7 +2640,9 @@ async function withAuthorizedTrialDocketFileUrls(
             const storageId = document.storageId as Id<'_storage'> | undefined
             if (!storageId) return documentWithoutUrl
             const fileUrl = await ctx.storage.getUrl(storageId)
-            return fileUrl ? { ...documentWithoutUrl, fileUrl } : documentWithoutUrl
+            return fileUrl
+              ? { ...documentWithoutUrl, fileUrl }
+              : documentWithoutUrl
           }),
         ),
       })),
@@ -1961,36 +2680,48 @@ export const create = mutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const user = args.institutionId
       ? (await requireCurrentUser(ctx)).user
       : await upsertCurrentUserDoc(ctx)
     if (args.institutionId) {
       await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     }
-    const institutionId = args.institutionId ?? (
-      await ctx.runMutation(internal.organizations.ensurePersonalForTrustedUser, {
-        userId: user._id,
-      })
-    ).institutionId
+    const institutionId =
+      args.institutionId ??
+      (
+        await ctx.runMutation(
+          internal.organizations.ensurePersonalForTrustedUser,
+          {
+            userId: user._id,
+          },
+        )
+      ).institutionId
     if (!args.institutionId) {
       await requireInstitutionRole(ctx, institutionId, ['learner'])
     }
     const scenarioKey = args.scenarioId ?? defaultScenarioKey
-    const scenario = await ensureScenarioDoc(ctx, scenarioKey, user._id, institutionId)
-    const [scenarioIssues, scenarioRecordExcerpts, scenarioDocumentAssets] = await Promise.all([
-      ctx.db
-        .query('scenarioIssues')
-        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
-        .collect(),
-      ctx.db
-        .query('scenarioRecordExcerpts')
-        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
-        .collect(),
-      ctx.db
-        .query('scenarioDocumentAssets')
-        .withIndex('by_scenario', (index) => index.eq('scenarioId', scenario._id))
-        .collect(),
-    ])
+    const scenario = await ensureScenarioDoc(
+      ctx,
+      scenarioKey,
+      user._id,
+      institutionId,
+    )
+    const scenarioIssues = await collectRowsIncrementally(
+      ctx,
+      'scenarioIssues',
+      { scenarioId: scenario._id },
+    )
+    const scenarioRecordExcerpts = await collectRowsIncrementally(
+      ctx,
+      'scenarioRecordExcerpts',
+      { scenarioId: scenario._id },
+    )
+    const scenarioDocumentAssets = await collectRowsIncrementally(
+      ctx,
+      'scenarioDocumentAssets',
+      { scenarioId: scenario._id },
+    )
     const scenarioModel = scenarioFromDoc(
       scenario,
       scenarioIssues.map((issue) => ({
@@ -2012,7 +2743,9 @@ export const create = mutation({
       })),
       scenarioDocumentAssets.map(scenarioDocumentAssetFromDoc),
     )
-    const bundledScenario = seedScenarios.some((candidate) => candidate.id === scenario.scenarioKey)
+    const bundledScenario = seedScenarios.some(
+      (candidate) => candidate.id === scenario.scenarioKey,
+    )
     const initialSession = bundledScenario
       ? createInitialSession(scenario.scenarioKey)
       : createInitialSessionForScenario(scenarioModel)
@@ -2038,10 +2771,16 @@ export const create = mutation({
       ...initialSession,
       procedureState: initialProcedureState,
     })
-    await appendCaseSessionEvent(ctx, caseSessionId, 'session_created', {
-      scenarioKey,
-      procedureState: initialProcedureState,
-    }, user._id)
+    await appendCaseSessionEvent(
+      ctx,
+      caseSessionId,
+      'session_created',
+      {
+        scenarioKey,
+        procedureState: initialProcedureState,
+      },
+      user._id,
+    )
     return session
   },
 })
@@ -2060,7 +2799,10 @@ export const getForCurrentUser = query({
       }
       return assembleCaseSession(ctx, session)
     }
-    const { sessions } = await readableSessionsForCurrentUser(ctx, args.institutionId)
+    const { sessions } = await readableSessionsForCurrentUser(
+      ctx,
+      args.institutionId,
+    )
     const latest = sessions.sort((a, b) => b._creationTime - a._creationTime)[0]
     return latest ? assembleCaseSession(ctx, latest) : null
   },
@@ -2071,11 +2813,14 @@ async function readableSessionsForCurrentUser(
   institutionId?: Id<'institutions'>,
 ) {
   const { user } = await requireCurrentUser(ctx)
-  if (institutionId) await requireInstitutionRole(ctx, institutionId, ['learner'])
+  if (institutionId)
+    await requireInstitutionRole(ctx, institutionId, ['learner'])
   const candidates = institutionId
     ? await ctx.db
         .query('caseSessions')
-        .withIndex('by_institution', (index) => index.eq('institutionId', institutionId))
+        .withIndex('by_institution', (index) =>
+          index.eq('institutionId', institutionId),
+        )
         .collect()
     : await ctx.db
         .query('caseSessions')
@@ -2109,7 +2854,11 @@ export const getWritableForCurrentUser = internalQuery({
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const caseSession = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSession = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     return assembleCaseSession(ctx, caseSession)
   },
@@ -2122,8 +2871,13 @@ export const acceptLegalTrainingDisclaimer = mutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
-    const { user, session: caseSessionDoc } = await requireOwnedSession(ctx, args.caseSessionId)
+    ctx = withSessionTransactionBudget(ctx).ctx
+    const { user, session: caseSessionDoc } = await requireOwnedSession(
+      ctx,
+      args.caseSessionId,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
+    const previous = await assembleCaseSession(ctx, caseSessionDoc)
     const acceptedAt = new Date().toISOString()
     const existing = await ctx.db
       .query('userDisclaimers')
@@ -2139,6 +2893,7 @@ export const acceptLegalTrainingDisclaimer = mutation({
         trainingOnly: true,
       })
     }
+    await bumpSessionAdmissionRevision(ctx, caseSessionDoc)
     await ctx.db.patch(caseSessionDoc._id, {
       legalTrainingDisclaimerAcceptedAt: existing?.acceptedAt ?? acceptedAt,
     })
@@ -2154,7 +2909,9 @@ export const acceptLegalTrainingDisclaimer = mutation({
       // ERROR_CODE: NOT_FOUND
       throw new Error('Case session not found')
     }
-    return assembleCaseSession(ctx, updated)
+    const saved = await assembleCaseSession(ctx, updated)
+    assertSessionAdmission(previous, saved)
+    return saved
   },
 })
 
@@ -2164,7 +2921,10 @@ export const listForCurrentUser = query({
   },
   returns: v.array(caseSessionSummaryValidator),
   handler: async (ctx, args) => {
-    const { sessions } = await readableSessionsForCurrentUser(ctx, args.institutionId)
+    const { sessions } = await readableSessionsForCurrentUser(
+      ctx,
+      args.institutionId,
+    )
     const scenarioIds = new Set(sessions.map((session) => session.scenarioId))
     const scenarios = new Map<Id<'scenarios'>, Doc<'scenarios'>>()
     await Promise.all(
@@ -2200,14 +2960,20 @@ export const submitFiling = mutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     rejectClientStorageClaims(args.draft.documents)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const receiptBackedDocuments = await loadReceiptBackedDocuments(
       ctx,
       caseSessionDoc._id,
+      assembledSnapshots.get(session)?.rows,
     )
     const draft = {
       ...args.draft,
@@ -2218,7 +2984,12 @@ export const submitFiling = mutation({
     const nextSession = transitionAfterFiling(
       withRejectedFilingAudit(session, draft, fileDraft(session, draft)),
     )
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      nextSession,
+      session,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -2241,8 +3012,13 @@ export const preflightFiling = query({
   },
   returns: preflightCheckResultValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     rejectClientStorageClaims([
       args.submission.mainDocument,
       ...args.submission.attachments.map((attachment) => attachment.document),
@@ -2252,6 +3028,7 @@ export const preflightFiling = query({
       ctx,
       caseSessionDoc._id,
       args.submission as FilingSubmission,
+      assembledSnapshots.get(session)?.rows,
     )
     return preflightEcfFiling(session, submission)
   },
@@ -2264,7 +3041,11 @@ export const getAvailableEcfEvents = query({
   returns: v.array(ecfEventAvailabilityValidator),
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     return getAvailableEcfEventDefinitions(session)
   },
@@ -2295,6 +3076,7 @@ export const persistDocumentAnalysis = mutation({
     analysisId: v.string(),
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     if (!args.intentId)
       throw validationError(
         'Use an authenticated document upload intent.',
@@ -2509,6 +3291,57 @@ export const persistDocumentAnalysis = mutation({
         'Document analysis exceeds the simulator per-record storage limit.',
       )
     }
+
+    const previousSession = await assembleCaseSession(ctx, session)
+    const previousSnapshot = assembledSnapshots.get(previousSession)
+    if (!previousSnapshot) {
+      throw new Error('Session admission metrics are unavailable')
+    }
+    const nextRevision = nextSessionAdmissionRevision(
+      previousSnapshot.caseSession,
+    )
+    const previousRootBytes = sessionRootMaterialBytes(
+      previousSnapshot.caseSession,
+    )
+    const resultingRootBytes = sessionRootMaterialBytes({
+      ...previousSnapshot.caseSession,
+      sessionAdmissionRevision: nextRevision,
+    })
+    const documentRowBytes = serializedJsonUtf8Bytes({
+      ...documentRowPayload,
+      _id: generatedDocumentIdBudgetPlaceholder,
+      _creationTime: generatedCreationTimeBudgetPlaceholder,
+    })
+    const analysisRowBytes = serializedJsonUtf8Bytes({
+      ...analysisRowPayload,
+      _id: generatedDocumentIdBudgetPlaceholder,
+      _creationTime: generatedCreationTimeBudgetPlaceholder,
+    })
+    if (
+      previousRootBytes === undefined ||
+      resultingRootBytes === undefined ||
+      documentRowBytes === undefined ||
+      analysisRowBytes === undefined
+    ) {
+      throw validationError('Document analysis cannot be serialized safely.')
+    }
+    const resultingMetrics: SessionAdmissionMetrics = {
+      rowMaterialBytes:
+        previousSnapshot.metrics.rowMaterialBytes -
+        previousRootBytes +
+        resultingRootBytes +
+        documentRowBytes +
+        analysisRowBytes,
+      // An uploaded but unfiled document is not part of the full CaseSession
+      // projection yet. Filing admission will count its hydrated copy.
+      projectionBytes: previousSnapshot.metrics.projectionBytes,
+    }
+    if (!fitsSessionAdmission(previousSnapshot.metrics, resultingMetrics)) {
+      throw sessionAdmissionError(
+        'resulting row material or full CaseSession projection',
+        maxSessionGrowthBytes,
+      )
+    }
     const storageId = receipt.storageId
     const metadata = await ctx.db.system.get('_storage', storageId)
     if (!metadata) throw notFound('Uploaded PDF storage')
@@ -2541,6 +3374,8 @@ export const persistDocumentAnalysis = mutation({
       )
     }
     const verified = { storageId, sha256: receipt.sha256 }
+
+    await bumpSessionAdmissionRevision(ctx, previousSnapshot.caseSession)
 
     const documentId = await ctx.db.insert('documents', {
       caseSessionId: args.caseSessionId,
@@ -2597,10 +3432,6 @@ export const persistDocumentAnalysis = mutation({
       createdAt,
     })
     await ctx.db.patch(documentId, { analysisId })
-
-    // Throwing here rolls the tentative rows back atomically and keeps the
-    // receipt stored for a corrected retry.
-    await assertSessionDocumentAnalysisReadBudget(ctx, args.caseSessionId)
 
     const receiptFields = {
       institutionId: receipt.institutionId,
@@ -2665,12 +3496,12 @@ export const getDocumentAnalysesForCurrentUser = query({
   },
   returns: v.array(documentAnalysisRecordValidator),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
     await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
-    const analyses = await ctx.db
-      .query('documentAnalyses')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
-      .collect()
+    const analyses = await collectRowsIncrementally(ctx, 'documentAnalyses', {
+      caseSessionId: args.caseSessionId,
+    })
 
     for (const analysis of analyses) {
       if (!analysis.documentId) continue
@@ -2704,8 +3535,13 @@ export const submitEcfFiling = mutation({
     receipt: v.union(ecfReceiptValidator, v.null()),
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     rejectClientStorageClaims([
       args.submission.mainDocument,
@@ -2716,10 +3552,16 @@ export const submitEcfFiling = mutation({
       ctx,
       caseSessionDoc._id,
       args.submission as FilingSubmission,
+      assembledSnapshots.get(session)?.rows,
     )
     const result = submitEcfFilingDomain(session, submission)
     const nextSession = transitionAfterFiling(result.session)
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      nextSession,
+      session,
+    )
 
     await appendCaseSessionEvent(
       ctx,
@@ -2729,7 +3571,9 @@ export const submitEcfFiling = mutation({
         eventId: args.submission.eventId,
         outcome: result.preflight.outcome,
         receiptNumber: result.receipt?.receiptNumber ?? null,
-        issueCodes: result.preflight.issues.map((issue) => issue.code ?? issue.message),
+        issueCodes: result.preflight.issues.map(
+          (issue) => issue.code ?? issue.message,
+        ),
         procedureState: saved.procedureState,
       },
       user._id,
@@ -2749,13 +3593,23 @@ export const advanceExpectedEvent = mutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const toolCall = nextExpectedToolCall(session)
     const nextSession = transitionAfterFiling(applyToolCall(session, toolCall))
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      nextSession,
+      session,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -2776,12 +3630,22 @@ export const advanceProcedure = mutation({
     toolCall: toolCallValidator,
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceProcedureStateMachine(session)
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      result.session,
+      session,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -2813,8 +3677,13 @@ export const advanceAutonomousSimulation = mutation({
     budgetSpentCents: v.number(),
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceAutonomousSimulationDomain(session, {
@@ -2827,7 +3696,12 @@ export const advanceAutonomousSimulation = mutation({
     })
     const saved =
       result.turns.length > 0
-        ? await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+        ? await replaceSessionState(
+            ctx,
+            caseSessionDoc._id,
+            result.session,
+            session,
+          )
         : session
 
     await appendCaseSessionEvent(
@@ -2862,14 +3736,24 @@ export const advanceSimulationTurn = mutation({
     toolCall: toolCallValidator,
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const result = advanceSimulationTurnDomain(session, {
       debugRejectedAttempts: args.debugRejectedAttempts ?? false,
     })
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, result.session)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      result.session,
+      session,
+    )
     await persistTurnAudit(
       ctx,
       caseSessionDoc._id,
@@ -2907,12 +3791,18 @@ export const importCourtListenerSource = mutation({
     trialDocket: trialDocketValidator,
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const sourceUrl = sourceUrlForCourtListenerResult(args.result)
-    const evidenceNotice = 'Caller-reported metadata; not verified court evidence.'
+    const evidenceNotice =
+      'Caller-reported metadata; not verified court evidence.'
     const addEvidenceNotice = (text: string) =>
       text.startsWith(evidenceNotice)
         ? text
@@ -2963,21 +3853,28 @@ export const importCourtListenerSource = mutation({
       importedAt,
     })
 
-    const nextSession = transitionAfterFiling(applyToolCall(session, {
-      tool: 'issueClerkOrder',
-      actorId: 'ca4_clerk',
-      title: 'CourtListener Record Imported',
-      text: `Imported ${args.result.caseNameFull ?? args.result.caseName ?? 'CourtListener docket'} (${args.result.docketNumber ?? 'no docket number'}) from ${args.result.court ?? 'CourtListener'}. Source: ${sourceUrl}\n\n${evidenceNotice}`,
-      ruleRefs: [
-        {
-          ruleId: `courtlistener-${args.result.docket_id ?? args.result.id}`,
-          label: 'CourtListener source',
-          sourceUrl,
-        },
-      ],
-    }))
+    const nextSession = transitionAfterFiling(
+      applyToolCall(session, {
+        tool: 'issueClerkOrder',
+        actorId: 'ca4_clerk',
+        title: 'CourtListener Record Imported',
+        text: `Imported ${args.result.caseNameFull ?? args.result.caseName ?? 'CourtListener docket'} (${args.result.docketNumber ?? 'no docket number'}) from ${args.result.court ?? 'CourtListener'}. Source: ${sourceUrl}\n\n${evidenceNotice}`,
+        ruleRefs: [
+          {
+            ruleId: `courtlistener-${args.result.docket_id ?? args.result.id}`,
+            label: 'CourtListener source',
+            sourceUrl,
+          },
+        ],
+      }),
+    )
 
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      nextSession,
+      session,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -3003,10 +3900,16 @@ export const getTrialDocketForCurrentUser = query({
   returns: v.union(trialDocketValidator, v.null()),
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
-    const caseSession = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSession = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     const imports = await ctx.db
       .query('trialDocketImports')
-      .withIndex('by_case', (index) => index.eq('caseSessionId', args.caseSessionId))
+      .withIndex('by_case', (index) =>
+        index.eq('caseSessionId', args.caseSessionId),
+      )
       .collect()
     const latest = imports.sort((a, b) => b._creationTime - a._creationTime)[0]
     if (latest) {
@@ -3061,7 +3964,8 @@ export const getAiGateForCurrentUser = internalQuery({
     )[0]
     if (
       latestRun &&
-      new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
+      new Date(args.nowIso).getTime() -
+        new Date(latestRun.createdAt).getTime() <
         args.cooldownMs
     ) {
       return {
@@ -3124,7 +4028,8 @@ export const reserveAiRunForCurrentUser = internalMutation({
     )[0]
     if (
       latestRun &&
-      new Date(args.nowIso).getTime() - new Date(latestRun.createdAt).getTime() <
+      new Date(args.nowIso).getTime() -
+        new Date(latestRun.createdAt).getTime() <
         args.cooldownMs
     ) {
       return {
@@ -3247,7 +4152,11 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
   },
   returns: caseSessionValidator,
   handler: async (ctx, args) => {
-    const { user, session: authorizedSession } = await requireOwnedSession(ctx, args.caseSessionId)
+    ctx = withSessionTransactionBudget(ctx).ctx
+    const { user, session: authorizedSession } = await requireOwnedSession(
+      ctx,
+      args.caseSessionId,
+    )
     const caseSessionDoc = authorizedSession
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
@@ -3269,7 +4178,9 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
         issues: validation.issues,
         costCents: args.costCents,
         latencyMs: args.latencyMs,
-        errorClass: validation.accepted ? undefined : 'tool_validation_rejected',
+        errorClass: validation.accepted
+          ? undefined
+          : 'tool_validation_rejected',
       })
     } else {
       await ctx.db.insert('aiRuns', {
@@ -3284,7 +4195,9 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
         issues: validation.issues,
         costCents: args.costCents,
         latencyMs: args.latencyMs,
-        ...(!validation.accepted ? { errorClass: 'tool_validation_rejected' } : {}),
+        ...(!validation.accepted
+          ? { errorClass: 'tool_validation_rejected' }
+          : {}),
         createdMonth: createdMonth(args.createdAt),
         createdAt: args.createdAt,
       })
@@ -3296,8 +4209,15 @@ export const applyLiveToolCallForCurrentUser = internalMutation({
       })
       return session
     }
-    const nextSession = transitionAfterFiling(applyToolCall(session, args.toolCall))
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
+    const nextSession = transitionAfterFiling(
+      applyToolCall(session, args.toolCall),
+    )
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      nextSession,
+      session,
+    )
     await appendCaseSessionEvent(
       ctx,
       caseSessionDoc._id,
@@ -3330,14 +4250,11 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
   },
   returns: actorWorkProductValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user, session } = await requireOwnedSession(ctx, args.caseSessionId)
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const run = await ctx.db.get(args.aiRunId)
-    if (
-      !run ||
-      run.userId !== user._id ||
-      run.caseSessionId !== session._id
-    ) {
+    if (!run || run.userId !== user._id || run.caseSessionId !== session._id) {
       throw notFound('AI run')
     }
     requireActiveAiReservation(run)
@@ -3351,7 +4268,11 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       args.workProductJson,
       'actor work product mutation payload',
     )
-    const validationAccepted = !args.validationIssues.some((issue) => issue.severity === 'error')
+    const previous = await assembleCaseSession(ctx, session)
+    const validationAccepted = !args.validationIssues.some(
+      (issue) => issue.severity === 'error',
+    )
+    await bumpSessionAdmissionRevision(ctx, session)
     const productId = await ctx.db.insert('actorWorkProducts', {
       caseSessionId: args.caseSessionId,
       actorId: args.actorId,
@@ -3378,22 +4299,17 @@ export const persistActorWorkProductForCurrentUser = internalMutation({
       errorClass: validationAccepted ? undefined : 'actor_validation_rejected',
     })
 
+    const updatedSessionDoc = await ctx.db.get(session._id)
+    if (!updatedSessionDoc) throw notFound('Case session')
+    const saved = await assembleCaseSession(ctx, updatedSessionDoc)
+    assertSessionAdmission(previous, saved)
+    const savedProduct = saved.actorWorkProducts?.find(
+      (candidate) => candidate.id === productId,
+    )
+    if (!savedProduct) throw notFound('Actor work product')
+
     return {
-      id: productId,
-      caseSessionId: args.caseSessionId,
-      actorId: args.actorId,
-      kind: args.kind,
-      status: 'proposed' as const,
-      reviewStatus: 'proposed' as const,
-      workProduct,
-      citations: workProduct.citations,
-      ruleRefs: workProduct.ruleRefs,
-      recordRefs: workProduct.recordRefs ?? [],
-      confidence: workProduct.confidence ?? 0.75,
-      roleAuthority: workProduct.roleAuthority ?? 'simulator_actor',
-      sourceDocumentAnalysisIds: trustedSources.sourceDocumentAnalysisIds,
-      sourceFilingIds: trustedSources.sourceFilingIds,
-      createdAt: args.createdAt,
+      ...savedProduct,
       validationIssues: args.validationIssues,
     }
   },
@@ -3408,31 +4324,40 @@ export const generateActorWorkProduct = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery(internal.caseSessions.getWritableForCurrentUser, {
-      caseSessionId: args.caseSessionId,
-    })) as CaseSession
+    const session = (await ctx.runQuery(
+      internal.caseSessions.getWritableForCurrentUser,
+      {
+        caseSessionId: args.caseSessionId,
+      },
+    )) as CaseSession
 
     const model = requireEnv('OPENROUTER_MODEL')
     const promptHash = promptHashForSession(session)
-    const reservation = (await ctx.runMutation(internal.caseSessions.reserveAiRunForCurrentUser, {
-      caseSessionId: args.caseSessionId,
-      actorId: 'openrouter',
-      model,
-      promptHash,
-      nowIso,
-      cooldownMs: openRouterCooldownMs,
-      estimatedCostCents: estimatedOpenRouterCostCents,
-    })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
+    const reservation = (await ctx.runMutation(
+      internal.caseSessions.reserveAiRunForCurrentUser,
+      {
+        caseSessionId: args.caseSessionId,
+        actorId: 'openrouter',
+        model,
+        promptHash,
+        nowIso,
+        cooldownMs: openRouterCooldownMs,
+        estimatedCostCents: estimatedOpenRouterCostCents,
+      },
+    )) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
     if (!reservation.allowed || !reservation.aiRunId) {
       // ERROR_CODE: RATE_LIMITED
-      throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
+      throw new Error(
+        reservation.reason ?? 'Live AI is temporarily unavailable.',
+      )
     }
 
     const provider = new OpenRouterProvider({
       apiKey: requireEnv('OPENROUTER_API_KEY'),
       model,
       appUrl: process.env.OPENROUTER_APP_URL,
-      appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
+      appTitle:
+        process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
     })
     const startedAt = Date.now()
 
@@ -3484,7 +4409,9 @@ export const generateActorWorkProduct = action({
         )
       }
       // ERROR_CODE: PROVIDER_ERROR
-      throw new Error('Actor work product generation is temporarily unavailable.')
+      throw new Error(
+        'Actor work product generation is temporarily unavailable.',
+      )
     }
   },
 })
@@ -3501,8 +4428,13 @@ export const acceptActorWorkProduct = mutation({
     validationReason: v.optional(v.string()),
   }),
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    const caseSessionDoc = await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
@@ -3521,16 +4453,18 @@ export const acceptActorWorkProduct = mutation({
     }
     const acceptance = canAcceptActorWorkProduct(session, product)
     if (!acceptance.accepted) {
-      await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
+      await bumpSessionAdmissionRevision(ctx, caseSessionDoc)
+      await ctx.db.patch(productDoc._id, {
+        status: 'rejected',
+        reviewStatus: 'rejected',
+      })
       const validationReason =
         acceptance.validationIssues.map((issue) => issue.message).join(' ') ||
         'Actor work product failed deterministic validation.'
-      const rejectedSession = {
-        ...session,
-        actorWorkProducts: session.actorWorkProducts?.map((candidate) =>
-          candidate.id === product.id ? { ...candidate, status: 'rejected' as const } : candidate,
-        ),
-      }
+      const updatedDoc = await ctx.db.get(caseSessionDoc._id)
+      if (!updatedDoc) throw notFound('Case session')
+      const rejectedSession = await assembleCaseSession(ctx, updatedDoc)
+      assertSessionAdmission(session, rejectedSession)
       return {
         session: rejectedSession,
         workProduct: {
@@ -3548,15 +4482,19 @@ export const acceptActorWorkProduct = mutation({
     try {
       effect = applyAcceptedActorWorkProduct(session, product)
     } catch (error) {
-      await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
+      await bumpSessionAdmissionRevision(ctx, caseSessionDoc)
+      await ctx.db.patch(productDoc._id, {
+        status: 'rejected',
+        reviewStatus: 'rejected',
+      })
       const validationReason =
-        error instanceof Error ? error.message : 'Actor work product effect failed.'
-      const rejectedSession = {
-        ...session,
-        actorWorkProducts: session.actorWorkProducts?.map((candidate) =>
-          candidate.id === product.id ? { ...candidate, status: 'rejected' as const } : candidate,
-        ),
-      }
+        error instanceof Error
+          ? error.message
+          : 'Actor work product effect failed.'
+      const updatedDoc = await ctx.db.get(caseSessionDoc._id)
+      if (!updatedDoc) throw notFound('Case session')
+      const rejectedSession = await assembleCaseSession(ctx, updatedDoc)
+      assertSessionAdmission(session, rejectedSession)
       return {
         session: rejectedSession,
         workProduct: {
@@ -3569,7 +4507,8 @@ export const acceptActorWorkProduct = mutation({
               code: 'actor_effect_failed',
               message: validationReason,
               ruleRefs: [],
-              cureSuggestion: 'Regenerate or edit the actor work product before accepting it.',
+              cureSuggestion:
+                'Regenerate or edit the actor work product before accepting it.',
             },
           ],
         },
@@ -3578,8 +4517,16 @@ export const acceptActorWorkProduct = mutation({
       }
     }
 
-    await ctx.db.patch(productDoc._id, { status: 'accepted', reviewStatus: 'accepted' })
-    const saved = await replaceSessionState(ctx, caseSessionDoc._id, effect.session)
+    await ctx.db.patch(productDoc._id, {
+      status: 'accepted',
+      reviewStatus: 'accepted',
+    })
+    const saved = await replaceSessionState(
+      ctx,
+      caseSessionDoc._id,
+      effect.session,
+      session,
+    )
     const remappedProductDoc = await ctx.db.get(productDoc._id)
     if (!remappedProductDoc) throw notFound('Actor work product')
     await appendCaseSessionEvent(
@@ -3615,8 +4562,13 @@ export const rejectActorWorkProduct = mutation({
   },
   returns: actorWorkProductValidator,
   handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
     const { user } = await requireCurrentUser(ctx)
-    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const caseSessionDoc = await requireAuthorizedSessionDoc(
+      ctx,
+      args.caseSessionId,
+      user._id,
+    )
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const productDoc = await ctx.db.get(args.workProductId)
     if (!productDoc || productDoc.caseSessionId !== args.caseSessionId) {
@@ -3629,7 +4581,16 @@ export const rejectActorWorkProduct = mutation({
       productDoc.sourceFilingIds,
     )
 
-    await ctx.db.patch(productDoc._id, { status: 'rejected', reviewStatus: 'rejected' })
+    const previous = await assembleCaseSession(ctx, caseSessionDoc)
+    await bumpSessionAdmissionRevision(ctx, caseSessionDoc)
+    await ctx.db.patch(productDoc._id, {
+      status: 'rejected',
+      reviewStatus: 'rejected',
+    })
+    const updatedDoc = await ctx.db.get(caseSessionDoc._id)
+    if (!updatedDoc) throw notFound('Case session')
+    const saved = await assembleCaseSession(ctx, updatedDoc)
+    assertSessionAdmission(previous, saved)
     await appendCaseSessionEvent(
       ctx,
       args.caseSessionId,
@@ -3642,11 +4603,11 @@ export const rejectActorWorkProduct = mutation({
       user._id,
     )
 
-    return {
-      ...actorWorkProductFromDoc(productDoc),
-      status: 'rejected' as const,
-      reviewStatus: 'rejected' as const,
-    }
+    const savedProduct = saved.actorWorkProducts?.find(
+      (candidate) => candidate.id === productDoc._id,
+    )
+    if (!savedProduct) throw notFound('Actor work product')
+    return savedProduct
   },
 })
 
@@ -3662,24 +4623,32 @@ export const advanceLiveEvent = action({
   handler: async (ctx, args) => {
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
-    const session = (await ctx.runQuery(internal.caseSessions.getWritableForCurrentUser, {
-      caseSessionId: args.caseSessionId,
-    })) as CaseSession
+    const session = (await ctx.runQuery(
+      internal.caseSessions.getWritableForCurrentUser,
+      {
+        caseSessionId: args.caseSessionId,
+      },
+    )) as CaseSession
 
     const model = requireEnv('OPENROUTER_MODEL')
     const promptHash = promptHashForSession(session)
-    const reservation = (await ctx.runMutation(internal.caseSessions.reserveAiRunForCurrentUser, {
-      caseSessionId: args.caseSessionId,
-      actorId: 'openrouter',
-      model,
-      promptHash,
-      nowIso,
-      cooldownMs: openRouterCooldownMs,
-      estimatedCostCents: estimatedOpenRouterCostCents,
-    })) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
+    const reservation = (await ctx.runMutation(
+      internal.caseSessions.reserveAiRunForCurrentUser,
+      {
+        caseSessionId: args.caseSessionId,
+        actorId: 'openrouter',
+        model,
+        promptHash,
+        nowIso,
+        cooldownMs: openRouterCooldownMs,
+        estimatedCostCents: estimatedOpenRouterCostCents,
+      },
+    )) as { allowed: boolean; reason?: string; aiRunId?: Id<'aiRuns'> }
     if (!reservation.allowed || !reservation.aiRunId) {
       // ERROR_CODE: RATE_LIMITED
-      throw new Error(reservation.reason ?? 'Live AI is temporarily unavailable.')
+      throw new Error(
+        reservation.reason ?? 'Live AI is temporarily unavailable.',
+      )
     }
 
     const startedAt = Date.now()
@@ -3691,7 +4660,8 @@ export const advanceLiveEvent = action({
           apiKey: requireEnv('OPENROUTER_API_KEY'),
           model,
           appUrl: process.env.OPENROUTER_APP_URL,
-          appTitle: process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
+          appTitle:
+            process.env.OPENROUTER_APP_TITLE ?? 'Appellate Practice Simulator',
         }),
         'advanceLiveEvent',
       )
@@ -3701,16 +4671,21 @@ export const advanceLiveEvent = action({
         console.warn('OpenRouter returned an invalid procedural tool call', {
           caseSessionId: args.caseSessionId,
         })
-        await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
-          aiRunId: reservation.aiRunId,
-          actorId: 'openrouter',
-          toolCallJson: result.rawText,
-          accepted: false,
-          issues: ['The AI service returned text, but no valid procedural event.'],
-          costCents: estimatedOpenRouterCostCents,
-          latencyMs,
-          errorClass: 'tool_validation_rejected',
-        })
+        await ctx.runMutation(
+          internal.caseSessions.finalizeAiRunForCurrentUser,
+          {
+            aiRunId: reservation.aiRunId,
+            actorId: 'openrouter',
+            toolCallJson: result.rawText,
+            accepted: false,
+            issues: [
+              'The AI service returned text, but no valid procedural event.',
+            ],
+            costCents: estimatedOpenRouterCostCents,
+            latencyMs,
+            errorClass: 'tool_validation_rejected',
+          },
+        )
         return {
           session,
           toolCall: null,
@@ -3724,18 +4699,21 @@ export const advanceLiveEvent = action({
           caseSessionId: args.caseSessionId,
           issues: validation.issues,
         })
-        await ctx.runMutation(internal.caseSessions.finalizeAiRunForCurrentUser, {
-          aiRunId: reservation.aiRunId,
-          actorId: result.toolCall.actorId,
-          toolCallJson: result.rawText,
-          accepted: false,
-          issues: validation.issues.length
-            ? validation.issues
-            : ['Invalid procedural tool call.'],
-          costCents: estimatedOpenRouterCostCents,
-          latencyMs,
-          errorClass: 'tool_validation_rejected',
-        })
+        await ctx.runMutation(
+          internal.caseSessions.finalizeAiRunForCurrentUser,
+          {
+            aiRunId: reservation.aiRunId,
+            actorId: result.toolCall.actorId,
+            toolCallJson: result.rawText,
+            accepted: false,
+            issues: validation.issues.length
+              ? validation.issues
+              : ['Invalid procedural tool call.'],
+            costCents: estimatedOpenRouterCostCents,
+            latencyMs,
+            errorClass: 'tool_validation_rejected',
+          },
+        )
         return {
           session,
           toolCall: null,

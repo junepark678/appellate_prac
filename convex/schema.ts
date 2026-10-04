@@ -502,6 +502,7 @@ export default defineSchema({
     legalTrainingDisclaimerAcceptedAt: v.optional(v.string()),
     simulatedDate: v.string(),
     nextEventSequence: v.optional(v.number()),
+    sessionAdmissionRevision: v.optional(v.number()),
   })
     .index("by_user", ["userId"])
     .index("by_scenario", ["scenarioId"])

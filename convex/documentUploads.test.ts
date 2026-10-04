@@ -26,7 +26,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Id } from './_generated/dataModel'
 import { AppErrorCode, type AppErrorData } from './errors'
-import { deleteOrRetryCleanup } from './documentUploadActions'
+import {
+  deleteOrRetryCleanup,
+  enqueueCleanupWithBoundedRetry,
+} from './documentUploadActions'
 import type {
   CaseSession,
   DocumentAnalysis,
@@ -37,8 +40,16 @@ import type {
 } from '../src/domain/types'
 import { defaultFilingMetadata } from '../src/domain/filing/ecf'
 import {
-  fitsSessionDocumentAnalysisReadBudget,
-  maxSessionDocumentAnalysisReadBytes,
+  fitsSessionAdmission,
+  fitsSessionGrowth,
+  fitsSessionOperationFootprint,
+  maxSessionGrowthBytes,
+  maxSessionOperationFootprintBytes,
+  maxSessionProjectionBytes,
+  modeledQueryMetadataBytes,
+  modeledRowMetadataBytes,
+  serializedJsonUtf8Bytes,
+  SessionTransactionBudget,
 } from './documentAnalysisBudget'
 import schema from './schema'
 
@@ -402,6 +413,25 @@ function serializedBytes(value: unknown) {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength
 }
 
+function sizedBudgetReadRow(targetBytes: number, id: string) {
+  const row = { _id: id, _creationTime: 0, value: '' }
+  const valueBytes = serializedBytes(row)
+  if (valueBytes > targetBytes) throw new Error('Read row target is too small')
+  row.value = 'x'.repeat(targetBytes - valueBytes)
+  return row
+}
+
+function sizedBudgetInsertValue(targetBytes: number) {
+  const row = {
+    value: '',
+    _id: 'x'.repeat(128),
+    _creationTime: Number.MAX_SAFE_INTEGER,
+  }
+  const valueBytes = serializedBytes(row)
+  if (valueBytes > targetBytes) throw new Error('Write row target is too small')
+  return { value: 'x'.repeat(targetBytes - valueBytes) }
+}
+
 async function expectErrorCode(promise: Promise<unknown>, code: AppErrorCode) {
   let caught: unknown
   try {
@@ -647,26 +677,234 @@ afterEach(() => {
 })
 
 describe('document upload receipts', () => {
-  it('uses an inclusive 12 MiB session document analysis read boundary', () => {
-    expect(fitsSessionDocumentAnalysisReadBudget(0)).toBe(true)
+  it('retries ambiguous cleanup queue writes at most three times with bounded backoff', async () => {
+    const waits: number[] = []
+    let attempts = 0
+    const result = await enqueueCleanupWithBoundedRetry(
+      async () => {
+        attempts += 1
+        if (attempts < 3) throw new Error(`queue failure ${attempts}`)
+        return 'queued'
+      },
+      async (delayMs) => {
+        waits.push(delayMs)
+      },
+    )
+    expect(result).toBe('queued')
+    expect(attempts).toBe(3)
+    expect(waits).toEqual([100, 500])
+
+    attempts = 0
+    waits.length = 0
+    await expect(
+      enqueueCleanupWithBoundedRetry(
+        async () => {
+          attempts += 1
+          throw new Error(`queue outage ${attempts}`)
+        },
+        async (delayMs) => {
+          waits.push(delayMs)
+        },
+      ),
+    ).rejects.toThrow('queue outage 3')
+    expect(attempts).toBe(3)
+    expect(waits).toEqual([100, 500])
+  })
+
+  it('does not queue or delete a final blob when ambiguous finalization committed the winner', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'ambiguous-finalize.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const claimToken = randomUUID()
+    await alice.mutation(claimCompletionRef, {
+      intentId: intent.intentId,
+      claimToken,
+    })
+    const finalized = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      claimToken,
+      storageId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(finalized.accepted).toBe(true)
+
     expect(
-      fitsSessionDocumentAnalysisReadBudget(
-        maxSessionDocumentAnalysisReadBytes - 1,
+      await t.mutation(queueUploadCleanupRef, {
+        storageIds: [storageId],
+        intentId: intent.intentId,
+      }),
+    ).toEqual([])
+    const after = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+      storage: await ctx.db.system.get('_storage', storageId),
+    }))
+    expect(after.intent?.state).toBe('stored')
+    expect(after.intent?.storageId).toBe(storageId)
+    expect(after.cleanup).toBeNull()
+    expect(after.storage).not.toBeNull()
+  })
+
+  it('stops after three failed cleanup attempts without deleting an uncertain blob', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const bytes = makePdf(128)
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], {
+          type: 'application/octet-stream',
+        }),
+      ),
+    )
+    await t.mutation(queueUploadCleanupRef, {
+      storageIds: [storageId],
+    })
+
+    const first = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+    )
+    expect(first?.attempts).toBe(0)
+    await t.mutation(retryUploadStorageCleanupRef, { storageId })
+    const second = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+    )
+    expect(second?.attempts).toBe(1)
+    expect(second?.nextAttemptAt).toBeGreaterThanOrEqual(Date.now() + 100)
+    await t.run((ctx) =>
+      ctx.db.patch(second!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.mutation(retryUploadStorageCleanupRef, { storageId })
+    const third = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+    )
+    expect(third?.attempts).toBe(2)
+    expect(third?.nextAttemptAt).toBeGreaterThanOrEqual(Date.now() + 500)
+    await t.run((ctx) =>
+      ctx.db.patch(third!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+    await t.mutation(retryUploadStorageCleanupRef, { storageId })
+
+    const after = await t.run(async (ctx) => ({
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+      storage: await ctx.db.system.get('_storage', storageId),
+    }))
+    expect(after.cleanup).toBeNull()
+    expect(after.storage).not.toBeNull()
+  })
+
+  it('enforces inclusive 4 MiB resulting sizes, 12 MiB hard bounds, and UTF-8 accounting', () => {
+    const fourMiB = 4 * 1024 * 1024
+    expect(fitsSessionGrowth(0, fourMiB - 1)).toBe(true)
+    expect(fitsSessionGrowth(0, fourMiB)).toBe(true)
+    expect(fitsSessionGrowth(0, fourMiB + 1)).toBe(false)
+    expect(fitsSessionGrowth(fourMiB + 1, fourMiB + 1)).toBe(true)
+    expect(fitsSessionGrowth(fourMiB + 1, fourMiB + 2)).toBe(false)
+    expect(fitsSessionGrowth(fourMiB + 1, maxSessionProjectionBytes + 1)).toBe(
+      false,
+    )
+    expect(
+      fitsSessionAdmission(
+        { rowMaterialBytes: fourMiB, projectionBytes: fourMiB },
+        { rowMaterialBytes: fourMiB, projectionBytes: fourMiB },
       ),
     ).toBe(true)
     expect(
-      fitsSessionDocumentAnalysisReadBudget(
-        maxSessionDocumentAnalysisReadBytes,
+      fitsSessionAdmission(
+        { rowMaterialBytes: fourMiB, projectionBytes: fourMiB },
+        { rowMaterialBytes: fourMiB + 1, projectionBytes: fourMiB },
       ),
+    ).toBe(false)
+    expect(serializedJsonUtf8Bytes({ text: '💼' })).toBe(
+      new TextEncoder().encode('{"text":"💼"}').byteLength,
+    )
+    expect(
+      fitsSessionOperationFootprint({
+        readBytes: maxSessionOperationFootprintBytes,
+        writeBytes: maxSessionOperationFootprintBytes,
+      }),
     ).toBe(true)
     expect(
-      fitsSessionDocumentAnalysisReadBudget(
-        maxSessionDocumentAnalysisReadBytes + 1,
-      ),
+      fitsSessionOperationFootprint({
+        readBytes: maxSessionOperationFootprintBytes + 1,
+        writeBytes: 0,
+      }),
     ).toBe(false)
   })
 
-  it('keeps ten large receipt analyses readable, then fences concurrent consumption at the session budget', async () => {
+  it('measures read and write footprints independently at the inclusive 12 MiB limit', async () => {
+    const rowCount = 12
+    const readRowBytes =
+      (maxSessionOperationFootprintBytes -
+        rowCount * (modeledRowMetadataBytes + modeledQueryMetadataBytes)) /
+      rowCount
+    const readBudget = new SessionTransactionBudget()
+    for (let index = 0; index < rowCount; index += 1) {
+      const row = sizedBudgetReadRow(readRowBytes, `read-row-${index}`)
+      await readBudget.read(() => Promise.resolve([row]), 1)
+    }
+    expect(readBudget.snapshot().readBytes).toBe(
+      maxSessionOperationFootprintBytes,
+    )
+    await expect(
+      readBudget.read(() => Promise.resolve(null), 1),
+    ).rejects.toBeDefined()
+    expect(readBudget.snapshot().writeBytes).toBe(0)
+
+    const writeRowBytes =
+      (maxSessionOperationFootprintBytes - rowCount * modeledRowMetadataBytes) /
+      rowCount
+    const writeBudget = new SessionTransactionBudget()
+    for (let index = 0; index < rowCount; index += 1) {
+      const value = sizedBudgetInsertValue(writeRowBytes)
+      await writeBudget.insert('documents', value, () =>
+        Promise.resolve(`write-row-${index}`),
+      )
+    }
+    expect(writeBudget.snapshot().writeBytes).toBe(
+      maxSessionOperationFootprintBytes,
+    )
+    expect(writeBudget.snapshot().readBytes).toBe(0)
+    let overflowWriteCalled = false
+    expect(() =>
+      writeBudget.insert('documents', { name: 'over limit' }, () => {
+        overflowWriteCalled = true
+        return Promise.resolve('unexpected')
+      }),
+    ).toThrow()
+    expect(overflowWriteCalled).toBe(false)
+  })
+
+  it('keeps the aggregate row material within 4 MiB and leaves an over-budget receipt retryable', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
     const alice = uploadClient(t)
@@ -680,7 +918,7 @@ describe('document upload receipts', () => {
       intentId: Id<'documentUploadIntents'>
       document: UploadedDocument
     }> = []
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       const fileName = `large-analysis-${index}.pdf`
       const intent = await alice.begin({
         scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
@@ -694,16 +932,16 @@ describe('document upload receipts', () => {
       pending.push({
         intentId: intent.intentId,
         document: {
-        id: `client-${fileName}`,
-        fileName,
-        mimeType: 'application/pdf',
-        sizeBytes: bytes.byteLength,
-        sha256: sha256(bytes),
-        extractedSignals: [],
+          id: `client-${fileName}`,
+          fileName,
+          mimeType: 'application/pdf',
+          sizeBytes: bytes.byteLength,
+          sha256: sha256(bytes),
+          extractedSignals: [],
         },
       })
     }
-    for (const { intentId, document } of pending) {
+    for (const { intentId, document } of pending.slice(0, 4)) {
       const persisted = await alice.persist({
         caseSessionId: fixture.aliceSessionId,
         intentId,
@@ -712,12 +950,21 @@ describe('document upload receipts', () => {
       })
       expect(persisted.document.id).toBeDefined()
     }
+    await expectErrorCode(
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: pending[4]!.intentId,
+        document: pending[4]!.document,
+        analysis: largeAnalysis,
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
 
     const restoredSession = await alice.query(getSessionRef, {
       caseSessionId: fixture.aliceSessionId,
     })
     expect(restoredSession?.id).toBe(fixture.aliceSessionId)
-    const tenRows = await t.run(async (ctx) => ({
+    const fourRows = await t.run(async (ctx) => ({
       documents: await ctx.db
         .query('documents')
         .withIndex('by_case', (index) =>
@@ -731,18 +978,21 @@ describe('document upload receipts', () => {
         )
         .collect(),
     }))
-    expect(tenRows.documents).toHaveLength(10)
+    expect(fourRows.documents).toHaveLength(4)
     expect(
-      tenRows.documents.every((document) => !document.validationJson),
+      fourRows.documents.every((document) => !document.validationJson),
     ).toBe(true)
-    expect(tenRows.analyses).toHaveLength(10)
+    expect(fourRows.analyses).toHaveLength(4)
     expect(
-      tenRows.analyses.every((analysis) => analysis.warnings.length === 0),
+      fourRows.analyses.every((analysis) => analysis.warnings.length === 0),
     ).toBe(true)
-    expect(tenRows.analyses[0]?.analysisJson).toContain(largeWarning)
+    expect(fourRows.analyses[0]?.analysisJson).toContain(largeWarning)
+    expect(
+      (await t.run((ctx) => ctx.db.get(pending[4]!.intentId)))?.state,
+    ).toBe('stored')
   })
 
-  it('accounts legacy rows and serializes concurrent receipt consumption against the session budget', async () => {
+  it('serializes near-budget concurrent receipt consumption, then compacts legacy duplicates and permits retry', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
     const alice = uploadClient(t)
@@ -754,17 +1004,19 @@ describe('document upload receipts', () => {
     }
     // Existing pre-receipt legacy document rows consume the same per-session
     // budget even though they have not yet been rewritten through replaceSessionState.
-    const legacyWarning = 'x'.repeat(457_000)
+    const legacyWarning = 'x'.repeat(500_000)
     const legacyAnalysis: DocumentAnalysis = {
       ...analysisFor(bytes.byteLength),
       warnings: [legacyWarning],
     }
     const legacyAnalysisJson = JSON.stringify(legacyAnalysis)
     expect(
-      serializedBytes(analysisRowPayload(legacyAnalysis, fixture.aliceSessionId)),
+      serializedBytes(
+        analysisRowPayload(legacyAnalysis, fixture.aliceSessionId),
+      ),
     ).toBeLessThanOrEqual(960 * 1024)
     await t.run(async (ctx) => {
-      for (let index = 0; index < 8; index += 1) {
+      for (let index = 0; index < 2; index += 1) {
         const documentId = await ctx.db.insert('documents', {
           caseSessionId: fixture.aliceSessionId,
           fileName: `legacy-${index}.pdf`,
@@ -805,22 +1057,27 @@ describe('document upload receipts', () => {
           index.eq('caseSessionId', fixture.aliceSessionId),
         )
         .collect()
-      return documents
-        .filter((document) => document.validationJson === legacyAnalysisJson)
-        .reduce(
-          (sum, document) =>
-            sum + new TextEncoder().encode(JSON.stringify(document)).byteLength,
-          0,
-        ) + analyses
-        .filter((analysis) => analysis.analysisJson === legacyAnalysisJson)
-        .reduce(
-          (sum, analysis) =>
-            sum + new TextEncoder().encode(JSON.stringify(analysis)).byteLength,
-          0,
-        )
+      return (
+        documents
+          .filter((document) => document.validationJson === legacyAnalysisJson)
+          .reduce(
+            (sum, document) =>
+              sum +
+              new TextEncoder().encode(JSON.stringify(document)).byteLength,
+            0,
+          ) +
+        analyses
+          .filter((analysis) => analysis.analysisJson === legacyAnalysisJson)
+          .reduce(
+            (sum, analysis) =>
+              sum +
+              new TextEncoder().encode(JSON.stringify(analysis)).byteLength,
+            0,
+          )
+      )
     })
-    expect(legacyBytes).toBeGreaterThan(10 * 1024 * 1024)
-    expect(legacyBytes).toBeLessThan(maxSessionDocumentAnalysisReadBytes)
+    expect(legacyBytes).toBeGreaterThan(2 * 1024 * 1024)
+    expect(legacyBytes).toBeLessThan(maxSessionGrowthBytes)
 
     const concurrentReceipts = await Promise.all(
       [0, 1].map(async (index) => {
@@ -889,8 +1146,8 @@ describe('document upload receipts', () => {
     expect(idempotentRetry.document.id).toBe(successfulResult.document.id)
     expect(idempotentRetry.analysisId).toBe(successfulResult.analysisId)
 
-    // The state replacement removes unreachable legacy rows and preserves the
-    // consumed receipt rows, then checks the post-replacement read shape.
+    // State replacement compacts legacy duplicate columns while preserving
+    // consumed receipt rows. The formerly rejected receipt can then retry.
     await alice.mutation(submitFilingRef, {
       caseSessionId: fixture.aliceSessionId,
       draft: {
@@ -924,6 +1181,155 @@ describe('document upload receipts', () => {
     expect(
       replacedRows.analyses.every((analysis) => analysis.analysisJson),
     ).toBe(true)
+    const retried = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: concurrentReceipts[successfulIndex === 0 ? 1 : 0]!.intentId,
+      document: concurrentReceipts[successfulIndex === 0 ? 1 : 0]!.document,
+      analysis: largeAnalysis,
+    })
+    expect(retried.document.id).toBeDefined()
+    const retryReceipt = await t.run((ctx) =>
+      ctx.db.get(concurrentReceipts[successfulIndex === 0 ? 1 : 0]!.intentId),
+    )
+    expect(retryReceipt?.state).toBe('consumed')
+  })
+
+  it('compacts a readable over-4-MiB legacy session before allowing new receipt growth', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const legacyWarning = 'l'.repeat(750_000)
+    const legacyAnalysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      warnings: [legacyWarning],
+    }
+    const legacyAnalysisJson = JSON.stringify(legacyAnalysis)
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 5; index += 1) {
+        const documentId = await ctx.db.insert('documents', {
+          caseSessionId: fixture.aliceSessionId,
+          fileName: `oversized-legacy-${index}.pdf`,
+          mimeType: 'application/pdf',
+          sizeBytes: bytes.byteLength,
+          extractedSignals: [],
+          validationJson: legacyAnalysisJson,
+        })
+        const analysisId = await ctx.db.insert('documentAnalyses', {
+          caseSessionId: fixture.aliceSessionId,
+          documentId,
+          analyzerId: legacyAnalysis.analyzerId,
+          fileSizeBytes: legacyAnalysis.fileSizeBytes,
+          mimeType: legacyAnalysis.mimeType,
+          searchableText: legacyAnalysis.searchableText,
+          certificateOfServiceDetected:
+            legacyAnalysis.certificateOfServiceDetected,
+          certificateOfComplianceDetected:
+            legacyAnalysis.certificateOfComplianceDetected,
+          sealedOrRedactionWarning: legacyAnalysis.sealedOrRedactionWarning,
+          warnings: legacyAnalysis.warnings,
+          analysisJson: legacyAnalysisJson,
+          createdAt: new Date().toISOString(),
+        })
+        await ctx.db.patch(documentId, { analysisId })
+      }
+    })
+    const beforeBytes = await t.run(async (ctx) => {
+      const documents = await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      const analyses = await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      return [...documents, ...analyses].reduce(
+        (sum, row) =>
+          sum + new TextEncoder().encode(JSON.stringify(row)).byteLength,
+        0,
+      )
+    })
+    expect(beforeBytes).toBeGreaterThan(maxSessionGrowthBytes)
+    expect(beforeBytes).toBeLessThan(maxSessionProjectionBytes)
+
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'after-legacy-compaction.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const document: UploadedDocument = {
+      id: 'client-after-legacy-compaction',
+      fileName: 'after-legacy-compaction.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    }
+    const smallAnalysis = analysisFor(bytes.byteLength)
+
+    await expectErrorCode(
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: intent.intentId,
+        document,
+        analysis: smallAnalysis,
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+    expect((await t.run((ctx) => ctx.db.get(intent.intentId)))?.state).toBe(
+      'stored',
+    )
+
+    await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Notice of Appeal',
+        documents: [],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Compact legacy session fixture',
+      },
+    })
+    const compacted = await t.run(async (ctx) => ({
+      documents: await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+      analyses: await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+      intent: await ctx.db.get(intent.intentId),
+    }))
+    expect(compacted.documents).toHaveLength(0)
+    expect(compacted.analyses).toHaveLength(0)
+    expect(compacted.intent?.state).toBe('stored')
+
+    const persisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document,
+      analysis: smallAnalysis,
+    })
+    expect(persisted.document.id).toBeDefined()
+    expect((await t.run((ctx) => ctx.db.get(intent.intentId)))?.state).toBe(
+      'consumed',
+    )
   })
 
   it('accepts a seven-chunk 25 MiB upload through the authenticated route and Node action, then consumes it exactly once', async () => {
@@ -2131,9 +2537,7 @@ describe('document upload receipts', () => {
         notes: 'History-index regression',
       },
     })
-    expect(filed.filings.at(-1)?.documents[0]?.id).toBe(
-      persisted.document.id,
-    )
+    expect(filed.filings.at(-1)?.documents[0]?.id).toBe(persisted.document.id)
     expect(filed.filings.at(-1)?.documents[0]?.analysis).toEqual(
       persisted.document.analysis,
     )
@@ -2147,15 +2551,15 @@ describe('document upload receipts', () => {
         .collect(),
     )
     expect(history).toHaveLength(257)
-    expect(history.filter((receipt) => receipt.state === 'pending')).toHaveLength(
-      128,
-    )
-    expect(history.filter((receipt) => receipt.state === 'cancelled')).toHaveLength(
-      128,
-    )
-    expect(history.filter((receipt) => receipt.state === 'consumed')).toHaveLength(
-      1,
-    )
+    expect(
+      history.filter((receipt) => receipt.state === 'pending'),
+    ).toHaveLength(128)
+    expect(
+      history.filter((receipt) => receipt.state === 'cancelled'),
+    ).toHaveLength(128)
+    expect(
+      history.filter((receipt) => receipt.state === 'consumed'),
+    ).toHaveLength(1)
   })
 
   it('uses the persisted receipt-backed report for ECF preflight and submission', async () => {
@@ -2266,6 +2670,135 @@ describe('document upload receipts', () => {
     expect(
       JSON.parse(filing!.submissionJson!) as FilingSubmission,
     ).toMatchObject({ mainDocument: persisted.document })
+  })
+
+  it('admits a large receipt-backed ECF submission with both hydrated and snapshot copies under 4 MiB', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const largeWarning = 'w'.repeat(580_000)
+    const documents: UploadedDocument[] = []
+
+    for (let index = 0; index < 3; index += 1) {
+      const fileName = `large-ecf-${index}.pdf`
+      const intent = await alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        mimeType: 'application/pdf',
+      })
+      const storageId = await t.run((ctx) =>
+        ctx.storage.store(
+          new Blob([bytes.buffer as ArrayBuffer], {
+            type: 'application/pdf',
+          }),
+        ),
+      )
+      const claimToken = randomUUID()
+      expect(
+        await alice.mutation(claimCompletionRef, {
+          intentId: intent.intentId,
+          claimToken,
+        }),
+      ).toEqual({ state: 'claimed' })
+      await alice.mutation(finalizeCompletionRef, {
+        intentId: intent.intentId,
+        claimToken,
+        storageId,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      })
+      const persisted = await alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: intent.intentId,
+        document: {
+          id: `client-${fileName}`,
+          fileName,
+          mimeType: 'application/pdf',
+          sizeBytes: bytes.byteLength,
+          sha256: sha256(bytes),
+          extractedSignals: ['notice of appeal'],
+        },
+        analysis: {
+          ...analysisFor(bytes.byteLength),
+          warnings: [largeWarning],
+        },
+      })
+      documents.push(persisted.document)
+      await t.finishInProgressScheduledFunctions()
+    }
+
+    const submission: FilingSubmission = {
+      eventId: 'notice_of_appeal',
+      participantRole: 'appellant',
+      title: 'Notice of Appeal',
+      mainDocument: documents[0]!,
+      attachments: documents.slice(1).map((document, index) => ({
+        id: `large-attachment-${index + 1}`,
+        label: document.fileName,
+        document,
+        attachmentType: 'other',
+      })),
+      metadata: {
+        ...defaultFilingMetadata('notice_of_appeal'),
+        representedPartyId: 'appellant',
+      },
+      notes: '',
+    }
+
+    const submitted = await alice.mutation(submitEcfFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      submission,
+    })
+    const filing = submitted.session.filings.at(-1)
+    expect(filing?.documents).toHaveLength(3)
+    expect(filing?.documents.every(
+      (document) => document.analysis?.warnings[0] === largeWarning,
+    )).toBe(true)
+    const storedSubmission = JSON.parse(
+      filing!.submissionJson!,
+    ) as FilingSubmission
+    expect(storedSubmission.mainDocument.analysis?.warnings).toEqual([
+      largeWarning,
+    ])
+    expect(
+      storedSubmission.attachments.every(
+        (attachment) =>
+          attachment.document.analysis?.warnings[0] === largeWarning,
+      ),
+    ).toBe(true)
+
+    const projectionBytes = serializedJsonUtf8Bytes(submitted.session)
+    expect(projectionBytes).toBeGreaterThan(3 * 1024 * 1024)
+    expect(projectionBytes).toBeLessThanOrEqual(maxSessionGrowthBytes)
+    const savedRows = await t.run(async (ctx) => ({
+      filing: await ctx.db
+        .query('filings')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .first(),
+      documents: await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+      analyses: await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+    }))
+    expect(savedRows.filing?.submissionJson).toBe(filing?.submissionJson)
+    expect(savedRows.documents).toHaveLength(3)
+    expect(savedRows.analyses).toHaveLength(3)
+    expect(savedRows.analyses.every((analysis) => analysis.analysisJson)).toBe(
+      true,
+    )
   })
 
   it('enforces the aggregate 960 KiB UTF-8 row budget exactly before consuming an upload', async () => {

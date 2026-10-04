@@ -31,6 +31,7 @@ import { AppErrorCode, ConvexError, validationError } from './errors'
 const maxFileBytes = 25 * 1024 * 1024
 const chunkBytes = 4 * 1024 * 1024
 const completionRetryAfterMs = 1000
+const cleanupQueueRetryDelaysMs = [0, 100, 500] as const
 
 type CompletionClaimResult =
   | { state: 'claimed' }
@@ -532,15 +533,34 @@ function assertContentType(bytes: Uint8Array, mimeType: string) {
   }
 }
 
+export async function enqueueCleanupWithBoundedRetry<T>(
+  enqueue: () => Promise<T>,
+  wait: (delayMs: number) => Promise<void> = (delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)),
+) {
+  let lastError: unknown
+  for (const delayMs of cleanupQueueRetryDelaysMs) {
+    if (delayMs > 0) await wait(delayMs)
+    try {
+      return await enqueue()
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 async function queueStorageCleanup(
   ctx: ActionCtx,
   storageIds: Id<'_storage'>[],
   intentId?: Id<'documentUploadIntents'>,
 ) {
-  await ctx.runMutation(queueUploadCleanupRef, {
-    storageIds,
-    ...(intentId ? { intentId } : {}),
-  })
+  return enqueueCleanupWithBoundedRetry(() =>
+    ctx.runMutation(queueUploadCleanupRef, {
+      storageIds,
+      ...(intentId ? { intentId } : {}),
+    }),
+  )
 }
 
 export async function deleteOrRetryCleanup(operations: {
@@ -671,7 +691,17 @@ export const complete = action({
       }
       return { intentId, sizeBytes: totalBytes, sha256: digest }
     } catch (error) {
-      if (storedId) await queueStorageCleanup(ctx, [storedId], intentId)
+      if (storedId) {
+        try {
+          // Finalization may have committed even when its response was lost.
+          // Queueing is idempotent and rechecks references transactionally;
+          // after the bounded retries, leave any uncertain blob untouched.
+          await queueStorageCleanup(ctx, [storedId], intentId)
+        } catch {
+          // A process loss or sustained database outage can leave an
+          // unreferenced orphan. Never compensate with an unfenced delete.
+        }
+      }
       if (
         error instanceof ConvexError &&
         error.code === AppErrorCode.VALIDATION_ERROR
