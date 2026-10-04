@@ -274,7 +274,7 @@ describe('registered private document download route', () => {
     expect(await second.text()).not.toContain(String(fixture.storageId))
   }, 30_000)
 
-  it('allows an explicitly assigned instructor and denies organization role alone', async () => {
+  it('allows an active explicit instructor assignment and denies archived or unlinked assignments', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
     const teacher = getClient(t, 'teacher')
@@ -283,6 +283,29 @@ describe('registered private document download route', () => {
     })
     expect(assigned.status).toBe(200)
     expect(assigned.headers.get('Cache-Control')).toBe('no-store')
+
+    await t.run((ctx) =>
+      ctx.db.patch(fixture.assignmentId, {
+        archivedAt: new Date().toISOString(),
+      }),
+    )
+    const archived = await getChunk(teacher, fixture.documentId, 0, {
+      origin: appOrigin,
+    })
+    expect(archived.status).toBe(404)
+    expect(archived.headers.get('Cache-Control')).toBe('no-store')
+    expect(archived.headers.get('X-Content-Type-Options')).toBe('nosniff')
+    const ownerStillAllowed = await getChunk(
+      getClient(t, 'owner'),
+      fixture.documentId,
+      0,
+      { origin: appOrigin },
+    )
+    expect(ownerStillAllowed.status).toBe(200)
+
+    await t.run((ctx) =>
+      ctx.db.patch(fixture.assignmentId, { archivedAt: undefined }),
+    )
 
     const standaloneDocument = await t.run(async (ctx) => {
       const standaloneSessionId = await ctx.db.insert('caseSessions', {
@@ -342,6 +365,40 @@ describe('registered private document download route', () => {
     expect(instructor.headers.get('Cache-Control')).toBe('no-store')
     expect(instructor.headers.get('X-Content-Type-Options')).toBe('nosniff')
   })
+
+  it('rechecks owner membership when it is revoked during the storage read', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const originalArrayBuffer = Blob.prototype.arrayBuffer
+    let revokedDuringRead = false
+    const storageRead = vi
+      .spyOn(Blob.prototype, 'arrayBuffer')
+      .mockImplementation(async function (this: Blob) {
+        if (!revokedDuringRead) {
+          revokedDuringRead = true
+          await t.run((ctx) =>
+            ctx.db.patch(fixture.ownerMembershipId, { status: 'suspended' }),
+          )
+        }
+        return originalArrayBuffer.call(this)
+      })
+
+    let response: Response
+    try {
+      response = await getChunk(getClient(t, 'owner'), fixture.documentId, 0, {
+        origin: appOrigin,
+      })
+    } finally {
+      storageRead.mockRestore()
+    }
+
+    expect(revokedDuringRead).toBe(true)
+    expect(response.status).toBe(404)
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff')
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
+    expect(await response.text()).not.toContain(String(fixture.storageId))
+  }, 30_000)
 
   it('denies foreign documents, inactive organizations, and expired owner or instructor membership', async () => {
     const t = convexTest(schema, modules)

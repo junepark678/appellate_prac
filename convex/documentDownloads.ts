@@ -70,7 +70,8 @@ async function requireExplicitInstructorAccess(
 
   const assignment = await ctx.db.get(link.assignmentId)
   const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null
-  if (!assignment || !cohort) throw notFound('Document')
+  if (!assignment || !cohort || assignment.archivedAt)
+    throw notFound('Document')
   if (
     assignment.scenarioId !== session.scenarioId ||
     cohort.institutionId !== session.institutionId

@@ -68,15 +68,22 @@ includes a sanitized `Content-Disposition: attachment` filename,
 are served as `application/pdf`; other stored media types are served as
 `application/octet-stream`. A browser client can assemble the received slices
 locally and revoke any local object URL after use.
+Storage IDs and storage URLs remain server-side and are never returned to the
+caller. Convex action storage currently loads the complete stored file into a
+`Blob` with `storage.get()` before the HTTP action slices the response. The
+client response is capped at 4 MiB and the file is capped at 25 MiB, but each
+chunk request can still read and allocate the full file in the action. The
+current Convex storage API does not guarantee byte-range reads, so this
+transport does not claim storage-side range efficiency.
 
 Every chunk request rechecks the document, session, organization, and active
 unexpired memberships. The session owner may read their own document. Another
 user may read it only through the explicit assignment-session link and an
-instructor/admin membership in that same organization. Organization role alone
-does not grant access to another session. Personal organizations remain
-owner-only. The HTTP action checks access again after reading the slice before
-returning it, so a revoked or expired reader cannot continue with another
-chunk.
+instructor/admin membership in that same organization while the assignment is
+active. Organization role alone does not grant access to another session.
+Personal organizations remain owner-only. The HTTP action checks access again
+after reading the slice before returning it, so a revoked or expired reader
+cannot continue with another chunk.
 
 ## CORS and response errors
 
