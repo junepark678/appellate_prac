@@ -719,6 +719,23 @@ export function OrganizationContextProvider({
     resolvedContext.generation === generation
       ? resolvedContext
       : null;
+  const organizationExpiryRef = useRef<{
+    organizationId: string;
+    sessionKey: string;
+    expiresAt: number | null;
+  } | null>(null);
+  organizationExpiryRef.current =
+    currentResolvedContext?.status === "ready" &&
+    currentResolvedContext.organization
+      ? {
+          organizationId: currentResolvedContext.organizationId,
+          sessionKey: currentResolvedContext.sessionKey,
+          expiresAt:
+            currentResolvedContext.organization.expiresAt === undefined
+              ? null
+              : Date.parse(currentResolvedContext.organization.expiresAt),
+        }
+      : null;
 
   let status: OrganizationContextStatus = "loading";
   let unavailableMessage: string | null = null;
@@ -837,6 +854,16 @@ export function OrganizationContextProvider({
     status === "ready" ? (currentResolvedContext?.organization ?? null) : null;
   const captureOrganizationContext = useCallback(() => {
     if (status !== "ready" || !organization) return null;
+    const expiry = organizationExpiryRef.current;
+    if (
+      !expiry ||
+      expiry.organizationId !== String(organization.institutionId) ||
+      expiry.sessionKey !== identityRef.current.sessionKey ||
+      (expiry.expiresAt !== null &&
+        (!Number.isFinite(expiry.expiresAt) || Date.now() >= expiry.expiresAt))
+    ) {
+      return null;
+    }
     return {
       organizationId: organization.institutionId,
       generation,
@@ -848,7 +875,18 @@ export function OrganizationContextProvider({
       providerActiveRef.current &&
       statusRef.current === "ready" &&
       identityRef.current.organizationId === String(capture.organizationId) &&
-      generationRef.current === capture.generation,
+      generationRef.current === capture.generation &&
+      (() => {
+        const expiry = organizationExpiryRef.current;
+        return (
+          expiry !== null &&
+          expiry.organizationId === String(capture.organizationId) &&
+          expiry.sessionKey === identityRef.current.sessionKey &&
+          (expiry.expiresAt === null ||
+            (Number.isFinite(expiry.expiresAt) &&
+              Date.now() < expiry.expiresAt))
+        );
+      })(),
     [],
   );
 
