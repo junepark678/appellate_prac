@@ -1958,6 +1958,7 @@ async function loadReceiptBackedDocuments(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
   rows?: SessionStorageRows,
+  authorizedSession?: Doc<'caseSessions'>,
 ) {
   const cached = rows ? receiptBackedDocumentsByRows.get(rows) : undefined
   if (cached) return cached
@@ -1979,11 +1980,17 @@ async function loadReceiptBackedDocuments(
   >()
   for (const receipt of receipts) {
     if (
+      receipt.state !== 'consumed' ||
       receipt.scopeKind !== 'session' ||
-      !receipt.caseSessionId ||
+      receipt.caseSessionId !== caseSessionId ||
+      receipt.datasetVersionId !== undefined ||
+      receipt.datasetAssetId !== undefined ||
       !receipt.storageId ||
       !receipt.documentId ||
-      !receipt.analysisId
+      !receipt.analysisId ||
+      (authorizedSession &&
+        (receipt.userId !== authorizedSession.userId ||
+          receipt.institutionId !== authorizedSession.institutionId))
     ) {
       throw new ConvexError(
         AppErrorCode.CONFLICT,
@@ -2001,8 +2008,14 @@ async function loadReceiptBackedDocuments(
       !analysis ||
       document.caseSessionId !== caseSessionId ||
       document.storageId !== receipt.storageId ||
+      document.fileName !== receipt.fileName ||
+      document.mimeType !== receipt.mimeType ||
+      document.sizeBytes !== receipt.sizeBytes ||
+      document.sha256 !== receipt.sha256 ||
       document.analysisId !== analysis._id ||
       analysis.caseSessionId !== caseSessionId ||
+      analysis.fileSizeBytes !== receipt.sizeBytes ||
+      analysis.mimeType !== receipt.mimeType ||
       analysis.documentId !== document._id
     ) {
       throw new ConvexError(
@@ -3594,6 +3607,50 @@ export const getDocumentAnalysesForCurrentUser = query({
       analysis: analysisFromDoc(analysis),
       createdAt: analysis.createdAt,
     }))
+  },
+})
+
+export const getUnfiledDocumentsForCurrentUser = query({
+  args: {
+    caseSessionId: v.id('caseSessions'),
+  },
+  returns: v.object({
+    caseSessionId: v.id('caseSessions'),
+    documents: v.array(uploadedDocumentValidator),
+  }),
+  handler: async (ctx, args) => {
+    ctx = withSessionTransactionBudget(ctx).ctx
+    const { session } = await requireOwnedSession(ctx, args.caseSessionId)
+    await requireWritableCaseSession(ctx, args.caseSessionId)
+
+    // Assemble through the bounded session readers so filed links and document
+    // analysis relationships are validated before exposing recovery choices.
+    const assembled = await assembleCaseSession(ctx, session)
+    const snapshot = assembledSnapshots.get(assembled)
+    if (!snapshot) throw new Error('Session recovery metrics are unavailable')
+
+    // This reads only consumed receipt rows via by_case_state; cancelled and
+    // pending upload history is never scanned or returned.
+    const receiptBackedDocuments = await loadReceiptBackedDocuments(
+      ctx,
+      session._id,
+      snapshot.rows,
+      session,
+    )
+    const filedDocumentIds = new Set(
+      assembled.filings.flatMap((filing) =>
+        filing.documents.map((document) => document.id),
+      ),
+    )
+    const documents = [...receiptBackedDocuments.values()]
+      .filter(({ document }) => !filedDocumentIds.has(String(document._id)))
+      .map(({ document, analysis }) => {
+        const restored = documentFromDoc(document, analysis)
+        delete restored.storageId
+        return restored
+      })
+
+    return { caseSessionId: session._id, documents }
   },
 })
 

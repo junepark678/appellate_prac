@@ -27,6 +27,7 @@ import {
   SignOutButton,
   SignUpButton,
   UserButton,
+  useAuth,
   useUser,
 } from '@clerk/tanstack-react-start'
 import {
@@ -53,10 +54,18 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { EcfWizard } from '../components/ecf/EcfWizard'
-import { analyzeUploadAndPersistDocuments } from '../application/document-upload'
+import {
+  analyzeUploadAndPersistDocuments,
+  DocumentTransferError,
+  DocumentUploadBatchError,
+  getCachedConsumedDocuments,
+} from '../application/document-upload'
+import { DocumentDownloadManager } from '../application/document-download'
+import type { DownloadableDocument } from '../application/document-download'
+import { useOrganizationContext } from '../components/OrganizationContext'
 import {
   getCourtPack,
   getRuleItemsForCourt,
@@ -175,9 +184,12 @@ function formatDateTimeUtc(value: string) {
 }
 
 function Home() {
-  const { isSignedIn } = useUser()
+  const { isSignedIn, user } = useUser()
+  const { getToken } = useAuth()
+  const organizationContext = useOrganizationContext()
   const convexAuth = useConvexAuth()
   const canUseConvex = isSignedIn === true && convexAuth.isAuthenticated
+  const userId = user?.id ?? null
   const [activeCaseSessionId, setActiveCaseSessionId] =
     useState<Id<'caseSessions'> | null>(null)
   const [trialDocket, setTrialDocket] = useState<TrialDocket>(() =>
@@ -194,6 +206,8 @@ function Home() {
   const [actorError, setActorError] = useState('')
   const [documentPending, setDocumentPending] = useState(false)
   const [documentError, setDocumentError] = useState('')
+  const [documentDownloadPendingId, setDocumentDownloadPendingId] = useState<string | null>(null)
+  const [documentDownloadError, setDocumentDownloadError] = useState('')
   const [sessionPending, setSessionPending] = useState(false)
   const [sessionError, setSessionError] = useState('')
   const [draft, setDraft] = useState<FilingDraft>(() =>
@@ -208,7 +222,9 @@ function Home() {
   const submitEcfFiling = useMutation(api.caseSessions.submitEcfFiling)
   const advanceProcedure = useMutation(api.caseSessions.advanceProcedure)
   const advanceSimulationTurn = useMutation(api.caseSessions.advanceSimulationTurn)
-  const generateDocumentUploadUrl = useMutation(api.caseSessions.generateDocumentUploadUrl)
+  const beginDocumentUpload = useMutation(api.documentUploads.begin)
+  const completeDocumentUpload = useAction(api.documentUploadActions.complete)
+  const cancelDocumentUpload = useAction(api.documentUploadActions.cancel)
   const persistDocumentAnalysis = useMutation(api.caseSessions.persistDocumentAnalysis)
   const acceptActorWorkProduct = useMutation(api.caseSessions.acceptActorWorkProduct)
   const rejectActorWorkProduct = useMutation(api.caseSessions.rejectActorWorkProduct)
@@ -254,7 +270,56 @@ function Home() {
       ? { caseSessionId: asCaseSessionId(session.id) }
       : 'skip',
   )
+  const unfiledDocumentRecovery = useQuery(
+    api.caseSessions.getUnfiledDocumentsForCurrentUser,
+    canUseConvex && session
+      ? { caseSessionId: asCaseSessionId(session.id) }
+      : 'skip',
+  )
   const activeSession = session ?? null
+  const getTokenRef = useRef(getToken)
+  getTokenRef.current = getToken
+  const downloadManagerRef = useRef<DocumentDownloadManager | null>(null)
+  if (!downloadManagerRef.current) {
+    downloadManagerRef.current = new DocumentDownloadManager({
+      siteUrl: import.meta.env.VITE_CONVEX_SITE_URL,
+      getAuthToken: () => getTokenRef.current({ template: 'convex' }),
+    })
+  }
+  const downloadManager = downloadManagerRef.current
+  const transportControllersRef = useRef(new Set<AbortController>())
+  const activeScopeRef = useRef<{
+    userId: string | null
+    requestedSessionId: Id<'caseSessions'> | null
+    activeSessionId: string | null
+    institutionId: string | undefined
+  }>({
+    userId,
+    requestedSessionId: activeCaseSessionId,
+    activeSessionId: activeSession?.id ?? null,
+    institutionId: activeSession?.institutionId,
+  })
+  activeScopeRef.current = {
+    userId,
+    requestedSessionId: activeCaseSessionId,
+    activeSessionId: activeSession?.id ?? null,
+    institutionId: activeSession?.institutionId,
+  }
+  const cancelPendingTransfers = useCallback(() => {
+    for (const controller of transportControllersRef.current) controller.abort()
+    transportControllersRef.current.clear()
+    downloadManager.revokeAll()
+  }, [downloadManager])
+
+  useEffect(
+    () => organizationContext.registerOrganizationCancellation(cancelPendingTransfers),
+    [cancelPendingTransfers, organizationContext.registerOrganizationCancellation],
+  )
+
+  useEffect(() => {
+    cancelPendingTransfers()
+    return cancelPendingTransfers
+  }, [activeCaseSessionId, activeSession?.id, activeSession?.institutionId, cancelPendingTransfers, userId])
   const scenarioOptions = publishedScenarios ?? scenarios
   const ruleItems = activeSession ? getRuleItemsForCourt(activeSession.courtPackId) : []
   const visibleTabs = useMemo(
@@ -309,10 +374,36 @@ function Home() {
 
   useEffect(() => {
     if (!activeSession) return
-    setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
+    setDraft({
+      ...createEmptyDraft(activeSession, 'notice_of_appeal'),
+      documents: cachedUnfiledDocuments(
+        userId,
+        activeSession,
+        unfiledDocumentRecovery?.caseSessionId ===
+          asCaseSessionId(activeSession.id)
+          ? unfiledDocumentRecovery.documents
+          : [],
+      ),
+    })
     setFilingMetadata(createDefaultMetadata(activeSession, 'notice_of_appeal'))
     setTrialDocket(createTrialDocket(activeSession))
-  }, [activeSession?.id])
+  }, [activeSession?.id, userId])
+
+  useEffect(() => {
+    if (
+      !activeSession ||
+      unfiledDocumentRecovery?.caseSessionId !==
+        asCaseSessionId(activeSession.id)
+    ) {
+      return
+    }
+    const recovered = cachedUnfiledDocuments(
+      userId,
+      activeSession,
+      unfiledDocumentRecovery.documents,
+    )
+    setDraft((current) => appendUploadedDocuments(current, recovered))
+  }, [activeSession?.id, userId, unfiledDocumentRecovery])
 
   useEffect(() => {
     if (!activeSession) return
@@ -326,7 +417,17 @@ function Home() {
 
   function resetDraft(eventId = draft.eventId) {
     if (!activeSession) return
-    setDraft(createEmptyDraft(activeSession, eventId))
+    setDraft({
+      ...createEmptyDraft(activeSession, eventId),
+      documents: cachedUnfiledDocuments(
+        userId,
+        activeSession,
+        unfiledDocumentRecovery?.caseSessionId ===
+          asCaseSessionId(activeSession.id)
+          ? unfiledDocumentRecovery.documents
+          : [],
+      ),
+    })
     setFilingMetadata(createDefaultMetadata(activeSession, eventId))
   }
 
@@ -509,24 +610,104 @@ function Home() {
   }
 
   async function analyzeAndAttachDocuments(files: FileList | null) {
-    if (!activeSession) return
+    if (!activeSession || !canUseConvex || !userId) return
+    const capturedSessionId = asCaseSessionId(activeSession.id)
+    const requestedSessionId = activeCaseSessionId
+    const organizationCapture = organizationContext.captureOrganizationContext()
+    const controller = new AbortController()
+    const isCurrentScope = () => {
+      if (controller.signal.aborted) return false
+      const current = activeScopeRef.current
+      return (
+        current.userId === userId &&
+        current.requestedSessionId === requestedSessionId &&
+        current.activeSessionId === activeSession.id &&
+        current.institutionId === activeSession.institutionId &&
+        (!organizationCapture || organizationContext.isCurrentOrganizationContext(organizationCapture))
+      )
+    }
+    transportControllersRef.current.add(controller)
     setDocumentPending(true)
     setDocumentError('')
     try {
       const documents = await analyzeUploadAndPersistDocuments(
-        { generateDocumentUploadUrl, persistDocumentAnalysis },
-        asCaseSessionId(activeSession.id),
+        {
+          siteUrl: import.meta.env.VITE_CONVEX_SITE_URL,
+          getAuthToken: () => getToken({ template: 'convex' }),
+          beginUpload: (args) => beginDocumentUpload(args),
+          completeUpload: (args) => completeDocumentUpload(args),
+          cancelUpload: (args) => cancelDocumentUpload(args),
+          persistDocumentAnalysis: (args) => persistDocumentAnalysis(args),
+        },
+        capturedSessionId,
         files,
+        { userId, signal: controller.signal },
       )
-      setDraft((current) => ({ ...current, documents: [...current.documents, ...documents] }))
+      if (!isCurrentScope()) return
+      setDraft((current) => appendUploadedDocuments(current, documents))
     } catch (error) {
+      if (!isCurrentScope()) return
+      if (error instanceof DocumentUploadBatchError) {
+        setDraft((current) => appendUploadedDocuments(current, error.documents))
+      }
       setDocumentError(
         error instanceof Error
           ? error.message
           : 'PDF analysis failed. The document was not attached.',
       )
     } finally {
-      setDocumentPending(false)
+      transportControllersRef.current.delete(controller)
+      if (isCurrentScope()) setDocumentPending(false)
+    }
+  }
+
+  async function downloadStoredDocument(document: DownloadableDocument) {
+    if (!activeSession || !canUseConvex || !userId) return
+    const capturedSessionId = activeSession.id
+    const requestedSessionId = activeCaseSessionId
+    const organizationCapture = organizationContext.captureOrganizationContext()
+    const controller = new AbortController()
+    const isCurrentScope = () => {
+      if (controller.signal.aborted) return false
+      const current = activeScopeRef.current
+      return (
+        current.userId === userId &&
+        current.requestedSessionId === requestedSessionId &&
+        current.activeSessionId === capturedSessionId &&
+        current.institutionId === activeSession.institutionId &&
+        (!organizationCapture || organizationContext.isCurrentOrganizationContext(organizationCapture))
+      )
+    }
+    transportControllersRef.current.add(controller)
+    setDocumentDownloadPendingId(document.id)
+    setDocumentDownloadError('')
+    try {
+      const objectUrl = await downloadManager.download(document, {
+        signal: controller.signal,
+      })
+      if (!isCurrentScope()) {
+        downloadManager.revoke(document.id)
+        return
+      }
+      const link = window.document.createElement('a')
+      link.href = objectUrl
+      link.download = document.fileName
+      link.rel = 'noopener'
+      link.style.display = 'none'
+      window.document.body.append(link)
+      link.click()
+      link.remove()
+    } catch (error) {
+      if (isCurrentScope()) {
+        setDocumentDownloadError(
+          error instanceof DocumentTransferError || error instanceof Error
+            ? error.message
+            : 'The document could not be downloaded.',
+        )
+      }
+    } finally {
+      transportControllersRef.current.delete(controller)
+      if (isCurrentScope()) setDocumentDownloadPendingId(null)
     }
   }
 
@@ -684,22 +865,32 @@ function Home() {
                   ) : null}
 
                   {selectedView === 'file' ? (
-                    <EcfWizard
-                      draft={draft}
-                      busy={sessionPending}
-                      documentError={documentError}
-                      documentPending={documentPending}
-                      eventAvailability={ecfEventAvailability}
-                      learnerRole={learnerRole}
-                      metadata={filingMetadata}
-                      session={activeSession}
-                      validationIssues={validationIssues}
-                      onDraftChange={setDraft}
-                      onDocumentsSelected={analyzeAndAttachDocuments}
-                      onMetadataChange={setFilingMetadata}
-                      onReset={resetDraft}
-                      onSubmit={submitDraft}
-                    />
+                    <div className="space-y-4">
+                      <EcfWizard
+                        draft={draft}
+                        busy={sessionPending}
+                        documentError={documentError}
+                        documentPending={documentPending}
+                        eventAvailability={ecfEventAvailability}
+                        learnerRole={learnerRole}
+                        metadata={filingMetadata}
+                        session={activeSession}
+                        validationIssues={validationIssues}
+                        onDraftChange={setDraft}
+                        onDocumentsSelected={analyzeAndAttachDocuments}
+                        onMetadataChange={setFilingMetadata}
+                        onReset={resetDraft}
+                        onSubmit={submitDraft}
+                      />
+                      {draft.documents.length ? (
+                        <StoredDocumentDownloads
+                          documents={draft.documents}
+                          error={documentDownloadError}
+                          pendingDocumentId={documentDownloadPendingId}
+                          onDownload={downloadStoredDocument}
+                        />
+                      ) : null}
+                    </div>
                   ) : null}
 
                   {selectedView === 'receipts' ? (
@@ -1046,6 +1237,37 @@ function createEmptyDraft(session: CaseSession, eventId: string): FilingDraft {
     sealed: false,
     notes: '',
   }
+}
+
+function cachedUnfiledDocuments(
+  userId: string | null,
+  session: CaseSession,
+  persistedDocuments: CaseSession['filings'][number]['documents'] = [],
+): CaseSession['filings'][number]['documents'] {
+  if (!userId || session.status !== 'active') return []
+  const filedDocumentIds = new Set(
+    session.filings.flatMap((filing) => filing.documents.map((document) => document.id)),
+  )
+  const documentsById = new Map(
+    getCachedConsumedDocuments(userId, asCaseSessionId(session.id)).map(
+      (document) => [document.id, document],
+    ),
+  )
+  for (const document of persistedDocuments) {
+    documentsById.set(document.id, document)
+  }
+  return [...documentsById.values()].filter(
+    (document) => !filedDocumentIds.has(document.id),
+  )
+}
+
+function appendUploadedDocuments(
+  draft: FilingDraft,
+  incoming: CaseSession['filings'][number]['documents'],
+): FilingDraft {
+  const documentsById = new Map(draft.documents.map((document) => [document.id, document]))
+  for (const document of incoming) documentsById.set(document.id, document)
+  return { ...draft, documents: [...documentsById.values()] }
 }
 
 function createDefaultMetadata(session: CaseSession, eventId: string): FilingMetadata {
@@ -2766,6 +2988,52 @@ function AssessmentList({ title, items }: { title: string; items: string[] }) {
         ))}
       </div>
     </div>
+  )
+}
+
+function StoredDocumentDownloads({
+  documents,
+  error,
+  pendingDocumentId,
+  onDownload,
+}: {
+  documents: DownloadableDocument[]
+  error: string
+  pendingDocumentId: string | null
+  onDownload: (document: DownloadableDocument) => void
+}) {
+  const storedDocuments = documents.filter((document) => document.sha256)
+  if (!storedDocuments.length) return null
+
+  return (
+    <section aria-label="Download stored documents" className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">Download stored PDFs</h2>
+      <p className="mt-2 text-xs leading-5 text-[#68716c]">
+        Downloads use your signed-in session and are assembled in this browser.
+      </p>
+      {error ? (
+        <p className="mt-3 rounded-md bg-[#fff0ed] px-3 py-2 text-sm text-[#8d2e1e]" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <ul className="mt-3 divide-y divide-[#e2dbcf] rounded-md border border-[#e2dbcf] bg-white">
+        {storedDocuments.map((document) => (
+          <li className="flex flex-wrap items-center justify-between gap-3 px-3 py-3 text-sm" key={document.id}>
+            <span className="min-w-0 truncate font-medium">{document.fileName}</span>
+            <button
+              aria-label={`Download ${document.fileName}`}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#9ba9a2] px-3 text-sm font-semibold text-[#28504f] hover:bg-[#eef1ed] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={pendingDocumentId !== null}
+              onClick={() => onDownload(document)}
+              type="button"
+            >
+              <FileText className="h-4 w-4" aria-hidden="true" />
+              {pendingDocumentId === document.id ? 'Preparing…' : 'Download'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 
