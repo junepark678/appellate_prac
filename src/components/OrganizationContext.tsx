@@ -695,6 +695,8 @@ export function OrganizationContextProvider({
       try {
         const organization = watch.localQueryResult();
         if (organization !== undefined) {
+          const recoveredFromWatchFailure = watchFailed;
+          watchFailed = false;
           const expiresAt =
             organization.expiresAt === undefined
               ? null
@@ -703,12 +705,13 @@ export function OrganizationContextProvider({
             expiresAt !== null &&
             (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
           ) {
+            if (recoveredFromWatchFailure)
+              organizationListRefreshStarted = false;
             clearExpiryTimer();
-            watchFailed = false;
             setContextUnavailable();
             return;
           }
-          watchFailed = false;
+          organizationListRefreshStarted = false;
           contextExpired = false;
           const authorizationSnapshot = JSON.stringify({
             kind: organization.kind,
