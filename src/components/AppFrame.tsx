@@ -58,12 +58,28 @@ export function AppFrame({
     pathname === '/admin' ||
     pathname.startsWith('/admin/')
   const organizationReady = organizationContext.status === 'ready'
-  const canShowChildren = !requiresOrganization || organizationReady
+  const requiredCapability =
+    pathname === '/app' || pathname.startsWith('/app/')
+      ? 'learn'
+      : pathname === '/instructor' || pathname.startsWith('/instructor/')
+        ? 'teach'
+        : pathname === '/admin' || pathname.startsWith('/admin/')
+          ? 'manageMembers'
+          : null
+  const hasRequiredCapability = requiredCapability
+    ? organizationContext.capabilities[requiredCapability]
+    : true
+  const capabilityDenied =
+    requiresOrganization && organizationReady && !hasRequiredCapability
+  const canShowChildren =
+    !requiresOrganization || (organizationReady && hasRequiredCapability)
   const visibleTitle = canShowChildren
     ? title
     : organizationContext.status === 'loading'
       ? 'Workspace'
-      : 'Organization unavailable'
+      : capabilityDenied
+        ? 'Access unavailable'
+        : 'Organization unavailable'
 
   return (
     <main className="min-h-screen bg-stone-50 text-slate-950">
@@ -84,7 +100,7 @@ export function AppFrame({
             Appellate Practice Simulator
           </Link>
           <nav className="flex items-center gap-2 text-sm">
-            {organizationReady ? (
+            {organizationReady && organizationContext.capabilities.learn ? (
               <Link
                 to="/app"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
@@ -258,8 +274,10 @@ export function AppFrame({
               role="alert"
               className="rounded border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
             >
-              {organizationContext.unavailableMessage ??
-                'This organization is unavailable. Choose an organization you can access.'}
+              {capabilityDenied
+                ? 'Your selected organization does not have access to this section.'
+                : organizationContext.unavailableMessage ??
+                  'This organization is unavailable. Choose an organization you can access.'}
               {organizationContext.canRetryOrganizationBootstrap ? (
                 <button
                   type="button"
@@ -275,6 +293,25 @@ export function AppFrame({
       </section>
     </main>
   )
+}
+
+export function OrganizationRouteGate({
+  title,
+  capability,
+  children,
+}: {
+  title: string
+  capability: 'learn' | 'teach' | 'manageMembers'
+  children: ReactNode
+}) {
+  const organizationContext = useOrganizationContext()
+  if (
+    organizationContext.status === 'ready' &&
+    organizationContext.capabilities[capability]
+  ) {
+    return <>{children}</>
+  }
+  return <AppFrame title={title}>{children}</AppFrame>
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
