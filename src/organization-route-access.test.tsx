@@ -683,14 +683,13 @@ describe("organization scoped route access", () => {
       institutionId: "org-admin",
     });
 
-    fireEvent.change(
-      screen.getByRole("searchbox", {
-        name: "Search selected organization members",
-      }),
-      {
-        target: { value: "learner".padEnd(121, "x") },
-      },
-    );
+    const memberSearch = screen.getByRole("searchbox", {
+      name: "Search selected organization members",
+    });
+    expect(memberSearch.getAttribute("maxlength")).toBe("120");
+    fireEvent.change(memberSearch, {
+      target: { value: "learner".padEnd(121, "x") },
+    });
     await waitFor(() => {
       const searchArgs = queryCalls("users:listOrganizationMembers").at(-1)
         ?.args as { institutionId: string; search?: string };
