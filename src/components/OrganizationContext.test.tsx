@@ -152,6 +152,9 @@ let routeContentRenderCount: number;
 let latestCapture: ReturnType<
   ReturnType<typeof useOrganizationContext>["captureOrganizationContext"]
 >;
+let captureOrganizationContext: ReturnType<
+  typeof useOrganizationContext
+>["captureOrganizationContext"];
 let isCaptureCurrent: (capture: OrganizationContextCapture) => boolean;
 let contextWatches: Map<
   string,
@@ -180,6 +183,7 @@ function OrganizationContents() {
   routeContentRenderCount += 1;
   const context = useOrganizationContext();
   latestCapture = context.captureOrganizationContext();
+  captureOrganizationContext = context.captureOrganizationContext;
   isCaptureCurrent = context.isCurrentOrganizationContext;
 
   return (
@@ -598,6 +602,36 @@ describe("OrganizationContextProvider", () => {
       /organization is unavailable/i,
     );
     expect(screen.queryByText("Org A content (admin)")).toBeNull();
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects captures when expiry has passed before a delayed timer runs", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    const expiresAt = new Date(now + 1_000).toISOString();
+    vi.setSystemTime(now);
+    getOrganizationContext = async (id) =>
+      organization(id, "Org A", "admin", "shared", expiresAt);
+    renderOrganizationApp("/app?organizationId=org-a");
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    const capture = latestCapture!;
+    expect(capture).not.toBeNull();
+    expect(isCaptureCurrent(capture)).toBe(true);
+
+    // Move wall-clock time past expiry without advancing the scheduled timer.
+    vi.setSystemTime(now + 1_001);
+    expect(captureOrganizationContext()).toBeNull();
+    expect(isCaptureCurrent(capture)).toBe(false);
+    expect(cancellationSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
     expect(cancellationSpy).toHaveBeenCalledTimes(1);
   });
 
