@@ -59,19 +59,32 @@ export function DocumentAssemblyStep({
   documentError,
   documentPending,
   draft,
+  availableDocuments,
   metadata,
   onDocumentsSelected,
+  onSelectRecoveredDocument,
+  onRemoveDocument,
   onDraftChange,
   onMetadataChange,
 }: {
   documentError: string
   documentPending: boolean
   draft: FilingDraft
+  availableDocuments: UploadedDocument[]
   metadata: FilingMetadata
-  onDocumentsSelected: (files: FileList | null) => void
+  onDocumentsSelected: (files: File[]) => void
+  onSelectRecoveredDocument: (documentId: string) => void
+  onRemoveDocument: (documentId: string) => void
   onDraftChange: (draft: FilingDraft) => void
   onMetadataChange: (metadata: FilingMetadata) => void
 }) {
+  const selectedDocumentIds = new Set(
+    draft.documents.map((document) => document.id),
+  )
+  const availableForDraft = availableDocuments.filter(
+    (document) => !selectedDocumentIds.has(document.id),
+  )
+
   return (
     <section className="space-y-4">
       <label className="block space-y-2 text-sm font-medium">
@@ -84,7 +97,12 @@ export function DocumentAssemblyStep({
               className="mt-4 w-full max-w-sm text-sm"
               disabled={documentPending}
               multiple
-              onChange={(event) => onDocumentsSelected(event.target.files)}
+              onChange={(event) => {
+                const input = event.currentTarget
+                const files = Array.from(input.files ?? [])
+                input.value = ''
+                onDocumentsSelected(files)
+              }}
               type="file"
             />
             {documentPending ? (
@@ -121,12 +139,56 @@ export function DocumentAssemblyStep({
                   <DocumentMetric label="Record cites" value={String(document.analysis?.recordCitations?.length ?? 0)} />
                 </div>
               </div>
-              <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
-                {document.mimeType}
-              </span>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <span className="h-fit rounded bg-[#eef1ed] px-2 py-1 text-xs font-semibold text-[#4f5f57]">
+                  {document.mimeType}
+                </span>
+                <button
+                  aria-label={`Remove ${document.fileName} from draft`}
+                  className="h-9 rounded-md border border-[#c9c1b3] px-3 text-xs font-semibold text-[#6f3a2e] hover:bg-[#fff0ed]"
+                  onClick={() => onRemoveDocument(document.id)}
+                  type="button"
+                >
+                  Remove from draft
+                </button>
+              </div>
             </div>
           ))}
         </div>
+      ) : null}
+
+      {availableForDraft.length ? (
+        <section
+          aria-label="Stored PDFs available to add"
+          className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-3"
+        >
+          <h3 className="text-sm font-semibold">
+            Stored PDFs available to add
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-[#68716c]">
+            Removing a PDF from this draft keeps its stored receipt available here.
+          </p>
+          <ul className="mt-2 divide-y divide-[#e2dbcf] rounded-md border border-[#e2dbcf] bg-white">
+            {availableForDraft.map((document) => (
+              <li
+                className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-sm"
+                key={document.id}
+              >
+                <span className="min-w-0 truncate font-medium">
+                  {document.fileName}
+                </span>
+                <button
+                  aria-label={`Add ${document.fileName} to draft`}
+                  className="h-9 rounded-md border border-[#9ba9a2] px-3 text-xs font-semibold text-[#28504f] hover:bg-[#eef1ed]"
+                  onClick={() => onSelectRecoveredDocument(document.id)}
+                  type="button"
+                >
+                  Add to draft
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       <div className="grid gap-3 md:grid-cols-3">

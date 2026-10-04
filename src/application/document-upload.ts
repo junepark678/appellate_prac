@@ -133,7 +133,7 @@ type StagedUpload = {
   userId: string
   caseSessionId: Id<'caseSessions'>
   intentId: Id<'documentUploadIntents'>
-  state: 'pending' | 'stored' | 'consumed'
+  state: 'pending' | 'completing' | 'stored' | 'consumed'
   document: UploadedDocument
   analysis: DocumentAnalysis
 }
@@ -142,7 +142,7 @@ const stagedUploads = new Map<string, StagedUpload>()
 const inFlightUploads = new Map<string, Promise<UploadedDocument>>()
 
 export function inferUploadedDocuments(
-  files: FileList | null,
+  files: FileList | readonly File[] | null,
 ): UploadedDocument[] {
   return Array.from(files ?? []).map(inferDocumentSignals)
 }
@@ -165,7 +165,7 @@ export function getCachedConsumedDocuments(
 export async function analyzeUploadAndPersistDocuments(
   workflow: DocumentUploadWorkflow,
   caseSessionId: Id<'caseSessions'>,
-  files: FileList | null,
+  files: FileList | readonly File[] | null,
   options: DocumentUploadOptions,
 ): Promise<UploadedDocument[]> {
   const selectedFiles = Array.from(files ?? [])
@@ -304,6 +304,13 @@ async function transferPreparedFile(
     throwIfAborted(signal)
     if (staged.state === 'pending') {
       await uploadFileChunks(workflow, staged.intentId, file, signal)
+      // Record the phase before dispatch. If the server commits completion but
+      // its response is lost, the next selection must retry this same intent's
+      // idempotent completion action rather than replaying chunks to a stored
+      // intent.
+      staged.state = 'completing'
+    }
+    if (staged.state === 'completing') {
       const receipt = await completeWithBoundedRetry(
         workflow,
         staged.intentId,
@@ -342,13 +349,17 @@ async function transferPreparedFile(
     const normalized = normalizeTransferError(error)
     if (normalized.kind === 'expired') {
       stagedUploads.delete(cacheKey)
-    } else if (normalized.kind === 'cancelled') {
+    } else if (normalized.kind === 'cancelled' && staged.state === 'pending') {
       try {
         await workflow.cancelUpload?.({ intentId: staged.intentId })
         stagedUploads.delete(cacheKey)
       } catch {
         // Keep an uncertain receipt available for an idempotent retry.
       }
+    } else if (normalized.kind === 'cancelled') {
+      // Completion may already be stored, or persistence may have committed
+      // before its response was cancelled. Keep the same intent so retrying in
+      // the owning account and session can safely recover the receipt.
     }
     throw normalized
   }

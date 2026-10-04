@@ -54,7 +54,14 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 
 import { EcfWizard } from '../components/ecf/EcfWizard'
 import {
@@ -104,6 +111,7 @@ import type {
   Scenario,
   TrialDocket,
   ToolCall,
+  UploadedDocument,
 } from '../domain/types'
 import type { CourtListenerSearchResult } from '../integrations/courtlistener'
 import { api } from '../../convex/_generated/api'
@@ -183,7 +191,7 @@ function formatDateTimeUtc(value: string) {
   return utcDateTimeFormatter.format(new Date(value))
 }
 
-function Home() {
+export function Home() {
   const { isSignedIn, user } = useUser()
   const { getToken } = useAuth()
   const organizationContext = useOrganizationContext()
@@ -213,6 +221,8 @@ function Home() {
   const [draft, setDraft] = useState<FilingDraft>(() =>
     createEmptyDraft(createInitialSession(), 'notice_of_appeal'),
   )
+  const [availableRecoveredDocuments, setAvailableRecoveredDocuments] =
+    useState<UploadedDocument[]>([])
   const [filingMetadata, setFilingMetadata] = useState<FilingMetadata>(() =>
     createDefaultMetadata(createInitialSession(), 'notice_of_appeal'),
   )
@@ -277,6 +287,9 @@ function Home() {
       : 'skip',
   )
   const activeSession = session ?? null
+  const filedDocuments = activeSession
+    ? acceptedFilingDocuments(activeSession)
+    : []
   const getTokenRef = useRef(getToken)
   getTokenRef.current = getToken
   const downloadManagerRef = useRef<DocumentDownloadManager | null>(null)
@@ -288,19 +301,25 @@ function Home() {
   }
   const downloadManager = downloadManagerRef.current
   const transportControllersRef = useRef(new Set<AbortController>())
+  const uploadOperationRef = useRef<symbol | null>(null)
+  const downloadOperationRef = useRef<symbol | null>(null)
+  const organizationScope = organizationContext.captureOrganizationContext()
   const activeScopeRef = useRef<{
     userId: string | null
+    canUseConvex: boolean
     requestedSessionId: Id<'caseSessions'> | null
     activeSessionId: string | null
     institutionId: string | undefined
   }>({
     userId,
+    canUseConvex,
     requestedSessionId: activeCaseSessionId,
     activeSessionId: activeSession?.id ?? null,
     institutionId: activeSession?.institutionId,
   })
   activeScopeRef.current = {
     userId,
+    canUseConvex,
     requestedSessionId: activeCaseSessionId,
     activeSessionId: activeSession?.id ?? null,
     institutionId: activeSession?.institutionId,
@@ -309,6 +328,12 @@ function Home() {
     for (const controller of transportControllersRef.current) controller.abort()
     transportControllersRef.current.clear()
     downloadManager.revokeAll()
+    uploadOperationRef.current = null
+    downloadOperationRef.current = null
+    setDocumentPending(false)
+    setDocumentDownloadPendingId(null)
+    setDocumentError('')
+    setDocumentDownloadError('')
   }, [downloadManager])
 
   useEffect(
@@ -316,10 +341,19 @@ function Home() {
     [cancelPendingTransfers, organizationContext.registerOrganizationCancellation],
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     cancelPendingTransfers()
     return cancelPendingTransfers
-  }, [activeCaseSessionId, activeSession?.id, activeSession?.institutionId, cancelPendingTransfers, userId])
+  }, [
+    activeCaseSessionId,
+    activeSession?.id,
+    activeSession?.institutionId,
+    canUseConvex,
+    cancelPendingTransfers,
+    organizationScope?.generation,
+    organizationScope?.organizationId,
+    userId,
+  ])
   const scenarioOptions = publishedScenarios ?? scenarios
   const ruleItems = activeSession ? getRuleItemsForCourt(activeSession.courtPackId) : []
   const visibleTabs = useMemo(
@@ -374,9 +408,9 @@ function Home() {
 
   useEffect(() => {
     if (!activeSession) return
-    setDraft({
-      ...createEmptyDraft(activeSession, 'notice_of_appeal'),
-      documents: cachedUnfiledDocuments(
+    setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
+    setAvailableRecoveredDocuments(
+      cachedUnfiledDocuments(
         userId,
         activeSession,
         unfiledDocumentRecovery?.caseSessionId ===
@@ -384,7 +418,7 @@ function Home() {
           ? unfiledDocumentRecovery.documents
           : [],
       ),
-    })
+    )
     setFilingMetadata(createDefaultMetadata(activeSession, 'notice_of_appeal'))
     setTrialDocket(createTrialDocket(activeSession))
   }, [activeSession?.id, userId])
@@ -397,12 +431,13 @@ function Home() {
     ) {
       return
     }
-    const recovered = cachedUnfiledDocuments(
-      userId,
-      activeSession,
-      unfiledDocumentRecovery.documents,
+    setAvailableRecoveredDocuments(
+      cachedUnfiledDocuments(
+        userId,
+        activeSession,
+        unfiledDocumentRecovery.documents,
+      ),
     )
-    setDraft((current) => appendUploadedDocuments(current, recovered))
   }, [activeSession?.id, userId, unfiledDocumentRecovery])
 
   useEffect(() => {
@@ -417,18 +452,31 @@ function Home() {
 
   function resetDraft(eventId = draft.eventId) {
     if (!activeSession) return
-    setDraft({
-      ...createEmptyDraft(activeSession, eventId),
-      documents: cachedUnfiledDocuments(
-        userId,
-        activeSession,
-        unfiledDocumentRecovery?.caseSessionId ===
-          asCaseSessionId(activeSession.id)
-          ? unfiledDocumentRecovery.documents
-          : [],
-      ),
-    })
+    setDraft(createEmptyDraft(activeSession, eventId))
     setFilingMetadata(createDefaultMetadata(activeSession, eventId))
+  }
+
+  function selectRecoveredDocument(documentId: string) {
+    const document = availableRecoveredDocuments.find(
+      (candidate) => candidate.id === documentId,
+    )
+    if (!document) return
+    setDraft((current) => appendUploadedDocuments(current, [document]))
+  }
+
+  function removeDocumentFromDraft(documentId: string) {
+    setDraft((current) => ({
+      ...current,
+      documents: current.documents.filter(
+        (document) => document.id !== documentId,
+      ),
+    }))
+  }
+
+  function rememberAvailableDocuments(documents: UploadedDocument[]) {
+    setAvailableRecoveredDocuments((current) =>
+      mergeUploadedDocuments(current, documents),
+    )
   }
 
   async function startScenario(scenarioId: string) {
@@ -439,6 +487,7 @@ function Home() {
       setActiveCaseSessionId(asCaseSessionId(nextSession.id))
       setTrialDocket(createTrialDocket(nextSession))
       setDraft(createEmptyDraft(nextSession, 'notice_of_appeal'))
+      setAvailableRecoveredDocuments([])
       setFilingMetadata(createDefaultMetadata(nextSession, 'notice_of_appeal'))
       setActiveView('docket')
     } catch (error) {
@@ -609,22 +658,36 @@ function Home() {
     }
   }
 
-  async function analyzeAndAttachDocuments(files: FileList | null) {
+  async function analyzeAndAttachDocuments(files: File[]) {
     if (!activeSession || !canUseConvex || !userId) return
     const capturedSessionId = asCaseSessionId(activeSession.id)
     const requestedSessionId = activeCaseSessionId
     const organizationCapture = organizationContext.captureOrganizationContext()
     const controller = new AbortController()
+    const operationId = Symbol('document-upload')
+    uploadOperationRef.current = operationId
     const isCurrentScope = () => {
       if (controller.signal.aborted) return false
       const current = activeScopeRef.current
       return (
         current.userId === userId &&
+        current.canUseConvex &&
         current.requestedSessionId === requestedSessionId &&
         current.activeSessionId === activeSession.id &&
         current.institutionId === activeSession.institutionId &&
-        (!organizationCapture || organizationContext.isCurrentOrganizationContext(organizationCapture))
+        (!organizationCapture ||
+          organizationContext.isCurrentOrganizationContext(
+            organizationCapture,
+          ))
       )
+    }
+    const requireCurrentScope = () => {
+      if (!isCurrentScope()) {
+        throw new DocumentTransferError(
+          'cancelled',
+          'Document transfer was cancelled because the active account or session changed.',
+        )
+      }
     }
     transportControllersRef.current.add(controller)
     setDocumentPending(true)
@@ -633,21 +696,35 @@ function Home() {
       const documents = await analyzeUploadAndPersistDocuments(
         {
           siteUrl: import.meta.env.VITE_CONVEX_SITE_URL,
-          getAuthToken: () => getToken({ template: 'convex' }),
-          beginUpload: (args) => beginDocumentUpload(args),
-          completeUpload: (args) => completeDocumentUpload(args),
+          getAuthToken: () => {
+            requireCurrentScope()
+            return getToken({ template: 'convex' })
+          },
+          beginUpload: (args) => {
+            requireCurrentScope()
+            return beginDocumentUpload(args)
+          },
+          completeUpload: (args) => {
+            requireCurrentScope()
+            return completeDocumentUpload(args)
+          },
           cancelUpload: (args) => cancelDocumentUpload(args),
-          persistDocumentAnalysis: (args) => persistDocumentAnalysis(args),
+          persistDocumentAnalysis: (args) => {
+            requireCurrentScope()
+            return persistDocumentAnalysis(args)
+          },
         },
         capturedSessionId,
         files,
         { userId, signal: controller.signal },
       )
       if (!isCurrentScope()) return
+      rememberAvailableDocuments(documents)
       setDraft((current) => appendUploadedDocuments(current, documents))
     } catch (error) {
       if (!isCurrentScope()) return
       if (error instanceof DocumentUploadBatchError) {
+        rememberAvailableDocuments(error.documents)
         setDraft((current) => appendUploadedDocuments(current, error.documents))
       }
       setDocumentError(
@@ -657,7 +734,10 @@ function Home() {
       )
     } finally {
       transportControllersRef.current.delete(controller)
-      if (isCurrentScope()) setDocumentPending(false)
+      if (uploadOperationRef.current === operationId) {
+        uploadOperationRef.current = null
+        setDocumentPending(false)
+      }
     }
   }
 
@@ -667,15 +747,21 @@ function Home() {
     const requestedSessionId = activeCaseSessionId
     const organizationCapture = organizationContext.captureOrganizationContext()
     const controller = new AbortController()
+    const operationId = Symbol('document-download')
+    downloadOperationRef.current = operationId
     const isCurrentScope = () => {
       if (controller.signal.aborted) return false
       const current = activeScopeRef.current
       return (
         current.userId === userId &&
+        current.canUseConvex &&
         current.requestedSessionId === requestedSessionId &&
         current.activeSessionId === capturedSessionId &&
         current.institutionId === activeSession.institutionId &&
-        (!organizationCapture || organizationContext.isCurrentOrganizationContext(organizationCapture))
+        (!organizationCapture ||
+          organizationContext.isCurrentOrganizationContext(
+            organizationCapture,
+          ))
       )
     }
     transportControllersRef.current.add(controller)
@@ -707,7 +793,10 @@ function Home() {
       }
     } finally {
       transportControllersRef.current.delete(controller)
-      if (isCurrentScope()) setDocumentDownloadPendingId(null)
+      if (downloadOperationRef.current === operationId) {
+        downloadOperationRef.current = null
+        setDocumentDownloadPendingId(null)
+      }
     }
   }
 
@@ -872,12 +961,15 @@ function Home() {
                         documentError={documentError}
                         documentPending={documentPending}
                         eventAvailability={ecfEventAvailability}
+                        availableDocuments={availableRecoveredDocuments}
                         learnerRole={learnerRole}
                         metadata={filingMetadata}
                         session={activeSession}
                         validationIssues={validationIssues}
                         onDraftChange={setDraft}
                         onDocumentsSelected={analyzeAndAttachDocuments}
+                        onSelectRecoveredDocument={selectRecoveredDocument}
+                        onRemoveDocument={removeDocumentFromDraft}
                         onMetadataChange={setFilingMetadata}
                         onReset={resetDraft}
                         onSubmit={submitDraft}
@@ -885,6 +977,16 @@ function Home() {
                       {draft.documents.length ? (
                         <StoredDocumentDownloads
                           documents={draft.documents}
+                          error={documentDownloadError}
+                          pendingDocumentId={documentDownloadPendingId}
+                          onDownload={downloadStoredDocument}
+                        />
+                      ) : null}
+                      {filedDocuments.length ? (
+                        <StoredDocumentDownloads
+                          ariaLabel="Download accepted filing documents"
+                          heading="Accepted filing PDFs"
+                          documents={filedDocuments}
                           error={documentDownloadError}
                           pendingDocumentId={documentDownloadPendingId}
                           onDownload={downloadStoredDocument}
@@ -1246,7 +1348,9 @@ function cachedUnfiledDocuments(
 ): CaseSession['filings'][number]['documents'] {
   if (!userId || session.status !== 'active') return []
   const filedDocumentIds = new Set(
-    session.filings.flatMap((filing) => filing.documents.map((document) => document.id)),
+    session.filings
+      .filter((filing) => filing.outcome !== 'rejected')
+      .flatMap((filing) => filing.documents.map((document) => document.id)),
   )
   const documentsById = new Map(
     getCachedConsumedDocuments(userId, asCaseSessionId(session.id)).map(
@@ -1259,6 +1363,17 @@ function cachedUnfiledDocuments(
   return [...documentsById.values()].filter(
     (document) => !filedDocumentIds.has(document.id),
   )
+}
+
+function mergeUploadedDocuments(
+  existing: UploadedDocument[],
+  incoming: UploadedDocument[],
+) {
+  const documentsById = new Map(
+    existing.map((document) => [document.id, document]),
+  )
+  for (const document of incoming) documentsById.set(document.id, document)
+  return [...documentsById.values()]
 }
 
 function appendUploadedDocuments(
@@ -1295,6 +1410,16 @@ function statusClass(status: CaseSession['status'] | 'active') {
 
 function acceptedFilings(session: CaseSession) {
   return session.filings.filter((filing) => filing.outcome !== 'rejected')
+}
+
+function acceptedFilingDocuments(session: CaseSession) {
+  const documentsById = new Map<string, UploadedDocument>()
+  for (const filing of acceptedFilings(session)) {
+    for (const document of filing.documents) {
+      if (document.sha256) documentsById.set(document.id, document)
+    }
+  }
+  return [...documentsById.values()]
 }
 
 function hasAcceptedFiling(session: CaseSession, eventId?: string) {
@@ -2992,11 +3117,15 @@ function AssessmentList({ title, items }: { title: string; items: string[] }) {
 }
 
 function StoredDocumentDownloads({
+  ariaLabel = 'Download stored documents',
+  heading = 'Download stored PDFs',
   documents,
   error,
   pendingDocumentId,
   onDownload,
 }: {
+  ariaLabel?: string
+  heading?: string
   documents: DownloadableDocument[]
   error: string
   pendingDocumentId: string | null
@@ -3006,8 +3135,8 @@ function StoredDocumentDownloads({
   if (!storedDocuments.length) return null
 
   return (
-    <section aria-label="Download stored documents" className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
-      <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">Download stored PDFs</h2>
+    <section aria-label={ariaLabel} className="rounded-lg border border-[#d8d1c4] bg-[#fbfaf7] p-4">
+      <h2 className="text-sm font-semibold uppercase tracking-[0.08em] text-[#68716c]">{heading}</h2>
       <p className="mt-2 text-xs leading-5 text-[#68716c]">
         Downloads use your signed-in session and are assembled in this browser.
       </p>

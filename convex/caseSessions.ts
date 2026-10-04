@@ -3621,7 +3621,6 @@ export const getUnfiledDocumentsForCurrentUser = query({
   handler: async (ctx, args) => {
     ctx = withSessionTransactionBudget(ctx).ctx
     const { session } = await requireOwnedSession(ctx, args.caseSessionId)
-    await requireWritableCaseSession(ctx, args.caseSessionId)
 
     // Assemble through the bounded session readers so filed links and document
     // analysis relationships are validated before exposing recovery choices.
@@ -3638,9 +3637,9 @@ export const getUnfiledDocumentsForCurrentUser = query({
       session,
     )
     const filedDocumentIds = new Set(
-      assembled.filings.flatMap((filing) =>
-        filing.documents.map((document) => document.id),
-      ),
+      assembled.filings
+        .filter((filing) => filing.outcome !== 'rejected')
+        .flatMap((filing) => filing.documents.map((document) => document.id)),
     )
     const documents = [...receiptBackedDocuments.values()]
       .filter(({ document }) => !filedDocumentIds.has(String(document._id)))

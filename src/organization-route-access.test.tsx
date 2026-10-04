@@ -28,6 +28,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { createHash, webcrypto } from "node:crypto";
 import type { Id } from "../convex/_generated/dataModel";
 import {
   RouterProvider,
@@ -36,7 +37,11 @@ import {
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { Home } from "./routes/index";
 import { routeTree } from "./routeTree.gen";
+import { createInitialSession } from "./domain/simulation";
+import type { CaseSession, UploadedDocument } from "./domain/types";
+import { documentUploadChunkBytes } from "./application/document-upload";
 
 const mocks = vi.hoisted(() => ({
   context: null as Record<string, any> | null,
@@ -45,6 +50,11 @@ const mocks = vi.hoisted(() => ({
   queryCalls: [] as Array<{ name: string; args: unknown }>,
   mutationHandlers: new Map<string, (...args: any[]) => unknown>(),
   mutationCalls: [] as Array<{ name: string; args: unknown[] }>,
+  actionHandlers: new Map<string, (...args: any[]) => unknown>(),
+  actionCalls: [] as Array<{ name: string; args: unknown[] }>,
+  organizationCancellations: new Set<() => void>(),
+  getToken: vi.fn(async () => "convex-jwt"),
+  pdfAnalyze: vi.fn(),
   auth: { isLoaded: true, isSignedIn: true, user: { id: "user-a" } },
   router: null as any,
 }));
@@ -83,6 +93,17 @@ vi.mock("./components/OrganizationContext", async () => {
 vi.mock("convex/react", async () => {
   const { getFunctionName: functionName } = await import("convex/server");
   return {
+    useAction: (reference: Parameters<typeof functionName>[0]) => {
+      const name = functionName(reference);
+      return (...args: any[]) => {
+        mocks.actionCalls.push({ name, args });
+        return mocks.actionHandlers.get(name)?.(...args);
+      };
+    },
+    useConvexAuth: () => ({
+      isLoading: false,
+      isAuthenticated: mocks.auth.isSignedIn,
+    }),
     useQuery: (
       reference: Parameters<typeof functionName>[0],
       args: unknown,
@@ -108,8 +129,25 @@ vi.mock("@clerk/tanstack-react-start", async () => {
     React.createElement(React.Fragment, null, children);
   return {
     ClerkProvider: passThrough,
-    useAuth: () => ({ isLoaded: true, isSignedIn: true }),
+    useAuth: () => ({
+      isLoaded: true,
+      isSignedIn: mocks.auth.isSignedIn,
+      getToken: mocks.getToken,
+    }),
     useUser: () => mocks.auth,
+    Show: ({
+      when,
+      children,
+    }: {
+      when: "signed-in" | "signed-out";
+      children: React.ReactNode;
+    }) => {
+      const visible =
+        when === "signed-in" ? mocks.auth.isSignedIn : !mocks.auth.isSignedIn;
+      return visible
+        ? React.createElement(React.Fragment, null, children)
+        : null;
+    },
     ClerkLoaded: ({ children }: { children: React.ReactNode }) =>
       mocks.auth.isLoaded
         ? React.createElement(React.Fragment, null, children)
@@ -120,11 +158,17 @@ vi.mock("@clerk/tanstack-react-start", async () => {
         : React.createElement(React.Fragment, null, children),
     SignInButton: ({ children }: { children: React.ReactNode }) =>
       React.createElement(React.Fragment, null, children),
+    SignUpButton: ({ children }: { children: React.ReactNode }) =>
+      React.createElement(React.Fragment, null, children),
     SignOutButton: ({ children }: { children: React.ReactNode }) =>
       React.createElement(React.Fragment, null, children),
     UserButton: () => null,
   };
 });
+
+vi.mock("./modules/documents/pdfjs-analyzer", () => ({
+  pdfJsAnalyzer: { analyze: mocks.pdfAnalyze },
+}));
 
 vi.mock("convex/react-clerk", async () => {
   const React = await import("react");
@@ -323,13 +367,17 @@ function selectedOrganizationContext(
         current.generation === capture.generation
       );
     },
-    registerOrganizationCancellation: () => () => undefined,
+    registerOrganizationCancellation: (cancel: () => void) => {
+      mocks.organizationCancellations.add(cancel);
+      return () => mocks.organizationCancellations.delete(cancel);
+    },
   };
 }
 
 function publishContext(context: Record<string, any>) {
   mocks.context = context;
   for (const listener of mocks.contextListeners) listener();
+  for (const cancel of mocks.organizationCancellations) cancel();
 }
 
 function setContext(
@@ -374,12 +422,40 @@ function renderRoute(initialEntry: string) {
   return { router, ...render(<RouterProvider router={router} />) };
 }
 
+function renderHomeRoute() {
+  return render(<Home />);
+}
+
 beforeEach(() => {
+  vi.stubGlobal("crypto", webcrypto);
   mocks.contextListeners.clear();
+  mocks.organizationCancellations.clear();
   mocks.queryResponses.clear();
   mocks.queryCalls.length = 0;
   mocks.mutationHandlers.clear();
   mocks.mutationCalls.length = 0;
+  mocks.actionHandlers.clear();
+  mocks.actionCalls.length = 0;
+  mocks.getToken.mockReset();
+  mocks.getToken.mockResolvedValue("convex-jwt");
+  mocks.pdfAnalyze.mockReset();
+  mocks.pdfAnalyze.mockImplementation(
+    async (file: {
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+    }) => ({
+      analyzerId: "route-fixture-analyzer",
+      fileSizeBytes: file.sizeBytes,
+      mimeType: file.mimeType,
+      searchableText: true,
+      normalizedText: `analysis for ${file.fileName}`,
+      certificateOfServiceDetected: false,
+      certificateOfComplianceDetected: false,
+      sealedOrRedactionWarning: false,
+      warnings: [],
+    }),
+  );
   mocks.auth.isLoaded = true;
   mocks.auth.isSignedIn = true;
   mocks.auth.user = { id: "user-a" };
@@ -499,6 +575,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   mocks.router = null;
 });
 
@@ -910,5 +989,763 @@ describe("organization scoped route access", () => {
         ({ args }) => args === "skip",
       ),
     ).toBe(true);
+  });
+});
+
+function homeSession(id: string, title: string): CaseSession {
+  const initial = createInitialSession();
+  return {
+    ...initial,
+    id,
+    institutionId: "org-a" as Id<"institutions">,
+    scenario: {
+      ...initial.scenario,
+      title,
+      shortCaption: title,
+    },
+  };
+}
+
+function recoveredPdf(
+  id: string,
+  fileName: string,
+  bytes: Uint8Array,
+): UploadedDocument {
+  return {
+    id,
+    analysisId: `analysis-${id}`,
+    fileName,
+    mimeType: "application/pdf",
+    sizeBytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    extractedText: `persisted text for ${fileName}`,
+    extractedSignals: ["fixture document"],
+    analysis: {
+      analyzerId: "route-fixture-analyzer",
+      fileSizeBytes: bytes.byteLength,
+      mimeType: "application/pdf",
+      searchableText: true,
+      normalizedText: `persisted text for ${fileName}`,
+      certificateOfServiceDetected: false,
+      certificateOfComplianceDetected: false,
+      sealedOrRedactionWarning: false,
+      warnings: [],
+    },
+  };
+}
+
+function rejectedFiling(document: UploadedDocument) {
+  return {
+    id: "rejected-filing-attempt",
+    eventId: "notice_of_appeal",
+    participantRole: "appellant" as const,
+    title: "Rejected notice attempt",
+    documents: [document],
+    certificateOfService: true,
+    certificateOfCompliance: false,
+    sealed: false,
+    notes: "",
+    filedAt: "2026-10-04T12:00:00.000Z",
+    outcome: "rejected" as const,
+    validationIssues: [],
+  };
+}
+
+function acceptedFiling(
+  document: UploadedDocument,
+): CaseSession["filings"][number] {
+  return {
+    ...rejectedFiling(document),
+    id: "accepted-filing",
+    outcome: "accepted",
+  };
+}
+
+function installHomeQueries(
+  sessions: CaseSession[],
+  recoveredBySession: Map<string, UploadedDocument[]>,
+) {
+  const sessionsById = new Map(
+    sessions.map((session) => [session.id, session]),
+  );
+  const recoveryResults = new Map<
+    string,
+    { caseSessionId: string; documents: UploadedDocument[] }
+  >();
+  setQueryResponse("caseSessions:getForCurrentUser", (args: unknown) => {
+    const caseSessionId = (args as { caseSessionId?: string }).caseSessionId;
+    if (caseSessionId) return sessionsById.get(caseSessionId);
+    return mocks.auth.user.id === "user-b"
+      ? (sessions[1] ?? sessions[0])
+      : sessions[0];
+  });
+  setQueryResponse(
+    "caseSessions:listForCurrentUser",
+    sessions.map((session) => ({
+      id: session.id,
+      scenarioTitle: session.scenario.title,
+      shortCaption: session.scenario.shortCaption,
+      status: session.status,
+      simulatedDate: session.simulatedDate,
+      createdAt: 1,
+    })),
+  );
+  setQueryResponse("caseSessions:getTrialDocketForCurrentUser", undefined);
+  setQueryResponse("caseSessions:getAvailableEcfEvents", []);
+  setQueryResponse(
+    "caseSessions:getUnfiledDocumentsForCurrentUser",
+    (args: unknown) => {
+      const caseSessionId = (args as { caseSessionId: string }).caseSessionId;
+      let result = recoveryResults.get(caseSessionId);
+      if (!result) {
+        result = { caseSessionId, documents: [] };
+        recoveryResults.set(caseSessionId, result);
+      }
+      result.documents = recoveredBySession.get(caseSessionId) ?? [];
+      return result;
+    },
+  );
+  setQueryResponse("scenarios:listAvailableForCurrentUser", []);
+  setQueryResponse("integrations:getIntegrationStatus", {
+    openRouterConfigured: false,
+    courtListenerConfigured: false,
+  });
+  mocks.mutationHandlers.set("users:upsertCurrentUser", async () => undefined);
+}
+
+function installDocumentHandlers(
+  recoveredBySession: Map<string, UploadedDocument[]>,
+) {
+  let intentSequence = 0;
+  const receipts = new Map<
+    string,
+    { sizeBytes: number; sha256: string; fileName: string }
+  >();
+  mocks.mutationHandlers.set(
+    "documentUploads:begin",
+    async (args: {
+      scope: { caseSessionId: string };
+      fileName: string;
+      sizeBytes: number;
+      sha256: string;
+    }) => {
+      const intentId = `route-intent-${++intentSequence}`;
+      receipts.set(intentId, args);
+      return {
+        intentId,
+        chunkBytes: documentUploadChunkBytes,
+        expiresAt: "2026-10-05T00:00:00.000Z",
+      };
+    },
+  );
+  mocks.actionHandlers.set(
+    "documentUploadActions:complete",
+    async ({ intentId }: { intentId: string }) => {
+      const receipt = receipts.get(intentId);
+      if (!receipt) throw new Error("Unknown fixture upload intent");
+      return { intentId, ...receipt };
+    },
+  );
+  mocks.actionHandlers.set("documentUploadActions:cancel", async () => null);
+  mocks.mutationHandlers.set(
+    "caseSessions:persistDocumentAnalysis",
+    async (args: {
+      caseSessionId: string;
+      intentId: string;
+      document: UploadedDocument;
+    }) => {
+      const receipt = receipts.get(args.intentId);
+      if (!receipt) throw new Error("Unknown fixture upload intent");
+      const document: UploadedDocument = {
+        ...args.document,
+        id: `route-document-${args.intentId}`,
+        analysisId: `route-analysis-${args.intentId}`,
+      };
+      recoveredBySession.set(args.caseSessionId, [
+        ...(recoveredBySession.get(args.caseSessionId) ?? []),
+        document,
+      ]);
+      return { document, analysisId: document.analysisId };
+    },
+  );
+  return receipts;
+}
+
+function chunkAcknowledgment(url: URL, bytes: Uint8Array) {
+  return Response.json({
+    intentId: url.searchParams.get("intentId"),
+    index: Number(url.searchParams.get("index")),
+    sizeBytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+}
+
+function privateDownloadResponse(bytes: Uint8Array) {
+  return new Response(bytes.slice().buffer as ArrayBuffer, {
+    status: 200,
+    headers: {
+      "Cache-Control": "private, no-store",
+      "Content-Disposition": 'attachment; filename="document.pdf"',
+      "Content-Length": String(bytes.byteLength),
+      "Content-Type": "application/pdf",
+      "X-Document-Size": String(bytes.byteLength),
+    },
+  });
+}
+
+function installRouteObjectUrlMocks() {
+  let nextUrl = 0;
+  const createObjectURL = vi.fn(() => `blob:route-${++nextUrl}`);
+  const revokeObjectURL = vi.fn();
+  const OriginalURL = URL;
+  class RouteURL extends OriginalURL {
+    static createObjectURL = createObjectURL;
+    static revokeObjectURL = revokeObjectURL;
+  }
+  vi.stubGlobal("URL", RouteURL);
+  return { createObjectURL, revokeObjectURL };
+}
+
+async function openDocumentStep() {
+  fireEvent.click(await screen.findByRole("button", { name: "File" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: /Step 3 Documents/ }),
+  );
+  return screen.getByLabelText("PDF documents") as HTMLInputElement;
+}
+
+describe("document transport route integration", () => {
+  it("resets the native PDF input and retries the same file after a chunk failure", async () => {
+    vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+    const session = homeSession("route-same-file-retry", "Same File Retry");
+    const recoveredBySession = new Map<string, UploadedDocument[]>();
+    installHomeQueries([session], recoveredBySession);
+    const receipts = installDocumentHandlers(recoveredBySession);
+    let postCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (init?.method === "GET") {
+          throw new Error("This test does not request a download.");
+        }
+        postCount += 1;
+        if (postCount === 1) {
+          return Response.json({ error: "temporary storage outage" }, { status: 503 });
+        }
+        const bytes = new Uint8Array(await (init?.body as Blob).arrayBuffer());
+        return chunkAcknowledgment(url, bytes);
+      }),
+    );
+
+    renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Same File Retry" }),
+    ).toBeTruthy();
+    const input = await openDocumentStep();
+    const file = new File(["%PDF-1.7\nsame file retry"], "same.pdf", {
+      type: "application/pdf",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(input.value).toBe("");
+    expect(
+      await screen.findByText(/private document service could not accept this request/i),
+    ).toBeTruthy();
+    expect(input.disabled).toBe(false);
+
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(input.value).toBe("");
+    expect(await screen.findByText("Main document: same.pdf")).toBeTruthy();
+    expect(postCount).toBe(2);
+    expect(receipts.size).toBe(1);
+    expect(
+      mocks.mutationCalls.filter((call) => call.name === "documentUploads:begin"),
+    ).toHaveLength(1);
+    expect(
+      mocks.mutationCalls.filter(
+        (call) => call.name === "caseSessions:persistDocumentAnalysis",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not attach a late server-committed completion after a session switch", async () => {
+    vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+    const sessionA = homeSession("route-completion-session-a", "Session A");
+    const sessionB = homeSession("route-completion-session-b", "Session B");
+    const recoveredBySession = new Map<string, UploadedDocument[]>();
+    installHomeQueries([sessionA, sessionB], recoveredBySession);
+    const receipts = installDocumentHandlers(recoveredBySession);
+    const completionStarted = deferred<void>();
+    const lostResponse = deferred<{
+      intentId: string;
+      sizeBytes: number;
+      sha256: string;
+      fileName: string;
+    }>();
+    let completionCalls = 0;
+    let committedIntent: string | null = null;
+    mocks.actionHandlers.set(
+      "documentUploadActions:complete",
+      ({ intentId }: { intentId: string }) => {
+        completionCalls += 1;
+        const receipt = receipts.get(intentId);
+        if (!receipt) throw new Error("Unknown fixture upload intent");
+        const committedReceipt = { intentId, ...receipt };
+        if (completionCalls === 1) {
+          committedIntent = intentId;
+          completionStarted.resolve();
+          return lostResponse.promise;
+        }
+        return committedReceipt;
+      },
+    );
+    let postCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (init?.method === "GET") {
+          throw new Error("This test does not request a download.");
+        }
+        postCount += 1;
+        const bytes = new Uint8Array(await (init?.body as Blob).arrayBuffer());
+        return chunkAcknowledgment(url, bytes);
+      }),
+    );
+
+    renderHomeRoute();
+    expect(await screen.findByRole("heading", { name: "Session A" })).toBeTruthy();
+    const file = new File(["%PDF-1.7\ncompletion recovery"], "recover.pdf", {
+      type: "application/pdf",
+    });
+    const input = await openDocumentStep();
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(input.value).toBe("");
+    await completionStarted.promise;
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: sessionB.id },
+    });
+    expect(await screen.findByRole("heading", { name: "Session B" })).toBeTruthy();
+    const switchedInput = await openDocumentStep();
+    expect(switchedInput.disabled).toBe(false);
+    expect(committedIntent).toBe("route-intent-1");
+    expect(
+      mocks.actionCalls.filter((call) => call.name === "documentUploadActions:cancel"),
+    ).toHaveLength(0);
+    lostResponse.resolve({
+      intentId: "route-intent-1",
+      fileName: "recover.pdf",
+      sizeBytes: file.size,
+      sha256: createHash("sha256")
+        .update(new Uint8Array(await file.arrayBuffer()))
+        .digest("hex"),
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(
+      mocks.mutationCalls.filter(
+        (call) => call.name === "caseSessions:persistDocumentAnalysis",
+      ),
+    ).toHaveLength(0);
+    expect(screen.queryByText("Main document: recover.pdf")).toBeNull();
+    expect(postCount).toBe(1);
+    expect(receipts.size).toBe(1);
+    expect(completionCalls).toBe(1);
+  });
+
+  it("keeps accepted filing PDFs downloadable in the filing view after reload without adding them to a draft", async () => {
+    vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+    const objectUrls = installRouteObjectUrlMocks();
+    const bytes = new Uint8Array(Buffer.from("%PDF-1.7\naccepted filing"));
+    const document = recoveredPdf("accepted-filed-document", "accepted.pdf", bytes);
+    const session = homeSession("route-filed-document", "Filed Document");
+    session.filings = [acceptedFiling(document)];
+    installHomeQueries([session], new Map());
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      expect(new URL(String(input)).searchParams.get("documentId")).toBe(
+        document.id,
+      );
+      return privateDownloadResponse(bytes);
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    const firstRender = renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Filed Document" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "File" }));
+    expect(
+      await screen.findByRole("heading", { name: "Accepted filing PDFs" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: /Step 3 Documents/ }),
+    );
+    expect(screen.queryByText("Main document: accepted.pdf")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Add accepted.pdf to draft" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Download accepted.pdf" }));
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(1));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    firstRender.unmount();
+    renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Filed Document" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "File" }));
+    expect(
+      await screen.findByRole("heading", { name: "Accepted filing PDFs" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Download accepted.pdf" }),
+    );
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(2));
+    expect(objectUrls.createObjectURL).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears cancelled upload state on session change, protects a replacement operation, and permits download retry after signout", async () => {
+    vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+    const objectUrls = installRouteObjectUrlMocks();
+    const sessionA = homeSession("route-session-a", "Session A");
+    const sessionB = homeSession("route-session-b", "Session B");
+    const recoveredBySession = new Map<string, UploadedDocument[]>();
+    installHomeQueries([sessionA, sessionB], recoveredBySession);
+    const receipts = installDocumentHandlers(recoveredBySession);
+    const lateOldCancel = deferred<null>();
+    mocks.actionHandlers.set(
+      "documentUploadActions:cancel",
+      ({ intentId }: { intentId: string }) =>
+        intentId === "route-intent-1"
+          ? lateOldCancel.promise
+          : Promise.resolve(null),
+    );
+
+    const oldRequestStarted = deferred<void>();
+    const replacementRequestStarted = deferred<void>();
+    const releaseReplacement = deferred<void>();
+    let postCount = 0;
+    let replacementBytes = new Uint8Array();
+    let downloadCount = 0;
+    const cancelledDownloadStarted = deferred<void>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (init?.method === "GET") {
+          downloadCount += 1;
+          if (downloadCount === 2) {
+            cancelledDownloadStarted.resolve();
+            return await new Promise<Response>((_resolve, reject) => {
+              const signal = init.signal;
+              const onAbort = () =>
+                reject(new DOMException("aborted", "AbortError"));
+              if (signal?.aborted) onAbort();
+              else signal?.addEventListener("abort", onAbort, { once: true });
+            });
+          }
+          return privateDownloadResponse(replacementBytes);
+        }
+        postCount += 1;
+        if (postCount === 1) {
+          oldRequestStarted.resolve();
+          return await new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            const onAbort = () =>
+              reject(new DOMException("aborted", "AbortError"));
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener("abort", onAbort, { once: true });
+          });
+        }
+        replacementBytes = new Uint8Array(
+          await (init?.body as Blob).arrayBuffer(),
+        );
+        replacementRequestStarted.resolve();
+        const acknowledgment = releaseReplacement.promise.then(() =>
+          chunkAcknowledgment(url, replacementBytes),
+        );
+        return acknowledgment;
+      }),
+    );
+
+    renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Session A" }),
+    ).toBeTruthy();
+    const firstInput = await openDocumentStep();
+    fireEvent.change(firstInput, {
+      target: {
+        files: [
+          new File(["%PDF-1.7\nold upload"], "old.pdf", {
+            type: "application/pdf",
+          }),
+        ],
+      },
+    });
+    expect(firstInput.files).toHaveLength(1);
+    await oldRequestStarted.promise;
+    expect(firstInput.disabled).toBe(true);
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: sessionB.id },
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Session B" }),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        mocks.actionCalls.some(
+          (call) =>
+            call.name === "documentUploadActions:cancel" &&
+            (call.args[0] as { intentId?: string } | undefined)?.intentId ===
+              "route-intent-1",
+        ),
+      ).toBe(true),
+    );
+
+    const secondInput = await openDocumentStep();
+    expect(secondInput.disabled).toBe(false);
+    fireEvent.change(secondInput, {
+      target: {
+        files: [
+          new File(["%PDF-1.7\nreplacement"], "replacement.pdf", {
+            type: "application/pdf",
+          }),
+        ],
+      },
+    });
+    await replacementRequestStarted.promise;
+    expect(secondInput.disabled).toBe(true);
+
+    await act(async () => {
+      lateOldCancel.resolve(null);
+      await lateOldCancel.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.getByText("Extracting PDF text and storing upload..."),
+    ).toBeTruthy();
+    expect(secondInput.disabled).toBe(true);
+    expect(
+      mocks.mutationCalls
+        .filter((call) => call.name === "caseSessions:persistDocumentAnalysis")
+        .map(
+          (call) =>
+            (call.args[0] as { caseSessionId?: string } | undefined)
+              ?.caseSessionId,
+        ),
+    ).toEqual([]);
+
+    releaseReplacement.resolve();
+    expect(
+      await screen.findByText(/Main document: replacement\.pdf/),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        mocks.mutationCalls
+          .filter(
+            (call) => call.name === "caseSessions:persistDocumentAnalysis",
+          )
+          .map(
+            (call) =>
+              (call.args[0] as { caseSessionId?: string } | undefined)
+                ?.caseSessionId,
+          ),
+      ).toEqual([sessionB.id]),
+    );
+    await waitFor(() => expect(secondInput.disabled).toBe(false));
+    expect(receipts.get("route-intent-2")?.fileName).toBe("replacement.pdf");
+
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Download replacement.pdf" }),
+    );
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(1));
+    expect(objectUrls.createObjectURL).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Download replacement.pdf" }),
+    );
+    await cancelledDownloadStarted.promise;
+    mocks.auth.isSignedIn = false;
+    publishContext(
+      selectedOrganizationContext(null, null, 2, "shared", "loading"),
+    );
+    expect(
+      (await screen.findAllByRole("button", { name: "Sign in" })).length,
+    ).toBeGreaterThan(0);
+
+    mocks.auth.isSignedIn = true;
+    publishContext(selectedOrganizationContext("org-a", "learner", 3));
+    expect(
+      await screen.findByRole("heading", { name: "Session B" }),
+    ).toBeTruthy();
+    const signedBackInInput = await openDocumentStep();
+    expect(signedBackInInput.disabled).toBe(false);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Add replacement.pdf to draft",
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Download replacement.pdf" }),
+    );
+    await waitFor(() => expect(anchorClick).toHaveBeenCalledTimes(2));
+    expect(downloadCount).toBe(3);
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalled();
+  });
+
+  it("ignores a late switch-during-persist result and recovers a rejected document for explicit selection after reset and reload", async () => {
+    vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+    installRouteObjectUrlMocks();
+    const bytes = new Uint8Array(
+      Buffer.from("%PDF-1.7\nrejected but recoverable"),
+    );
+    const canonical = recoveredPdf(
+      "canonical-recovered-document",
+      "rejected-attempt.pdf",
+      bytes,
+    );
+    const sessionA = homeSession("route-session-a", "Session A");
+    sessionA.filings = [rejectedFiling(canonical)];
+    const sessionB = homeSession("route-session-b", "Session B");
+    const recoveredBySession = new Map<string, UploadedDocument[]>();
+    installHomeQueries([sessionA, sessionB], recoveredBySession);
+    installDocumentHandlers(recoveredBySession);
+
+    const persistStarted = deferred<{
+      caseSessionId: string;
+      intentId: string;
+      document: UploadedDocument;
+    }>();
+    const persistResponse = deferred<{
+      document: UploadedDocument;
+      analysisId: string;
+    }>();
+    mocks.mutationHandlers.set(
+      "caseSessions:persistDocumentAnalysis",
+      (args: {
+        caseSessionId: string;
+        intentId: string;
+        document: UploadedDocument;
+      }) => {
+        persistStarted.resolve(args);
+        return persistResponse.promise;
+      },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const bytes = new Uint8Array(await (init?.body as Blob).arrayBuffer());
+        return chunkAcknowledgment(url, bytes);
+      }),
+    );
+
+    const rendered = renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Session A" }),
+    ).toBeTruthy();
+    const input = await openDocumentStep();
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File([bytes], "rejected-attempt.pdf", {
+            type: "application/pdf",
+          }),
+        ],
+      },
+    });
+    const dispatchedPersist = await persistStarted.promise;
+    expect(dispatchedPersist.caseSessionId).toBe(sessionA.id);
+
+    const committedDocument: UploadedDocument = {
+      ...dispatchedPersist.document,
+      id: canonical.id,
+      analysisId: canonical.analysisId,
+    };
+    recoveredBySession.set(sessionA.id, [committedDocument]);
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: sessionB.id },
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Session B" }),
+    ).toBeTruthy();
+    await act(async () => {
+      persistResponse.resolve({
+        document: committedDocument,
+        analysisId: canonical.analysisId ?? "analysis-canonical",
+      });
+      await persistResponse.promise;
+    });
+    expect(
+      screen.queryByText("Main document: rejected-attempt.pdf"),
+    ).toBeNull();
+    expect(
+      mocks.mutationCalls
+        .filter((call) => call.name === "caseSessions:persistDocumentAnalysis")
+        .map(
+          (call) =>
+            (call.args[0] as { caseSessionId?: string } | undefined)
+              ?.caseSessionId,
+        ),
+    ).toEqual([sessionA.id]);
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: sessionA.id },
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Session A" }),
+    ).toBeTruthy();
+    const recoveredInput = await openDocumentStep();
+    expect(recoveredInput.disabled).toBe(false);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Add rejected-attempt.pdf to draft",
+      }),
+    );
+    expect(
+      await screen.findByText("Main document: rejected-attempt.pdf"),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Remove rejected-attempt.pdf from draft",
+      }),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Add rejected-attempt.pdf to draft",
+      }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(
+      screen.queryByText("Main document: rejected-attempt.pdf"),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: "Add rejected-attempt.pdf to draft",
+      }),
+    ).toBeTruthy();
+
+    rendered.unmount();
+    renderHomeRoute();
+    expect(
+      await screen.findByRole("heading", { name: "Session A" }),
+    ).toBeTruthy();
+    await openDocumentStep();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Add rejected-attempt.pdf to draft",
+      }),
+    );
+    expect(
+      await screen.findByText("Main document: rejected-attempt.pdf"),
+    ).toBeTruthy();
   });
 });

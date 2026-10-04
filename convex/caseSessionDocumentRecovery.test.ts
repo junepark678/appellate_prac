@@ -71,21 +71,42 @@ describe('unfiled receipt-backed document recovery', () => {
     const fixture = await seedFixture(t)
     const unfiled = await seedReceiptBackedDocument(t, fixture, 'unfiled.pdf')
     const filed = await seedReceiptBackedDocument(t, fixture, 'filed.pdf')
+    const rejected = await seedReceiptBackedDocument(
+      t,
+      fixture,
+      'rejected-attempt.pdf',
+    )
     await t.run((ctx) =>
-      ctx.db.insert('filings', {
-        caseSessionId: fixture.caseSessionId,
-        eventId: 'notice_of_appeal',
-        participantRole: 'appellant',
-        title: 'Filed notice',
-        documentIds: [filed.documentId],
-        certificateOfService: true,
-        certificateOfCompliance: false,
-        sealed: false,
-        notes: '',
-        filedAt: '2026-10-04T12:00:00.000Z',
-        outcome: 'accepted',
-        validationIssues: [],
-      }),
+      Promise.all([
+        ctx.db.insert('filings', {
+          caseSessionId: fixture.caseSessionId,
+          eventId: 'notice_of_appeal',
+          participantRole: 'appellant',
+          title: 'Filed notice',
+          documentIds: [filed.documentId],
+          certificateOfService: true,
+          certificateOfCompliance: false,
+          sealed: false,
+          notes: '',
+          filedAt: '2026-10-04T12:00:00.000Z',
+          outcome: 'accepted',
+          validationIssues: [],
+        }),
+        ctx.db.insert('filings', {
+          caseSessionId: fixture.caseSessionId,
+          eventId: 'notice_of_appeal',
+          participantRole: 'appellant',
+          title: 'Rejected notice attempt',
+          documentIds: [rejected.documentId],
+          certificateOfService: true,
+          certificateOfCompliance: false,
+          sealed: false,
+          notes: '',
+          filedAt: '2026-10-04T12:01:00.000Z',
+          outcome: 'rejected',
+          validationIssues: [],
+        }),
+      ]),
     )
 
     const owner = t.withIdentity(identity('owner'))
@@ -97,8 +118,11 @@ describe('unfiled receipt-backed document recovery', () => {
     })
 
     expect(first.caseSessionId).toBe(fixture.caseSessionId)
-    expect(first.documents).toHaveLength(1)
-    expect(first.documents[0]).toMatchObject({
+    expect(first.documents).toHaveLength(2)
+    const restoredUnfiled = first.documents.find(
+      (document) => document.id === unfiled.documentId,
+    )
+    expect(restoredUnfiled).toMatchObject({
       id: unfiled.documentId,
       fileName: 'unfiled.pdf',
       mimeType: 'application/pdf',
@@ -110,15 +134,18 @@ describe('unfiled receipt-backed document recovery', () => {
         normalizedText: 'persisted analysis for unfiled.pdf',
       },
     })
-    expect(first.documents[0]).not.toHaveProperty('storageId')
-    expect(first.documents[0]).not.toHaveProperty('fileUrl')
+    expect(restoredUnfiled).not.toHaveProperty('storageId')
+    expect(restoredUnfiled).not.toHaveProperty('fileUrl')
     expect(first.documents.map((document) => document.id)).not.toContain(
       filed.documentId,
+    )
+    expect(first.documents.map((document) => document.id)).toContain(
+      rejected.documentId,
     )
     expect(repeated).toEqual(first)
   })
 
-  it('denies foreign and revoked owners and preserves submitted assignment locks', async () => {
+  it('denies foreign and revoked owners while allowing read-only recovery for a submitted assignment', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
     const foreign = t.withIdentity(identity(fixture.peerSubject))
@@ -142,12 +169,14 @@ describe('unfiled receipt-backed document recovery', () => {
 
     const activeFixture = await seedFixture(t, 'other-owner')
     await addSubmittedAssignmentLock(t, activeFixture)
-    await expectAppError(
+    await expect(
       t.withIdentity(identity('other-owner')).query(recoveryQueryRef, {
         caseSessionId: activeFixture.caseSessionId,
       }),
-      AppErrorCode.SESSION_LOCKED,
-    )
+    ).resolves.toEqual({
+      caseSessionId: activeFixture.caseSessionId,
+      documents: [],
+    })
   })
 
   it('rejects a consumed receipt whose document or analysis link crosses sessions', async () => {

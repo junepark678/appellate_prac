@@ -470,10 +470,10 @@ describe('authenticated browser document upload', () => {
     const workflow: DocumentUploadWorkflow = {
       siteUrl: 'https://fixture.convex.site',
       getAuthToken: async () => 'ephemeral-convex-jwt',
-      beginUpload: (args) => client.mutation(beginRef, args),
+      beginUpload: vi.fn((args) => client.mutation(beginRef, args)),
       completeUpload: (args) => client.action(completeRef, args),
       cancelUpload: (args) => client.action(cancelRef, args),
-      persistDocumentAnalysis: (args) => client.mutation(persistRef, args),
+      persistDocumentAnalysis: vi.fn((args) => client.mutation(persistRef, args)),
       fetcher,
     }
     const result = await analyzeUploadAndPersistDocuments(
@@ -547,7 +547,116 @@ describe('authenticated browser document upload', () => {
       await t.run((ctx) => ctx.db.query('documents').collect()),
     ).toHaveLength(1)
   })
+
+  it('recovers a committed completion after the response is lost without replaying chunks or persisting twice', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const fixture = await seedSession(t)
+    const client = t.withIdentity(identity('upload-owner'))
+    const file = pdfFile('%PDF-1.7\ncompletion response lost', 'lost.pdf')
+    let chunkRequests = 0
+    let completionCalls = 0
+    let cancelCalls = 0
+    const retryStarted = deferred<void>()
+    const releaseRetryResponse = deferred<void>()
+    const fetcher: DocumentHttpFetcher = (input, init) => {
+      const url = new URL(String(input))
+      const headers = new Headers(init?.headers)
+      headers.set('Origin', appOrigin)
+      chunkRequests += 1
+      return client.fetch(`${url.pathname}${url.search}`, { ...init, headers })
+    }
+    const workflow: DocumentUploadWorkflow = {
+      siteUrl: 'https://fixture.convex.site',
+      getAuthToken: async () => 'ephemeral-convex-jwt',
+      beginUpload: vi.fn((args) => client.mutation(beginRef, args)),
+      completeUpload: async (args) => {
+        completionCalls += 1
+        const receipt = await client.action(completeRef, args)
+        if (completionCalls === 1) {
+          // The registered action has committed, but the browser loses its
+          // response while the staged upload still remembers the same intent.
+          throw new TypeError('connection reset after server commit')
+        }
+        if (completionCalls === 2) {
+          retryStarted.resolve()
+          await releaseRetryResponse.promise
+        }
+        return receipt
+      },
+      cancelUpload: async (args) => {
+        cancelCalls += 1
+        return client.action(cancelRef, args)
+      },
+      persistDocumentAnalysis: vi.fn((args) => client.mutation(persistRef, args)),
+      fetcher,
+    }
+    const user = { userId: 'upload-owner' }
+    const firstFailure = await captureBatchError(
+      analyzeUploadAndPersistDocuments(
+        workflow,
+        fixture.caseSessionId,
+        fileList(file),
+        user,
+      ),
+    )
+    expect(firstFailure.documents).toEqual([])
+    expect(workflow.persistDocumentAnalysis).not.toHaveBeenCalled()
+    const serverCommittedIntent = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadIntents')
+        .collect()
+        .then((intents) =>
+          intents.find((intent) => intent.caseSessionId === fixture.caseSessionId),
+        ),
+    )
+    expect(serverCommittedIntent?.state).toBe('stored')
+
+    const controller = new AbortController()
+    const cancelledRetry = analyzeUploadAndPersistDocuments(
+      workflow,
+      fixture.caseSessionId,
+      fileList(file),
+      { ...user, signal: controller.signal },
+    )
+    await retryStarted.promise
+    controller.abort('session changed during completion retry')
+    const cancellationFailure = await captureBatchError(cancelledRetry)
+    expect(
+      (cancellationFailure.failures[0]?.error as DocumentTransferError).kind,
+    ).toBe('cancelled')
+    releaseRetryResponse.resolve()
+    await Promise.resolve()
+    expect(workflow.persistDocumentAnalysis).not.toHaveBeenCalled()
+    expect(cancelCalls).toBe(0)
+
+    const recovered = await analyzeUploadAndPersistDocuments(
+      workflow,
+      fixture.caseSessionId,
+      fileList(file),
+      user,
+    )
+    expect(recovered).toHaveLength(1)
+    expect(chunkRequests).toBe(1)
+    expect(workflow.beginUpload).toHaveBeenCalledTimes(1)
+    expect(completionCalls).toBe(3)
+    expect(workflow.persistDocumentAnalysis).toHaveBeenCalledTimes(1)
+    const finalRows = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(serverCommittedIntent!._id),
+      documents: await ctx.db.query('documents').collect(),
+      analyses: await ctx.db.query('documentAnalyses').collect(),
+    }))
+    expect(finalRows.intent?.state).toBe('consumed')
+    expect(finalRows.documents).toHaveLength(1)
+    expect(finalRows.analyses).toHaveLength(1)
+  })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((res) => (resolve = res))
+  return { promise, resolve }
+}
 
 function browserWorkflow(
   file: File,
