@@ -17,14 +17,37 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { Outlet, createFileRoute, Link, useRouterState } from '@tanstack/react-router'
+import {
+  Outlet,
+  createFileRoute,
+  Link,
+  retainSearchParams,
+  useRouterState,
+} from '@tanstack/react-router'
 import { useMutation, useQuery } from 'convex/react'
 import { CheckCircle2, Circle, FileText } from 'lucide-react'
 
 import { api } from '../../convex/_generated/api'
-import { AppFrame, EmptyState } from '../components/AppFrame'
+import {
+  AppFrame,
+  EmptyState,
+  OrganizationRouteGate,
+} from '../components/AppFrame'
 
-export const Route = createFileRoute('/app')({ component: LearnerHome })
+export const Route = createFileRoute('/app')({
+  search: {
+    middlewares: [retainSearchParams(['organizationId'])],
+  },
+  component: StudySection,
+})
+
+function StudySection() {
+  return (
+    <OrganizationRouteGate title="Assignments" capability="learn">
+      <LearnerHome />
+    </OrganizationRouteGate>
+  )
+}
 
 function LearnerHome() {
   const pathname = useRouterState({ select: (state) => state.location.pathname })

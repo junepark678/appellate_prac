@@ -86,6 +86,7 @@ export const organizationMemberDTOValidator = v.object({
 });
 export const organizationContextDTOValidator = v.object({
   ...organizationMemberDTOValidator.fields,
+  expiresAt: v.optional(v.string()),
   capabilities: v.object({
     manageMembers: v.boolean(),
     teach: v.boolean(),

@@ -17,11 +17,27 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, retainSearchParams } from "@tanstack/react-router";
 
-import { AppFrame } from "../components/AppFrame";
+import { AppFrame, OrganizationRouteGate } from "../components/AppFrame";
 
-export const Route = createFileRoute("/admin")({ component: AdminHome });
+export const Route = createFileRoute("/admin")({
+  search: {
+    middlewares: [retainSearchParams(["organizationId"])],
+  },
+  component: AdminSection,
+});
+
+function AdminSection() {
+  return (
+    <OrganizationRouteGate
+      title="Organization administration"
+      capability="manageMembers"
+    >
+      <AdminHome />
+    </OrganizationRouteGate>
+  );
+}
 
 function AdminHome() {
   return (
