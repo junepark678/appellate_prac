@@ -395,6 +395,78 @@ describe("organization migration inspection contract", () => {
       state: "ambiguous",
       reason: "sessionless_event_has_organization_scope",
     });
+    const markedSearch = {
+      hasSession: false,
+      sessionInstitutionIds: [],
+      existingInstitutionId: "org-1",
+      scopeProvenance: "active_membership_v1",
+      provider: "courtlistener",
+      action: "searchLiveCourtListenerDockets",
+      referencedUserExists: true,
+      referencedInstitutionExists: true,
+    };
+    expect(classifyIntegrationEventOwnership(markedSearch)).toEqual({
+      state: "ready",
+      reason: "sessionless_search_scope_already_recorded",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        scopeProvenance: "unknown_future_marker",
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        referencedUserExists: false,
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        referencedInstitutionExists: false,
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        provider: "openrouter",
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        action: "different_search",
+      }),
+    ).toEqual({
+      state: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(
+      classifyIntegrationEventOwnership({
+        ...markedSearch,
+        hasSession: true,
+        sessionScopeState: "ready",
+        sessionInstitutionIds: ["org-1"],
+        referencedUserExists: false,
+        referencedInstitutionExists: false,
+      }),
+    ).toEqual({
+      state: "ready",
+      reason: "event_scope_derives_from_session",
+    });
     expect(
       classifyIntegrationEventOwnership({
         hasSession: true,
@@ -682,6 +754,171 @@ describe("organization migration inspection contract", () => {
       outcome: "ambiguous",
       reason: "multiple_provenance_matches",
     });
+  });
+
+  it("recognizes only valid server-marked sessionless search scope without a write plan", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await t.run(async (ctx) => {
+      const userId = await ctx.db.insert("users", {
+        authSubject: "test|search-event-owner",
+        displayName: "Search event owner",
+        monthlyAiBudgetCents: 0,
+      });
+      const institutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Search event organization",
+        slug: "search-event-organization",
+        status: "active",
+        monthlyAiBudgetCents: 0,
+      });
+      const deletedUserId = await ctx.db.insert("users", {
+        authSubject: "test|deleted-search-event-owner",
+        displayName: "Deleted search event owner",
+        monthlyAiBudgetCents: 0,
+      });
+      const deletedInstitutionId = await ctx.db.insert("institutions", {
+        kind: "shared",
+        name: "Deleted search event organization",
+        slug: "deleted-search-event-organization",
+        status: "active",
+        monthlyAiBudgetCents: 0,
+      });
+      await ctx.db.delete(deletedUserId);
+      await ctx.db.delete(deletedInstitutionId);
+      const insertEvent = (event: {
+        userId: Id<"users">;
+        institutionId?: Id<"institutions">;
+        scopeProvenance?: "active_membership_v1";
+        provider?: "openrouter" | "courtlistener";
+        action?: string;
+      }) =>
+        ctx.db.insert("integrationEvents", {
+          userId: event.userId,
+          ...(event.institutionId
+            ? { institutionId: event.institutionId }
+            : {}),
+          ...(event.scopeProvenance
+            ? { scopeProvenance: event.scopeProvenance }
+            : {}),
+          provider: event.provider ?? "courtlistener",
+          action: event.action ?? "searchLiveCourtListenerDockets",
+          accepted: true,
+          createdAt: "2026-10-04T00:00:00.000Z",
+        });
+      const markedValidId = await insertEvent({
+        userId,
+        institutionId,
+        scopeProvenance: "active_membership_v1",
+      });
+      const markedMissingUserId = await insertEvent({
+        userId: deletedUserId,
+        institutionId,
+        scopeProvenance: "active_membership_v1",
+      });
+      const markedMissingInstitutionId = await insertEvent({
+        userId,
+        institutionId: deletedInstitutionId,
+        scopeProvenance: "active_membership_v1",
+      });
+      const markedWrongProviderId = await insertEvent({
+        userId,
+        institutionId,
+        scopeProvenance: "active_membership_v1",
+        provider: "openrouter",
+      });
+      const markedWrongActionId = await insertEvent({
+        userId,
+        institutionId,
+        scopeProvenance: "active_membership_v1",
+        action: "manual_import",
+      });
+      const scopedLegacyId = await insertEvent({ userId, institutionId });
+      const unscopedLegacyId = await insertEvent({ userId });
+      return {
+        userId,
+        institutionId,
+        markedValidId,
+        markedMissingUserId,
+        markedMissingInstitutionId,
+        markedWrongProviderId,
+        markedWrongActionId,
+        scopedLegacyId,
+        unscopedLegacyId,
+      };
+    });
+    const before = await t.run(async (ctx) => ({
+      events: await ctx.db.query("integrationEvents").collect(),
+      findings: await ctx.db.query("organizationMigrationFindings").collect(),
+    }));
+
+    const inspection = await t.query(inspectRef, {
+      table: "integrationEvents",
+      limit: 100,
+    });
+    const findingFor = (id: Id<"integrationEvents">) =>
+      inspection.findings.find((finding) => finding.recordId === String(id));
+    expect(inspection).toMatchObject({ ready: 2, ambiguous: 5 });
+    expect(findingFor(fixture.markedValidId)).toMatchObject({
+      outcome: "ready",
+      reason: "sessionless_search_scope_already_recorded",
+    });
+    expect(findingFor(fixture.markedMissingUserId)).toMatchObject({
+      outcome: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(findingFor(fixture.markedMissingInstitutionId)).toMatchObject({
+      outcome: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(findingFor(fixture.markedWrongProviderId)).toMatchObject({
+      outcome: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(findingFor(fixture.markedWrongActionId)).toMatchObject({
+      outcome: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(findingFor(fixture.scopedLegacyId)).toMatchObject({
+      outcome: "ambiguous",
+      reason: "sessionless_event_has_organization_scope",
+    });
+    expect(findingFor(fixture.unscopedLegacyId)).toMatchObject({
+      outcome: "ready",
+      reason: "sessionless_event_remains_identity_private",
+    });
+    expect(
+      await t.run(async (ctx) => ({
+        events: await ctx.db.query("integrationEvents").collect(),
+        findings: await ctx.db.query("organizationMigrationFindings").collect(),
+      })),
+    ).toEqual(before);
+
+    const applyResult = await t.mutation(applyRef, {
+      table: "integrationEvents",
+      limit: 100,
+    });
+    expect(applyResult.changed).toBe(0);
+    expect(
+      applyResult.writes.find(
+        (write) => write.recordId === String(fixture.markedValidId),
+      ),
+    ).toMatchObject({
+      outcome: "unchanged",
+      reason: "sessionless_search_scope_already_recorded",
+    });
+    const afterApply = await t.run(async (ctx) => ({
+      validEvent: await ctx.db.get(fixture.markedValidId),
+      findings: await ctx.db.query("organizationMigrationFindings").collect(),
+    }));
+    expect(afterApply.validEvent).toMatchObject({
+      institutionId: fixture.institutionId,
+      scopeProvenance: "active_membership_v1",
+    });
+    expect(
+      afterApply.findings.some(
+        (finding) => finding.recordId === String(fixture.markedValidId),
+      ),
+    ).toBe(false);
   });
 
   it("reports stable legacy-storage warnings and performs no database writes", async () => {

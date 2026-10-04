@@ -22,7 +22,8 @@ import { makeFunctionReference } from 'convex/server'
 
 import { action, internalMutation, internalQuery, query } from './_generated/server'
 import { internal } from './_generated/api'
-import { requireCurrentUser, requireIdentity } from './authHelpers'
+import { requireIdentity } from './authHelpers'
+import { requireInstitutionRole } from './authz'
 import {
   caseSessionValidator,
   courtListenerSearchResultValidator,
@@ -31,6 +32,11 @@ import {
 import { searchCourtListenerDockets } from '../src/integrations/courtlistener'
 
 const courtListenerCooldownMs = 5_000
+const courtListenerResultLimit = 20
+const courtListenerSearchAction = 'searchLiveCourtListenerDockets'
+const courtListenerScopeProvenance = 'active_membership_v1' as const
+const courtListenerMetadataNotice =
+  'Caller-reported metadata; not verified court evidence.'
 const advanceLiveEventRef = makeFunctionReference<'action'>(
   'caseSessions:advanceLiveEvent',
 )
@@ -68,6 +74,7 @@ export const getIntegrationStatus = query({
 
 export const getIntegrationCooldownForCurrentUser = internalQuery({
   args: {
+    institutionId: v.id('institutions'),
     provider: providerValidator,
     cooldownMs: v.number(),
     nowIso: v.string(),
@@ -77,7 +84,7 @@ export const getIntegrationCooldownForCurrentUser = internalQuery({
     retryAfterMs: v.optional(v.number()),
   }),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
+    const { user } = await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     const events = await ctx.db
       .query('integrationEvents')
       .withIndex('by_user_provider', (index) =>
@@ -96,6 +103,7 @@ export const getIntegrationCooldownForCurrentUser = internalQuery({
 
 export const recordIntegrationEventForCurrentUser = internalMutation({
   args: {
+    institutionId: v.id('institutions'),
     provider: providerValidator,
     action: v.string(),
     accepted: v.boolean(),
@@ -104,8 +112,9 @@ export const recordIntegrationEventForCurrentUser = internalMutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
+    const { user } = await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     await ctx.db.insert('integrationEvents', {
+      institutionId: args.institutionId,
       userId: user._id,
       provider: args.provider,
       action: args.action,
@@ -119,6 +128,7 @@ export const recordIntegrationEventForCurrentUser = internalMutation({
 
 export const reserveIntegrationEventForCurrentUser = internalMutation({
   args: {
+    institutionId: v.id('institutions'),
     provider: providerValidator,
     action: v.string(),
     cooldownMs: v.number(),
@@ -130,7 +140,7 @@ export const reserveIntegrationEventForCurrentUser = internalMutation({
     eventId: v.optional(v.id('integrationEvents')),
   }),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
+    const { user } = await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     const events = await ctx.db
       .query('integrationEvents')
       .withIndex('by_user_provider', (index) =>
@@ -147,9 +157,14 @@ export const reserveIntegrationEventForCurrentUser = internalMutation({
     }
 
     const eventId = await ctx.db.insert('integrationEvents', {
+      institutionId: args.institutionId,
       userId: user._id,
       provider: args.provider,
       action: args.action,
+      ...(args.provider === 'courtlistener' &&
+      args.action === courtListenerSearchAction
+        ? { scopeProvenance: courtListenerScopeProvenance }
+        : {}),
       accepted: false,
       errorClass: 'in_flight',
       createdAt: args.nowIso,
@@ -161,14 +176,19 @@ export const reserveIntegrationEventForCurrentUser = internalMutation({
 export const finalizeIntegrationEventForCurrentUser = internalMutation({
   args: {
     eventId: v.id('integrationEvents'),
+    institutionId: v.id('institutions'),
     accepted: v.boolean(),
     errorClass: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const { user } = await requireCurrentUser(ctx)
+    const { user } = await requireInstitutionRole(ctx, args.institutionId, ['learner'])
     const event = await ctx.db.get(args.eventId)
-    if (!event || event.userId !== user._id) {
+    if (
+      !event ||
+      event.userId !== user._id ||
+      event.institutionId !== args.institutionId
+    ) {
       throw new Error('Integration event reservation not found.')
     }
     await ctx.db.patch(args.eventId, {
@@ -196,6 +216,7 @@ export const requestLiveProceduralToolCall = action({
 
 export const searchLiveCourtListenerDockets = action({
   args: {
+    institutionId: v.id('institutions'),
     query: v.string(),
   },
   returns: v.array(courtListenerSearchResultValidator),
@@ -203,12 +224,24 @@ export const searchLiveCourtListenerDockets = action({
     await requireIdentity(ctx)
     const nowIso = new Date().toISOString()
     const query = args.query.trim()
-    if (!query) return []
+    if (!query) {
+      await ctx.runQuery(
+        internal.integrations.getIntegrationCooldownForCurrentUser,
+        {
+          institutionId: args.institutionId,
+          provider: 'courtlistener',
+          cooldownMs: courtListenerCooldownMs,
+          nowIso,
+        },
+      )
+      return []
+    }
     const reservation = await ctx.runMutation(
       internal.integrations.reserveIntegrationEventForCurrentUser,
       {
+        institutionId: args.institutionId,
         provider: 'courtlistener',
-        action: 'searchLiveCourtListenerDockets',
+        action: courtListenerSearchAction,
         cooldownMs: courtListenerCooldownMs,
         nowIso,
       },
@@ -217,21 +250,42 @@ export const searchLiveCourtListenerDockets = action({
       throw new Error('CourtListener cooldown is still active.')
     }
 
+    let results: Awaited<ReturnType<typeof searchCourtListenerDockets>>
     try {
-      const results = await searchCourtListenerDockets(query, requireEnv('COURTLISTENER_TOKEN'))
-      await ctx.runMutation(internal.integrations.finalizeIntegrationEventForCurrentUser, {
-        eventId: reservation.eventId,
-        accepted: true,
-      })
-      return results
+      results = await searchCourtListenerDockets(
+        query,
+        requireEnv('COURTLISTENER_TOKEN'),
+      )
     } catch (error) {
-      console.error('CourtListener integration action failed', { error: errorMessage(error) })
-      await ctx.runMutation(internal.integrations.finalizeIntegrationEventForCurrentUser, {
-        eventId: reservation.eventId,
-        accepted: false,
-        errorClass: 'provider_error',
+      console.error('CourtListener integration action failed', {
+        error: errorMessage(error),
       })
+      await ctx.runMutation(
+        internal.integrations.finalizeIntegrationEventForCurrentUser,
+        {
+          eventId: reservation.eventId,
+          institutionId: args.institutionId,
+          accepted: false,
+          errorClass: 'provider_error',
+        },
+      )
       throw error
     }
+
+    await ctx.runMutation(
+      internal.integrations.finalizeIntegrationEventForCurrentUser,
+      {
+        eventId: reservation.eventId,
+        institutionId: args.institutionId,
+        accepted: true,
+      },
+    )
+
+    return results.slice(0, courtListenerResultLimit).map((result) => ({
+      ...result,
+      snippet: [courtListenerMetadataNotice, result.snippet]
+        .filter(Boolean)
+        .join('\n\n'),
+    }))
   },
 })
