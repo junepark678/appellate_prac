@@ -54,6 +54,8 @@ Existing-table additions:
 
 The optional scope fields support backfill compatibility, not permission to bypass ownership checks in new APIs. Legacy columns are not removed.
 
+For sessionless `integrationEvents`, migration recognizes an already-recorded organization scope without a write only when `institutionId` is present, `scopeProvenance` is exactly `active_membership_v1`, `provider` is `courtlistener`, `action` is `searchLiveCourtListenerDockets`, and the referenced user and institution records exist. The server writes this marker only from the authorized CourtListener search reservation, after the active organization-membership check; callers cannot choose it. This exception documents existing classifier behavior and does not expand organization reports or API visibility. A sessionless scoped event that does not meet every condition remains ambiguous and unchanged; an unscoped legacy event remains identity-private. It does not change the live-migration or storage gates.
+
 | New table                        | Indexes (ordered fields)                                                                                                              |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | organizationDatasets             | by_institution(institutionId); by_institution_kind(institutionId,kind)                                                                |
