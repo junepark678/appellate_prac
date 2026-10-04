@@ -602,6 +602,177 @@ describe("OrganizationContextProvider", () => {
     expect(mocks.client.mutation).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a revoked sole organization in the URL until explicit personal recovery", async () => {
+    listedOrganizations = [];
+    let initiallyReadable = true;
+    getOrganizationContext = async (id) => {
+      if (id === "revoked-org" && initiallyReadable) {
+        initiallyReadable = false;
+        return organization(id, "Former Org", "admin");
+      }
+      if (id === "org-personal") {
+        return organization(
+          id,
+          "Personal workspace",
+          "admin",
+          "personal",
+        );
+      }
+      throw new Error("NOT_FOUND");
+    };
+    const { router } = renderOrganizationApp(
+      "/instructor?organizationId=revoked-org&view=records",
+    );
+
+    expect(await screen.findByText("Former Org content (admin)")).toBeTruthy();
+    const formerCapture = latestCapture;
+    const revokedWatch = contextWatches.get("revoked-org");
+    expect(revokedWatch).toBeTruthy();
+
+    await act(async () => {
+      revokedWatch!.error = new Error("NOT_FOUND");
+      revokedWatch!.result = undefined;
+      for (const listener of revokedWatch!.notifications) listener();
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(
+      /organization is unavailable/i,
+    );
+    expect(router.state.location.pathname).toBe("/instructor");
+    expect(router.state.location.search as Record<string, unknown>).toEqual({
+      organizationId: "revoked-org",
+      view: "records",
+    });
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+    expect(isCaptureCurrent(formerCapture!)).toBe(false);
+
+    const pendingBootstrap = deferred<{
+      institutionId: Id<"institutions">;
+    }>();
+    mocks.client.mutation.mockReturnValue(pendingBootstrap.promise);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use personal workspace" }),
+    );
+
+    await waitFor(() => expect(mocks.client.mutation).toHaveBeenCalledTimes(1));
+    expect(router.state.location.pathname).toBe("/app");
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBeUndefined();
+    expect(
+      (router.state.location.search as Record<string, unknown>).view,
+    ).toBeUndefined();
+    expect(screen.queryByText("Personal workspace content (admin)")).toBeNull();
+
+    await act(async () => {
+      pendingBootstrap.resolve({
+        institutionId: "org-personal" as Id<"institutions">,
+      });
+      await pendingBootstrap.promise;
+    });
+    expect(
+      await screen.findByText("Personal workspace content (admin)"),
+    ).toBeTruthy();
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBe("org-personal");
+  });
+
+  it("can retry personal bootstrap after explicit recovery from a revoked organization", async () => {
+    listedOrganizations = [];
+    getOrganizationContext = async (id) => {
+      if (id === "org-personal") {
+        return organization(
+          id,
+          "Personal workspace",
+          "admin",
+          "personal",
+        );
+      }
+      throw new Error("NOT_FOUND");
+    };
+    mocks.client.mutation
+      .mockRejectedValueOnce(new Error("temporary failure"))
+      .mockResolvedValueOnce({
+        institutionId: "org-personal" as Id<"institutions">,
+      });
+    const { router } = renderOrganizationApp(
+      "/app?organizationId=revoked-org",
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(
+      /organization is unavailable/i,
+    );
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use personal workspace" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Try again" }),
+    ).toBeTruthy();
+    expect(router.state.location.pathname).toBe("/app");
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBeUndefined();
+    expect(mocks.client.mutation).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText("Personal workspace content (admin)"),
+    ).toBeTruthy();
+    expect(mocks.client.mutation).toHaveBeenCalledTimes(2);
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBe("org-personal");
+  });
+
+  it("does not retarget a pending personal bootstrap after choosing another organization", async () => {
+    listedOrganizations = [member("org-b", "Org B", "admin")];
+    getOrganizationContext = async (id) => {
+      if (id === "org-b") return organization(id, "Org B", "admin");
+      throw new Error("NOT_FOUND");
+    };
+    const pendingBootstrap = deferred<{
+      institutionId: Id<"institutions">;
+    }>();
+    mocks.client.mutation.mockReturnValue(pendingBootstrap.promise);
+    const { router } = renderOrganizationApp(
+      "/app?organizationId=revoked-org",
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(
+      /organization is unavailable/i,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use personal workspace" }),
+    );
+    await waitFor(() => expect(mocks.client.mutation).toHaveBeenCalledTimes(1));
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBeUndefined();
+
+    fireEvent.change(screen.getByLabelText("Organization"), {
+      target: { value: "org-b" },
+    });
+    expect(await screen.findByText("Org B content (admin)")).toBeTruthy();
+
+    await act(async () => {
+      pendingBootstrap.resolve({
+        institutionId: "org-personal" as Id<"institutions">,
+      });
+      await pendingBootstrap.promise;
+    });
+
+    expect(screen.getByText("Org B content (admin)")).toBeTruthy();
+    expect(screen.queryByText("Personal workspace content (admin)")).toBeNull();
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBe("org-b");
+    expect(contextWatches.has("org-personal")).toBe(false);
+  });
+
   it.each(["/instructor", "/admin"])(
     "bootstraps a personal workspace on %s when the account has no organizations",
     async (path) => {
