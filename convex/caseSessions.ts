@@ -1342,14 +1342,15 @@ async function loadReceiptBackedDocuments(
 ) {
   const receipts = await ctx.db
     .query('documentUploadIntents')
-    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .withIndex('by_case_state', (index) =>
+      index.eq('caseSessionId', caseSessionId).eq('state', 'consumed'),
+    )
     .collect()
   const preserved = new Map<
     string,
     { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
   >()
   for (const receipt of receipts) {
-    if (receipt.state !== 'consumed') continue
     if (
       receipt.scopeKind !== 'session' ||
       !receipt.caseSessionId ||

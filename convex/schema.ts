@@ -1095,6 +1095,7 @@ export default defineSchema({
   )
     .index("by_user", ["userId"])
     .index("by_case", ["caseSessionId"])
+    .index("by_case_state", ["caseSessionId", "state"])
     .index("by_dataset_version", ["datasetVersionId"])
     .index("by_expiry", ["expiresAt"])
     .index("by_storage", ["storageId"]),

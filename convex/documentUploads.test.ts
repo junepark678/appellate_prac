@@ -2075,6 +2075,89 @@ describe('document upload receipts', () => {
     expect(filedDocument?.analysis).toEqual(storedAnalysis)
   })
 
+  it('loads receipt bindings from consumed history despite many pending and cancelled intents', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const createdAt = new Date().toISOString()
+    await t.run(async (ctx) => {
+      for (let index = 0; index < 256; index += 1) {
+        await ctx.db.insert('documentUploadIntents', {
+          institutionId: fixture.institutionId,
+          scopeKind: 'session',
+          caseSessionId: fixture.aliceSessionId,
+          userId: fixture.aliceId,
+          fileName: `historical-${index}.pdf`,
+          sizeBytes: 128,
+          sha256: 'a'.repeat(64),
+          mimeType: 'application/pdf',
+          chunkCount: 1,
+          state: index % 2 === 0 ? 'pending' : 'cancelled',
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          createdAt,
+        })
+      }
+    })
+
+    const { persisted, intent } = await uploadReceiptDocument(
+      alice,
+      fixture.aliceSessionId,
+      'Notice of appeal from a final civil judgment.',
+    )
+    const indexedConsumedReceipts = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadIntents')
+        .withIndex('by_case_state', (index) =>
+          index
+            .eq('caseSessionId', fixture.aliceSessionId)
+            .eq('state', 'consumed'),
+        )
+        .collect(),
+    )
+    expect(indexedConsumedReceipts.map((receipt) => receipt._id)).toEqual([
+      intent.intentId,
+    ])
+
+    const filed = await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Notice of Appeal',
+        documents: [persisted.document],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'History-index regression',
+      },
+    })
+    expect(filed.filings.at(-1)?.documents[0]?.id).toBe(
+      persisted.document.id,
+    )
+    expect(filed.filings.at(-1)?.documents[0]?.analysis).toEqual(
+      persisted.document.analysis,
+    )
+
+    const history = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadIntents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+    )
+    expect(history).toHaveLength(257)
+    expect(history.filter((receipt) => receipt.state === 'pending')).toHaveLength(
+      128,
+    )
+    expect(history.filter((receipt) => receipt.state === 'cancelled')).toHaveLength(
+      128,
+    )
+    expect(history.filter((receipt) => receipt.state === 'consumed')).toHaveLength(
+      1,
+    )
+  })
+
   it('uses the persisted receipt-backed report for ECF preflight and submission', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
