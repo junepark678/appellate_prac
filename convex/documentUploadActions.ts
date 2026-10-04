@@ -26,12 +26,12 @@ import { v } from 'convex/values'
 import { action, internalAction } from './_generated/server'
 import type { Id } from './_generated/dataModel'
 import type { ActionCtx } from './_generated/server'
+import { enqueueCleanupWithBoundedRetry } from './documentUploadCleanup'
 import { AppErrorCode, ConvexError, validationError } from './errors'
 
 const maxFileBytes = 25 * 1024 * 1024
 const chunkBytes = 4 * 1024 * 1024
 const completionRetryAfterMs = 1000
-const cleanupQueueRetryDelaysMs = [0, 100, 500] as const
 
 type CompletionClaimResult =
   | { state: 'claimed' }
@@ -531,23 +531,6 @@ function assertContentType(bytes: Uint8Array, mimeType: string) {
   if (mimeType === 'application/json' && !hasValidJson(bytes)) {
     throw validationError('JSON upload content is not valid JSON.')
   }
-}
-
-export async function enqueueCleanupWithBoundedRetry<T>(
-  enqueue: () => Promise<T>,
-  wait: (delayMs: number) => Promise<void> = (delayMs) =>
-    new Promise((resolve) => setTimeout(resolve, delayMs)),
-) {
-  let lastError: unknown
-  for (const delayMs of cleanupQueueRetryDelaysMs) {
-    if (delayMs > 0) await wait(delayMs)
-    try {
-      return await enqueue()
-    } catch (error) {
-      lastError = error
-    }
-  }
-  throw lastError
 }
 
 async function queueStorageCleanup(

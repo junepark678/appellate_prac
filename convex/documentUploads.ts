@@ -43,6 +43,8 @@ const maxFileBytes = 25 * 1024 * 1024
 const chunkBytes = 4 * 1024 * 1024
 const maxChunks = 7
 const intentLifetimeMs = 15 * 60 * 1000
+const maxCleanupRetryDelayMs = 60 * 60 * 1000
+const maxCleanupRetryAttempts = 31
 // Convex Node actions are capped at ten minutes, so this lease cannot expire
 // while a healthy completion action is still running.
 const completionClaimLeaseMs = 11 * 60 * 1000
@@ -57,8 +59,6 @@ const cleanupUploadStorageRef = makeFunctionReference<
   { storageId: Id<'_storage'> },
   null
 >('documentUploadActions:cleanupUploadStorage')
-const cleanupRetryDelayMs = [100, 500] as const
-const maxCleanupAttempts = cleanupRetryDelayMs.length + 1
 
 function uploadExpired(): ConvexError {
   return new ConvexError(AppErrorCode.CONFLICT, 'Upload intent expired', {
@@ -582,20 +582,16 @@ export const retryUploadStorageCleanup = internalMutation({
       .withIndex('by_storage', (index) => index.eq('storageId', storageId))
       .unique()
     if (!cleanup) return null
-    if (await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)) {
-      await ctx.db.delete(cleanup._id)
-      return null
-    }
 
-    const attempts = cleanup.attempts + 1
-    if (attempts >= maxCleanupAttempts) {
-      // Keep the policy bounded. If reference checks or storage deletion fail
-      // through all three attempts, leave the blob untouched and stop
-      // scheduling; recovery requires a separately authorized operation.
-      await ctx.db.delete(cleanup._id)
-      return null
-    }
-    const delayMs = cleanupRetryDelayMs[attempts - 1]!
+    // Keep retrying durable cleanup records indefinitely. Saturate the counter
+    // and backoff so transient storage/database failures cannot overflow it or
+    // silently strand an object after a fixed attempt count. Reference checks
+    // stay in begin/finish, where an error leaves this durable record intact.
+    const attempts = Math.min(cleanup.attempts + 1, maxCleanupRetryAttempts)
+    const delayMs = Math.min(
+      maxCleanupRetryDelayMs,
+      1000 * 2 ** Math.min(attempts - 1, 12),
+    )
     const nextAttemptAt = Date.now() + delayMs
     await ctx.db.patch(cleanup._id, { attempts, nextAttemptAt })
     await ctx.scheduler.runAt(nextAttemptAt, cleanupUploadStorageRef, {

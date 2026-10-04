@@ -25,11 +25,10 @@ import type { TestConvex } from 'convex-test'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Id } from './_generated/dataModel'
+import type { MutationCtx } from './_generated/server'
 import { AppErrorCode, type AppErrorData } from './errors'
-import {
-  deleteOrRetryCleanup,
-  enqueueCleanupWithBoundedRetry,
-} from './documentUploadActions'
+import { deleteOrRetryCleanup } from './documentUploadActions'
+import { enqueueCleanupWithBoundedRetry } from './documentUploadCleanup'
 import type {
   CaseSession,
   DocumentAnalysis,
@@ -69,6 +68,76 @@ const modules = {
   './errors.ts': () => import('./errors'),
   './http.ts': () => import('./http'),
   './organizationContracts.ts': () => import('./organizationContracts'),
+}
+
+type RecordChunkArgs = {
+  intentId: Id<'documentUploadIntents'>
+  index: number
+  storageId: Id<'_storage'>
+  sizeBytes: number
+  sha256: string
+}
+type QueueCleanupArgs = {
+  storageIds: Id<'_storage'>[]
+  intentId?: Id<'documentUploadIntents'>
+}
+type BeginCleanupArgs = { storageId: Id<'_storage'> }
+type UploadModuleOverrides = Partial<{
+  recordChunk: (
+    ctx: MutationCtx,
+    args: RecordChunkArgs,
+  ) => Promise<{ accepted: boolean }>
+  queueUploadCleanup: (
+    ctx: MutationCtx,
+    args: QueueCleanupArgs,
+  ) => Promise<Id<'_storage'>[]>
+  beginUploadStorageCleanup: (
+    ctx: MutationCtx,
+    args: BeginCleanupArgs,
+  ) => Promise<boolean>
+}>
+
+function withRegisteredHandler<T extends object>(
+  registered: T,
+  handler: unknown,
+): T {
+  return Object.assign(Object.create(registered), { _handler: handler }) as T
+}
+
+function modulesWithUploadOverrides(overrides: UploadModuleOverrides) {
+  return {
+    ...modules,
+    './documentUploads.ts': async () => {
+      const uploads = await import('./documentUploads')
+      return {
+        ...uploads,
+        ...(overrides.recordChunk
+          ? {
+              recordChunk: withRegisteredHandler(
+                uploads.recordChunk,
+                overrides.recordChunk,
+              ),
+            }
+          : {}),
+        ...(overrides.queueUploadCleanup
+          ? {
+              queueUploadCleanup: withRegisteredHandler(
+                uploads.queueUploadCleanup,
+                overrides.queueUploadCleanup,
+              ),
+            }
+          : {}),
+        ...(overrides.beginUploadStorageCleanup
+          ? {
+              beginUploadStorageCleanup: withRegisteredHandler(
+                uploads.beginUploadStorageCleanup,
+                overrides.beginUploadStorageCleanup,
+              ),
+            }
+          : {}),
+      }
+    },
+  }
 }
 
 type TestIdentity = {
@@ -763,7 +832,7 @@ describe('document upload receipts', () => {
     expect(after.storage).not.toBeNull()
   })
 
-  it('stops after three failed cleanup attempts without deleting an uncertain blob', async () => {
+  it('retains durable cleanup through repeated failures and later removes the blob', async () => {
     vi.useFakeTimers()
     const t = convexTest(schema, modules)
     const bytes = makePdf(128)
@@ -778,48 +847,135 @@ describe('document upload receipts', () => {
       storageIds: [storageId],
     })
 
-    const first = await t.run((ctx) =>
-      ctx.db
-        .query('documentUploadCleanup')
-        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-        .unique(),
-    )
-    expect(first?.attempts).toBe(0)
-    await t.mutation(retryUploadStorageCleanupRef, { storageId })
-    const second = await t.run((ctx) =>
-      ctx.db
-        .query('documentUploadCleanup')
-        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-        .unique(),
-    )
-    expect(second?.attempts).toBe(1)
-    expect(second?.nextAttemptAt).toBeGreaterThanOrEqual(Date.now() + 100)
-    await t.run((ctx) =>
-      ctx.db.patch(second!._id, { nextAttemptAt: Date.now() - 1 }),
-    )
-    await t.mutation(retryUploadStorageCleanupRef, { storageId })
-    const third = await t.run((ctx) =>
-      ctx.db
-        .query('documentUploadCleanup')
-        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
-        .unique(),
-    )
-    expect(third?.attempts).toBe(2)
-    expect(third?.nextAttemptAt).toBeGreaterThanOrEqual(Date.now() + 500)
-    await t.run((ctx) =>
-      ctx.db.patch(third!._id, { nextAttemptAt: Date.now() - 1 }),
-    )
-    await t.mutation(retryUploadStorageCleanupRef, { storageId })
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const result = await deleteOrRetryCleanup({
+        objectExists: () =>
+          t.run(async (ctx) =>
+            Boolean(await ctx.db.system.get('_storage', storageId)),
+          ),
+        deleteObject: async () => {
+          throw new Error(`temporary storage outage ${attempt}`)
+        },
+        markDeleted: async () => undefined,
+        scheduleRetry: () =>
+          t.mutation(retryUploadStorageCleanupRef, { storageId }),
+      })
+      expect(result).toBe('retry')
+      const cleanup = await t.run((ctx) =>
+        ctx.db
+          .query('documentUploadCleanup')
+          .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+          .unique(),
+      )
+      expect(cleanup?.attempts).toBe(attempt)
+      expect(cleanup?.nextAttemptAt).toBeGreaterThan(Date.now())
+      expect(
+        await t.run((ctx) => ctx.db.system.get('_storage', storageId)),
+      ).not.toBeNull()
+      await t.run((ctx) =>
+        ctx.db.patch(cleanup!._id, { nextAttemptAt: Date.now() - 1 }),
+      )
+    }
 
-    const after = await t.run(async (ctx) => ({
+    const afterRepeatedFailures = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+    )
+    await t.run((ctx) =>
+      ctx.db.patch(afterRepeatedFailures!._id, {
+        attempts: 31,
+        nextAttemptAt: Date.now() - 1,
+      }),
+    )
+    await t.mutation(retryUploadStorageCleanupRef, { storageId })
+    const saturated = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+    )
+    expect(saturated?.attempts).toBe(31)
+    expect(saturated?.nextAttemptAt).toBe(Date.now() + 60 * 60 * 1000)
+    await t.run((ctx) =>
+      ctx.db.patch(saturated!._id, { nextAttemptAt: Date.now() - 1 }),
+    )
+
+    await t.action(cleanupUploadStorageRef, { storageId })
+    const afterSuccess = await t.run(async (ctx) => ({
       cleanup: await ctx.db
         .query('documentUploadCleanup')
         .withIndex('by_storage', (index) => index.eq('storageId', storageId))
         .unique(),
       storage: await ctx.db.system.get('_storage', storageId),
     }))
-    expect(after.cleanup).toBeNull()
-    expect(after.storage).not.toBeNull()
+    expect(afterSuccess.cleanup).toBeNull()
+    expect(afterSuccess.storage).toBeNull()
+  })
+
+  it('retains cleanup through repeated reference-check failures and later succeeds', async () => {
+    let referenceCheckAttempts = 0
+    const uploads = await import('./documentUploads')
+    const originalBeginHandler = (
+      uploads.beginUploadStorageCleanup as unknown as {
+        _handler: NonNullable<
+          UploadModuleOverrides['beginUploadStorageCleanup']
+        >
+      }
+    )._handler
+    const t = convexTest(
+      schema,
+      modulesWithUploadOverrides({
+        beginUploadStorageCleanup: async (ctx, args) => {
+          referenceCheckAttempts += 1
+          if (referenceCheckAttempts <= 5) {
+            throw new Error(
+              `temporary reference lookup outage ${referenceCheckAttempts}`,
+            )
+          }
+          return originalBeginHandler(ctx, args)
+        },
+      }),
+    )
+    const bytes = makePdf(128)
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], {
+          type: 'application/octet-stream',
+        }),
+      ),
+    )
+    await t.mutation(queueUploadCleanupRef, { storageIds: [storageId] })
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await t.action(cleanupUploadStorageRef, { storageId })
+      const cleanup = await t.run((ctx) =>
+        ctx.db
+          .query('documentUploadCleanup')
+          .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+          .unique(),
+      )
+      expect(cleanup?.attempts).toBe(attempt)
+      expect(
+        await t.run((ctx) => ctx.db.system.get('_storage', storageId)),
+      ).not.toBeNull()
+      await t.run((ctx) =>
+        ctx.db.patch(cleanup!._id, { nextAttemptAt: Date.now() - 1 }),
+      )
+    }
+
+    await t.action(cleanupUploadStorageRef, { storageId })
+    const afterSuccess = await t.run(async (ctx) => ({
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+        .unique(),
+      storage: await ctx.db.system.get('_storage', storageId),
+    }))
+    expect(referenceCheckAttempts).toBe(6)
+    expect(afterSuccess.cleanup).toBeNull()
+    expect(afterSuccess.storage).toBeNull()
   })
 
   it('enforces inclusive 4 MiB resulting sizes, 12 MiB hard bounds, and UTF-8 accounting', () => {
@@ -1839,6 +1995,159 @@ describe('document upload receipts', () => {
     expect(saved.storage).toHaveLength(0)
   })
 
+  it('retries temporary cleanup enqueue from the registered HTTP chunk route', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    let queueAttempts = 0
+    const realUploads = await import('./documentUploads')
+    const originalQueueHandler = (
+      realUploads.queueUploadCleanup as unknown as {
+        _handler: NonNullable<UploadModuleOverrides['queueUploadCleanup']>
+      }
+    )._handler
+    const t = convexTest(
+      schema,
+      modulesWithUploadOverrides({
+        recordChunk: async () => {
+          throw new Error('recordChunk transport failure')
+        },
+        queueUploadCleanup: async (ctx, args) => {
+          queueAttempts += 1
+          if (queueAttempts < 3)
+            throw new Error(`temporary cleanup queue outage ${queueAttempts}`)
+          return originalQueueHandler(ctx, args)
+        },
+      }),
+    )
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'http-cleanup-retry.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const response = await postChunk(alice, intent.intentId, 0, bytes)
+    expect(response.status).toBe(500)
+    expect(queueAttempts).toBe(3)
+    const queued = await t.run(async (ctx) => ({
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(queued.chunks).toHaveLength(0)
+    expect(queued.cleanup).toHaveLength(1)
+    expect(queued.storage).toHaveLength(1)
+    await t.action(cleanupUploadStorageRef, {
+      storageId: queued.cleanup[0]!.storageId,
+    })
+    const cleaned = await t.run(async (ctx) => ({
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(cleaned.cleanup).toHaveLength(0)
+    expect(cleaned.storage).toHaveLength(0)
+  })
+
+  it('protects an accepted chunk when the HTTP record response is ambiguous', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const realUploads = await import('./documentUploads')
+    const recordChunk = (
+      realUploads.recordChunk as unknown as {
+        _handler: NonNullable<UploadModuleOverrides['recordChunk']>
+      }
+    )._handler
+    const t = convexTest(
+      schema,
+      modulesWithUploadOverrides({
+        recordChunk: async (ctx, args) => {
+          await recordChunk(ctx, args)
+          // The committed mutation's response is modeled as a stale rejection.
+          return { accepted: false }
+        },
+      }),
+    )
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'ambiguous-http-chunk.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const response = await postChunk(alice, intent.intentId, 0, bytes)
+    expect(response.status).toBe(200)
+    const saved = await t.run(async (ctx) => ({
+      chunk: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId).eq('index', 0),
+        )
+        .unique(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.chunk).not.toBeNull()
+    expect(saved.cleanup).toHaveLength(0)
+    expect(saved.storage).toHaveLength(1)
+    expect(saved.storage[0]?._id).toBe(saved.chunk?.storageId)
+  })
+
+  it('leaves uncertain HTTP chunk storage intact when cleanup enqueue stays unavailable', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    let queueAttempts = 0
+    let uncertainStorageId: Id<'_storage'> | undefined
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const t = convexTest(
+      schema,
+      modulesWithUploadOverrides({
+        recordChunk: async () => {
+          throw new Error('recordChunk response unavailable')
+        },
+        queueUploadCleanup: async (_ctx, args) => {
+          queueAttempts += 1
+          uncertainStorageId = args.storageIds[0]
+          throw new Error(`sustained cleanup queue outage ${queueAttempts}`)
+        },
+      }),
+    )
+    try {
+      const fixture = await seedFixture(t)
+      const alice = uploadClient(t)
+      const bytes = makePdf(128)
+      const intent = await alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName: 'uncertain-http-chunk.pdf',
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        mimeType: 'application/pdf',
+      })
+
+      const response = await postChunk(alice, intent.intentId, 0, bytes)
+      expect(response.status).toBe(500)
+      expect(queueAttempts).toBe(3)
+      expect(uncertainStorageId).toBeDefined()
+      const state = await t.run(async (ctx) => ({
+        chunks: await ctx.db.query('documentUploadChunks').collect(),
+        cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+        storage: uncertainStorageId
+          ? await ctx.db.system.get('_storage', uncertainStorageId)
+          : null,
+      }))
+      expect(state.chunks).toHaveLength(0)
+      expect(state.cleanup).toHaveLength(0)
+      expect(state.storage).not.toBeNull()
+      expect(log).toHaveBeenCalledTimes(1)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
   it('avoids storing accepted identical chunk retries and cleans a concurrent loser', async () => {
     vi.useFakeTimers()
     vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
@@ -2562,6 +2871,193 @@ describe('document upload receipts', () => {
     ).toHaveLength(1)
   })
 
+  it('keeps preflight and filing operable with 700 small consumed receipts', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const digest = sha256(bytes)
+    const analysis: DocumentAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      normalizedText: 'Notice of appeal from a final civil judgment.',
+    }
+    const first = await t.run(async (ctx) => {
+      let firstReceipt:
+        | {
+            documentId: Id<'documents'>
+            analysisId: Id<'documentAnalyses'>
+          }
+        | undefined
+      for (let index = 0; index < 700; index += 1) {
+        const fileName = `small-receipt-${index}.pdf`
+        const storageId = await ctx.storage.store(
+          new Blob([bytes.buffer as ArrayBuffer], {
+            type: 'application/pdf',
+          }),
+        )
+        const documentId = await ctx.db.insert('documents', {
+          caseSessionId: fixture.aliceSessionId,
+          storageId,
+          sha256: digest,
+          fileName,
+          mimeType: 'application/pdf',
+          sizeBytes: bytes.byteLength,
+          extractedText: analysis.normalizedText,
+          extractedSignals: ['notice of appeal'],
+        })
+        const analysisId = await ctx.db.insert('documentAnalyses', {
+          caseSessionId: fixture.aliceSessionId,
+          documentId,
+          analyzerId: analysis.analyzerId,
+          fileSizeBytes: analysis.fileSizeBytes,
+          mimeType: analysis.mimeType,
+          searchableText: analysis.searchableText,
+          certificateOfServiceDetected: analysis.certificateOfServiceDetected,
+          certificateOfComplianceDetected:
+            analysis.certificateOfComplianceDetected,
+          sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
+          warnings: [],
+          analysisJson: JSON.stringify(analysis),
+          extractedTextHash: textHash(analysis.normalizedText!),
+          createdAt: new Date().toISOString(),
+        })
+        await ctx.db.patch(documentId, { analysisId })
+        await ctx.db.insert('documentUploadIntents', {
+          institutionId: fixture.institutionId,
+          scopeKind: 'session',
+          caseSessionId: fixture.aliceSessionId,
+          userId: fixture.aliceId,
+          fileName,
+          sizeBytes: bytes.byteLength,
+          sha256: digest,
+          mimeType: 'application/pdf',
+          chunkCount: 1,
+          state: 'consumed',
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          createdAt: new Date().toISOString(),
+          storageId,
+          documentId,
+          analysisId,
+        })
+        if (index === 0) firstReceipt = { documentId, analysisId }
+      }
+      return firstReceipt!
+    })
+
+    const document: UploadedDocument = {
+      id: first.documentId,
+      fileName: 'small-receipt-0.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: digest,
+      extractedText: analysis.normalizedText,
+      analysisId: first.analysisId,
+      analysis,
+      extractedSignals: ['notice of appeal'],
+    }
+    const baseline = await alice.query(getSessionRef, {
+      caseSessionId: fixture.aliceSessionId,
+    })
+    expect(serializedJsonUtf8Bytes(baseline)).toBeLessThan(
+      maxSessionGrowthBytes,
+    )
+    const rowMaterialBytes = await t.run(async (ctx) => {
+      const documents = await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      const analyses = await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      return [...documents, ...analyses].reduce(
+        (sum, row) =>
+          sum + new TextEncoder().encode(JSON.stringify(row)).byteLength,
+        0,
+      )
+    })
+    expect(rowMaterialBytes).toBeLessThan(maxSessionGrowthBytes)
+
+    const filed = await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Empty filing fixture',
+        documents: [],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Must preserve all receipt-backed documents.',
+      },
+    })
+    expect(filed.filings).toHaveLength(1)
+
+    const submission: FilingSubmission = {
+      eventId: 'notice_of_appeal',
+      participantRole: 'appellant',
+      title: 'Notice of Appeal',
+      mainDocument: document,
+      attachments: [],
+      metadata: {
+        ...defaultFilingMetadata('notice_of_appeal'),
+        representedPartyId: 'appellant',
+      },
+      notes: '',
+    }
+    const preflight = await alice.query(preflightFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      submission,
+    })
+    expect(preflight.accepted).toBe(true)
+
+    const submitted = await alice.mutation(submitEcfFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      submission,
+    })
+    expect(submitted.preflight.accepted).toBe(true)
+    expect(submitted.session.filings.at(-1)?.documents[0]?.id).toBe(
+      first.documentId,
+    )
+    const counts = await t.run(async (ctx) => ({
+      documents: (
+        await ctx.db
+          .query('documents')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', fixture.aliceSessionId),
+          )
+          .collect()
+      ).length,
+      analyses: (
+        await ctx.db
+          .query('documentAnalyses')
+          .withIndex('by_case', (index) =>
+            index.eq('caseSessionId', fixture.aliceSessionId),
+          )
+          .collect()
+      ).length,
+      consumedReceipts: (
+        await ctx.db
+          .query('documentUploadIntents')
+          .withIndex('by_case_state', (index) =>
+            index
+              .eq('caseSessionId', fixture.aliceSessionId)
+              .eq('state', 'consumed'),
+          )
+          .collect()
+      ).length,
+    }))
+    expect(counts).toEqual({
+      documents: 700,
+      analyses: 700,
+      consumedReceipts: 700,
+    })
+  }, 60_000)
+
   it('uses the persisted receipt-backed report for ECF preflight and submission', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
@@ -2754,9 +3250,11 @@ describe('document upload receipts', () => {
     })
     const filing = submitted.session.filings.at(-1)
     expect(filing?.documents).toHaveLength(3)
-    expect(filing?.documents.every(
-      (document) => document.analysis?.warnings[0] === largeWarning,
-    )).toBe(true)
+    expect(
+      filing?.documents.every(
+        (document) => document.analysis?.warnings[0] === largeWarning,
+      ),
+    ).toBe(true)
     const storedSubmission = JSON.parse(
       filing!.submissionJson!,
     ) as FilingSubmission

@@ -259,7 +259,19 @@ type SessionAssemblySnapshot = {
   metrics: SessionAdmissionMetrics
 }
 
+type ReceiptBackedDocuments = Map<
+  string,
+  { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
+>
+
 const assembledSnapshots = new WeakMap<CaseSession, SessionAssemblySnapshot>()
+// Reuse one bounded consumed-receipt scan while a mutation validates and then
+// replaces the same assembled session. A WeakMap keeps that read cache local
+// to the snapshot/transaction lifecycle without retaining historical rows.
+const receiptBackedDocumentsByRows = new WeakMap<
+  SessionStorageRows,
+  ReceiptBackedDocuments
+>()
 
 function metricsForSession(session: CaseSession): SessionAdmissionMetrics {
   const snapshot = assembledSnapshots.get(session)
@@ -600,6 +612,10 @@ async function loadSessionStorageRows(
   ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
   scenarioId: Id<'scenarios'>,
+  preloadedDocumentRows?: Pick<
+    SessionStorageRows,
+    'documents' | 'documentAnalyses'
+  >,
 ): Promise<SessionStorageRows> {
   const rows = {} as SessionStorageRows
   rows.scenarioIssues = await collectRowsIncrementally(ctx, 'scenarioIssues', {
@@ -618,14 +634,14 @@ async function loadSessionStorageRows(
   rows.participants = await collectRowsIncrementally(ctx, 'participants', {
     caseSessionId,
   })
-  rows.documents = await collectRowsIncrementally(ctx, 'documents', {
-    caseSessionId,
-  })
-  rows.documentAnalyses = await collectRowsIncrementally(
-    ctx,
-    'documentAnalyses',
-    { caseSessionId },
-  )
+  rows.documents =
+    preloadedDocumentRows?.documents ??
+    (await collectRowsIncrementally(ctx, 'documents', { caseSessionId }))
+  rows.documentAnalyses =
+    preloadedDocumentRows?.documentAnalyses ??
+    (await collectRowsIncrementally(ctx, 'documentAnalyses', {
+      caseSessionId,
+    }))
   rows.filings = await collectRowsIncrementally(ctx, 'filings', {
     caseSessionId,
   })
@@ -1556,6 +1572,10 @@ function remapCitationsJson(
 async function assembleCaseSession(
   ctx: ReadCtx,
   caseSession: Doc<'caseSessions'>,
+  preloadedDocumentRows?: Pick<
+    SessionStorageRows,
+    'documents' | 'documentAnalyses'
+  >,
 ): Promise<CaseSession> {
   ctx = withSessionTransactionBudget(ctx).ctx
   if (!caseSession.institutionId) throw notFound('Case session')
@@ -1569,6 +1589,7 @@ async function assembleCaseSession(
     ctx,
     caseSession._id,
     scenarioDoc._id,
+    preloadedDocumentRows,
   )
   const {
     scenarioIssues,
@@ -1938,6 +1959,9 @@ async function loadReceiptBackedDocuments(
   caseSessionId: Id<'caseSessions'>,
   rows?: SessionStorageRows,
 ) {
+  const cached = rows ? receiptBackedDocumentsByRows.get(rows) : undefined
+  if (cached) return cached
+
   const receipts = await collectRowsIncrementally(
     ctx,
     'documentUploadIntents',
@@ -1988,6 +2012,7 @@ async function loadReceiptBackedDocuments(
     }
     preserved.set(String(document._id), { document, analysis })
   }
+  if (rows) receiptBackedDocumentsByRows.set(rows, preserved)
   return preserved
 }
 
@@ -2118,6 +2143,12 @@ async function replaceSessionState(
   const filingIdMap = new Map<string, Id<'filings'>>()
   const documentIdMap = new Map<string, Id<'documents'>>()
   const analysisIdMap = new Map<string, Id<'documentAnalyses'>>()
+  const replacementDocuments = [...receiptBackedDocuments.values()].map(
+    ({ document }) => document,
+  )
+  const replacementAnalyses = [...receiptBackedDocuments.values()].map(
+    ({ analysis }) => analysis,
+  )
   for (const filing of session.filings) {
     const documentIds: Array<Id<'documents'>> = []
     const documentAnalysisIds: Array<Id<'documentAnalyses'>> = []
@@ -2174,11 +2205,12 @@ async function replaceSessionState(
         })
       }
       documentIdMap.set(document.id, documentId)
+      let persistedAnalysisId: Id<'documentAnalyses'> | undefined
       if (receiptBacked) {
         // The consumed receipt owns these rows; preserve their IDs and blob link.
       } else if (document.analysis) {
         const analysis = document.analysis
-        const analysisId = await ctx.db.insert('documentAnalyses', {
+        const analysisRow = {
           caseSessionId,
           documentId,
           analyzerId: analysis.analyzerId,
@@ -2212,12 +2244,47 @@ async function replaceSessionState(
             ? { appendixCitationCount: analysis.appendixCitations.length }
             : {}),
           createdAt: filing.filedAt,
-        })
+        }
+        const analysisId = await ctx.db.insert('documentAnalyses', analysisRow)
         documentAnalysisIds.push(analysisId)
+        persistedAnalysisId = analysisId
+        replacementAnalyses.push({
+          ...analysisRow,
+          _id: analysisId,
+          _creationTime: Number.MAX_SAFE_INTEGER,
+        } as Doc<'documentAnalyses'>)
         if (document.analysisId)
           analysisIdMap.set(document.analysisId, analysisId)
         analysisIdMap.set(`${document.id}:analysis`, analysisId)
         await ctx.db.patch(documentId, { analysisId })
+      }
+      if (!receiptBacked) {
+        replacementDocuments.push({
+          _id: documentId,
+          _creationTime: Number.MAX_SAFE_INTEGER,
+          caseSessionId,
+          ...(document.storageId
+            ? { storageId: document.storageId as Id<'_storage'> }
+            : {}),
+          ...(document.sha256 ? { sha256: document.sha256 } : {}),
+          fileName: document.fileName,
+          mimeType: document.mimeType,
+          sizeBytes: document.sizeBytes,
+          ...(typeof document.pageCount === 'number'
+            ? { pageCount: document.pageCount }
+            : {}),
+          ...(document.extractedText
+            ? { extractedText: document.extractedText }
+            : {}),
+          ...(document.textExtractionStatus
+            ? { textExtractionStatus: document.textExtractionStatus }
+            : {}),
+          ...(typeof document.wordCount === 'number'
+            ? { wordCount: document.wordCount }
+            : {}),
+          ...(persistedAnalysisId ? { analysisId: persistedAnalysisId } : {}),
+          extractedSignals: document.extractedSignals,
+        } as Doc<'documents'>)
       }
       documentIds.push(documentId)
     }
@@ -2469,7 +2536,13 @@ async function replaceSessionState(
     // ERROR_CODE: NOT_FOUND
     throw new Error('Case session was removed while saving state')
   }
-  const saved = await assembleCaseSession(ctx, updated)
+  // Receipt-owned document and analysis rows are unchanged in this transaction;
+  // reuse their validated snapshot rows and the rows inserted above instead of
+  // rereading every large record just written or preserved.
+  const saved = await assembleCaseSession(ctx, updated, {
+    documents: replacementDocuments,
+    documentAnalyses: replacementAnalyses,
+  })
   if (previousSession) {
     assertSessionAdmission(previousSession, saved)
   } else if (!fitsSessionAdmission(previousMetrics, metricsForSession(saved))) {

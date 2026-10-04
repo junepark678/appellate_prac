@@ -20,6 +20,8 @@
 import { httpRouter, makeFunctionReference } from 'convex/server'
 import type { Id } from './_generated/dataModel'
 import { httpAction } from './_generated/server'
+import type { ActionCtx } from './_generated/server'
+import { enqueueCleanupWithBoundedRetry } from './documentUploadCleanup'
 import { AppErrorCode, ConvexError, validationError } from './errors'
 
 const maxChunkBytes = 4 * 1024 * 1024
@@ -48,6 +50,21 @@ const queueUploadCleanupRef = makeFunctionReference<
   { storageIds: Id<'_storage'>[] },
   Id<'_storage'>[]
 >('documentUploads:queueUploadCleanup')
+
+async function queueTemporaryChunkCleanup(
+  ctx: ActionCtx,
+  storageId: Id<'_storage'>,
+) {
+  try {
+    await enqueueCleanupWithBoundedRetry(() =>
+      ctx.runMutation(queueUploadCleanupRef, { storageIds: [storageId] }),
+    )
+  } catch (error) {
+    // The record mutation may have committed despite an ambiguous transport
+    // failure. Leave the object untouched when cleanup cannot be durably queued.
+    console.error('Unable to queue temporary upload cleanup', error)
+  }
+}
 
 function allowedOrigins() {
   return new Set(
@@ -284,7 +301,7 @@ const chunkRoute = httpAction(async (ctx, request) => {
       sha256,
     })
     if (!record.accepted) {
-      await ctx.runMutation(queueUploadCleanupRef, { storageIds: [storageId] })
+      await queueTemporaryChunkCleanup(ctx, storageId)
       storageId = undefined
     } else {
       storageId = undefined
@@ -299,15 +316,7 @@ const chunkRoute = httpAction(async (ctx, request) => {
     )
   } catch (error) {
     if (storageId) {
-      try {
-        await ctx.runMutation(queueUploadCleanupRef, {
-          storageIds: [storageId],
-        })
-      } catch (cleanupError) {
-        // Never delete here: the record mutation may have committed before an
-        // action transport failure, so this object may already be referenced.
-        console.error('Unable to queue temporary upload cleanup', cleanupError)
-      }
+      await queueTemporaryChunkCleanup(ctx, storageId)
       storageId = undefined
     }
     const response = errorResponse(request, error)
