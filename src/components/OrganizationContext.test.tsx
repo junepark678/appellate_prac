@@ -114,12 +114,14 @@ function organization(
   name: string,
   role: OrganizationContextDTO["role"] = "learner",
   kind: OrganizationContextDTO["kind"] = "shared",
+  expiresAt?: string,
 ): OrganizationContextDTO {
   return {
     institutionId: institutionId as Id<"institutions">,
     name,
     kind,
     role,
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
     capabilities: {
       manageMembers: role === "admin",
       teach: role === "admin" || role === "instructor",
@@ -255,10 +257,7 @@ function createTestRouter(initialEntry: string, appTitle = "Assignments") {
     search: {
       middlewares: [retainSearchParams(["organizationId"])],
     },
-    component: gatedAppFrame(
-      "Organization administration",
-      "manageMembers",
-    ),
+    component: gatedAppFrame("Organization administration", "manageMembers"),
   });
   const legalRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -375,8 +374,18 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.history.replaceState({}, "", "/");
 });
+
+async function flushAsyncUpdates() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 describe("OrganizationContextProvider", () => {
   it("does not initialize or query organization context outside organization routes", async () => {
@@ -401,6 +410,31 @@ describe("OrganizationContextProvider", () => {
     expect(mocks.upsertCurrentUser).not.toHaveBeenCalled();
     expect(mocks.client.watchQuery).not.toHaveBeenCalled();
     expect(mocks.client.mutation).not.toHaveBeenCalled();
+  });
+
+  it("retries transient signed-in user initialization failures", async () => {
+    mocks.upsertCurrentUser
+      .mockRejectedValueOnce(new Error("temporary backend failure"))
+      .mockResolvedValueOnce({ id: "user-a", displayName: "User A" });
+    getOrganizationContext = async (id) =>
+      organization(id, "Personal workspace", "admin", "personal");
+    renderOrganizationApp("/app");
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(
+      /account could not be initialized/i,
+    );
+    expect(screen.queryByTestId("organization-content")).toBeNull();
+    expect(mocks.client.watchQuery).not.toHaveBeenCalled();
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+    expect(mocks.upsertCurrentUser).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(
+      await screen.findByText("Personal workspace content (admin)"),
+    ).toBeTruthy();
+    expect(mocks.upsertCurrentUser).toHaveBeenCalledTimes(2);
+    expect(mocks.client.mutation).toHaveBeenCalledTimes(1);
   });
 
   it("uses read-only list and getContext for direct URLs, keeping revoked IDs unavailable in place", async () => {
@@ -430,7 +464,9 @@ describe("OrganizationContextProvider", () => {
   it("clears a live context and local work when the organization becomes unavailable", async () => {
     const { router } = renderOrganizationApp("/app?organizationId=org-a");
     expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
-    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(cancellationRegistrationCount).toBeGreaterThan(0),
+    );
     const capture = latestCapture;
     expect(capture).not.toBeNull();
 
@@ -464,6 +500,154 @@ describe("OrganizationContextProvider", () => {
     expect(
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-a");
+  });
+
+  it("invalidates captures and cancels registered work at the membership expiry boundary", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    const expiresAt = new Date(now + 1_000).toISOString();
+    vi.setSystemTime(now);
+    getOrganizationContext = async (id) =>
+      organization(id, "Org A", "admin", "shared", expiresAt);
+    renderOrganizationApp("/app?organizationId=org-a");
+
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(latestCapture).not.toBeNull();
+    const capture = latestCapture!;
+    expect(isCaptureCurrent(capture)).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(isCaptureCurrent(capture)).toBe(true);
+    expect(cancellationSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(screen.queryByText("Org A content (admin)")).toBeNull();
+    expect(isCaptureCurrent(capture)).toBe(false);
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+
+    // A stale cached watch value can notify again after expiry, but must never
+    // restore authorization.
+    const watch = contextWatches.get("org-a");
+    expect(watch).toBeTruthy();
+    await act(async () => {
+      watch!.error = undefined;
+      watch!.result = organization(
+        capture.organizationId,
+        "Stale Org A",
+        "admin",
+        "shared",
+        expiresAt,
+      );
+      for (const listener of watch!.notifications) listener();
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(screen.queryByText("Stale Org A content (admin)")).toBeNull();
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces an expiry timer when the membership is renewed", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    const firstExpiry = new Date(now + 1_000).toISOString();
+    const renewedExpiry = new Date(now + 2_000).toISOString();
+    vi.setSystemTime(now);
+    getOrganizationContext = async (id) =>
+      organization(id, "Org A", "admin", "shared", firstExpiry);
+    renderOrganizationApp("/app?organizationId=org-a");
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const watch = contextWatches.get("org-a");
+    expect(watch).toBeTruthy();
+    await act(async () => {
+      watch!.error = undefined;
+      watch!.result = organization(
+        "org-a",
+        "Org A",
+        "admin",
+        "shared",
+        renewedExpiry,
+      );
+      for (const listener of watch!.notifications) listener();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(cancellationSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(screen.queryByText("Org A content (admin)")).toBeNull();
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears pending expiry work on organization switch and signout", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    vi.setSystemTime(now);
+    listedOrganizations = [
+      member("org-a", "Org A", "admin"),
+      member("org-b", "Org B", "admin"),
+    ];
+    getOrganizationContext = async (id) =>
+      organization(
+        id,
+        id === "org-a" ? "Org A" : "Org B",
+        "admin",
+        "shared",
+        new Date(now + (id === "org-a" ? 1_000 : 5_000)).toISOString(),
+      );
+    const router = createTestRouter("/app?organizationId=org-a");
+    const rendered = render(<RouterProvider router={router} />);
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    const oldCapture = latestCapture!;
+
+    fireEvent.change(screen.getByLabelText("Organization"), {
+      target: { value: "org-b" },
+    });
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org B content (admin)")).toBeTruthy();
+    expect(isCaptureCurrent(oldCapture)).toBe(false);
+    expect(cancellationSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      mocks.user.isSignedIn = false;
+      mocks.convexAuth.isAuthenticated = false;
+      rendered.rerender(<RouterProvider router={router} key="signed-out" />);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /sign in to choose/i,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /sign in to choose/i,
+    );
+    expect(screen.queryByTestId("organization-content")).toBeNull();
+    expect(cancellationSpy).toHaveBeenCalledTimes(2);
   });
 
   it("single-flights first Study bootstrap, replaces the URL, and reuses it after reload", async () => {
@@ -611,12 +795,7 @@ describe("OrganizationContextProvider", () => {
         return organization(id, "Former Org", "admin");
       }
       if (id === "org-personal") {
-        return organization(
-          id,
-          "Personal workspace",
-          "admin",
-          "personal",
-        );
+        return organization(id, "Personal workspace", "admin", "personal");
       }
       throw new Error("NOT_FOUND");
     };
@@ -683,12 +862,7 @@ describe("OrganizationContextProvider", () => {
     listedOrganizations = [];
     getOrganizationContext = async (id) => {
       if (id === "org-personal") {
-        return organization(
-          id,
-          "Personal workspace",
-          "admin",
-          "personal",
-        );
+        return organization(id, "Personal workspace", "admin", "personal");
       }
       throw new Error("NOT_FOUND");
     };
@@ -697,9 +871,7 @@ describe("OrganizationContextProvider", () => {
       .mockResolvedValueOnce({
         institutionId: "org-personal" as Id<"institutions">,
       });
-    const { router } = renderOrganizationApp(
-      "/app?organizationId=revoked-org",
-    );
+    const { router } = renderOrganizationApp("/app?organizationId=revoked-org");
 
     expect((await screen.findByRole("alert")).textContent).toMatch(
       /organization is unavailable/i,
@@ -738,9 +910,7 @@ describe("OrganizationContextProvider", () => {
       institutionId: Id<"institutions">;
     }>();
     mocks.client.mutation.mockReturnValue(pendingBootstrap.promise);
-    const { router } = renderOrganizationApp(
-      "/app?organizationId=revoked-org",
-    );
+    const { router } = renderOrganizationApp("/app?organizationId=revoked-org");
 
     expect((await screen.findByRole("alert")).textContent).toMatch(
       /organization is unavailable/i,
@@ -969,7 +1139,9 @@ describe("OrganizationContextProvider", () => {
       "Org A private case title",
     );
     expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
-    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(cancellationRegistrationCount).toBeGreaterThan(0),
+    );
     const oldCapture = latestCapture;
     expect(oldCapture).not.toBeNull();
     expect(isCaptureCurrent(oldCapture!)).toBe(true);
@@ -1087,7 +1259,9 @@ describe("OrganizationContextProvider", () => {
     const rendered = render(<RouterProvider router={router} />);
 
     expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
-    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(cancellationRegistrationCount).toBeGreaterThan(0),
+    );
     const capture = latestCapture;
     const watch = contextWatches.get("org-a");
     expect(watch).toBeTruthy();
@@ -1114,7 +1288,9 @@ describe("OrganizationContextProvider", () => {
   it("cancels registered work when navigation leaves organization scope", async () => {
     const { router } = renderOrganizationApp("/app?organizationId=org-a");
     expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
-    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(cancellationRegistrationCount).toBeGreaterThan(0),
+    );
 
     await act(async () => {
       await router.navigate({ to: "/legal/privacy" } as never);
@@ -1127,7 +1303,9 @@ describe("OrganizationContextProvider", () => {
   it("cancels registered work when the shared route subtree unmounts", async () => {
     const rendered = renderOrganizationApp("/app?organizationId=org-a");
     expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
-    expect(cancellationRegistrationCount).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(cancellationRegistrationCount).toBeGreaterThan(0),
+    );
 
     rendered.unmount();
 
