@@ -36,6 +36,7 @@ import {
   createRoute,
   createRouter,
   retainSearchParams,
+  useRouterState,
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,7 +45,7 @@ import type {
   OrganizationContextDTO,
   OrganizationMemberDTO,
 } from "../../convex/organizationContracts";
-import { AppFrame } from "./AppFrame";
+import { AppFrame, OrganizationRouteGate } from "./AppFrame";
 import {
   type OrganizationContextCapture,
   OrganizationContextProvider,
@@ -145,6 +146,7 @@ let listedOrganizations: OrganizationMemberDTO[];
 let getOrganizationContext: (id: string) => Promise<OrganizationContextDTO>;
 let cancellationSpy: () => void;
 let cancellationRegistrationCount: number;
+let routeContentRenderCount: number;
 let latestCapture: ReturnType<
   ReturnType<typeof useOrganizationContext>["captureOrganizationContext"]
 >;
@@ -173,6 +175,7 @@ function CancellationRegistration({
 }
 
 function OrganizationContents() {
+  routeContentRenderCount += 1;
   const context = useOrganizationContext();
   latestCapture = context.captureOrganizationContext();
   isCaptureCurrent = context.isCurrentOrganizationContext;
@@ -187,9 +190,6 @@ function OrganizationContents() {
 
 function createTestRouter(initialEntry: string, appTitle = "Assignments") {
   const rootRoute = createRootRoute({
-    search: {
-      middlewares: [retainSearchParams(["organizationId"])],
-    },
     component: () => (
       <OrganizationContextProvider>
         <Outlet />
@@ -201,30 +201,64 @@ function createTestRouter(initialEntry: string, appTitle = "Assignments") {
       <OrganizationContents />
     </AppFrame>
   );
+  const gatedAppFrame = (
+    title: string,
+    capability: "learn" | "teach" | "manageMembers",
+  ) => {
+    const Content = appFrame(title);
+    return () => (
+      <OrganizationRouteGate title={title} capability={capability}>
+        <Content />
+      </OrganizationRouteGate>
+    );
+  };
   const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/",
     component: appFrame("Study"),
   });
+  const AppBase = appFrame(appTitle);
+  const AppRouteContent = () => {
+    const pathname = useRouterState({
+      select: (state) => state.location.pathname,
+    });
+    return pathname === "/app" ? <AppBase /> : <Outlet />;
+  };
   const appRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/app",
-    component: appFrame(appTitle),
+    search: {
+      middlewares: [retainSearchParams(["organizationId"])],
+    },
+    component: () => (
+      <OrganizationRouteGate title={appTitle} capability="learn">
+        <AppRouteContent />
+      </OrganizationRouteGate>
+    ),
   });
   const assignmentRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: "/app/assignments/$assignmentId",
-    component: appFrame("Private assignment"),
+    getParentRoute: () => appRoute,
+    path: "/assignments/$assignmentId",
+    component: gatedAppFrame("Private assignment", "learn"),
   });
   const instructorRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/instructor",
-    component: appFrame("Courses"),
+    search: {
+      middlewares: [retainSearchParams(["organizationId"])],
+    },
+    component: gatedAppFrame("Courses", "teach"),
   });
   const adminRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/admin",
-    component: appFrame("Organization administration"),
+    search: {
+      middlewares: [retainSearchParams(["organizationId"])],
+    },
+    component: gatedAppFrame(
+      "Organization administration",
+      "manageMembers",
+    ),
   });
   const legalRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -233,8 +267,7 @@ function createTestRouter(initialEntry: string, appTitle = "Assignments") {
   });
   const routeTree = rootRoute.addChildren([
     indexRoute,
-    appRoute,
-    assignmentRoute,
+    appRoute.addChildren([assignmentRoute]),
     instructorRoute,
     adminRoute,
     legalRoute,
@@ -335,6 +368,7 @@ beforeEach(() => {
     organization(id, `Org ${id.slice(-1).toUpperCase()}`, "admin");
   cancellationSpy = vi.fn();
   cancellationRegistrationCount = 0;
+  routeContentRenderCount = 0;
   latestCapture = null;
   isCaptureCurrent = () => false;
 });
@@ -589,18 +623,31 @@ describe("OrganizationContextProvider", () => {
 
   it("keeps the organization query on workflow navigation and honors explicit selections through history", async () => {
     listedOrganizations = [
-      member("org-a", "Org A", "learner"),
-      member("org-b", "Org B", "instructor"),
+      member("org-a", "Org A", "instructor"),
+      member("org-b", "Org B", "admin"),
     ];
     getOrganizationContext = async (id) =>
-      organization(id, id === "org-a" ? "Org A" : "Org B");
+      organization(
+        id,
+        id === "org-a" ? "Org A" : "Org B",
+        id === "org-a" ? "instructor" : "admin",
+      );
     const { router } = renderOrganizationApp("/app?organizationId=org-a");
 
-    expect(await screen.findByText("Org A content (learner)")).toBeTruthy();
+    expect(await screen.findByText("Org A content (instructor)")).toBeTruthy();
+    await act(async () => {
+      await router.navigate({
+        to: "/app/assignments/assignment-new",
+      } as never);
+    });
+    expect(await screen.findByText("Org A content (instructor)")).toBeTruthy();
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBe("org-a");
     await act(async () => {
       await router.navigate({ to: "/instructor" } as never);
     });
-    expect(await screen.findByText("Org A content (learner)")).toBeTruthy();
+    expect(await screen.findByText("Org A content (instructor)")).toBeTruthy();
     expect(
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-a");
@@ -611,7 +658,7 @@ describe("OrganizationContextProvider", () => {
         search: { organizationId: "org-b" },
       } as never);
     });
-    expect(await screen.findByText("Org B content (learner)")).toBeTruthy();
+    expect(await screen.findByText("Org B content (admin)")).toBeTruthy();
     expect(
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-b");
@@ -619,15 +666,74 @@ describe("OrganizationContextProvider", () => {
     await act(async () => {
       router.history.back();
     });
-    expect(await screen.findByText("Org A content (learner)")).toBeTruthy();
+    expect(await screen.findByText("Org A content (instructor)")).toBeTruthy();
     expect(
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-a");
     await act(async () => {
       router.history.forward();
     });
-    expect(await screen.findByText("Org B content (learner)")).toBeTruthy();
+    expect(await screen.findByText("Org B content (admin)")).toBeTruthy();
   });
+
+  it.each(["/", "/legal/privacy"])(
+    "drops organization context when navigating to public route %s",
+    async (path) => {
+      const { router } = renderOrganizationApp("/app?organizationId=org-a");
+
+      expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
+      await act(async () => {
+        await router.navigate({ to: path } as never);
+      });
+
+      expect(router.state.location.pathname).toBe(path);
+      expect(
+        (router.state.location.search as Record<string, unknown>)
+          .organizationId,
+      ).toBeUndefined();
+      expect(
+        screen.getByRole("heading", {
+          name: path === "/" ? "Study" : "Privacy Notice",
+        }),
+      ).toBeTruthy();
+      expect(mocks.client.mutation).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      path: "/app",
+      role: "instructor" as const,
+      capabilities: { learn: false, teach: true, manageMembers: false },
+    },
+    {
+      path: "/instructor",
+      role: "learner" as const,
+      capabilities: { learn: true, teach: false, manageMembers: false },
+    },
+    {
+      path: "/admin",
+      role: "instructor" as const,
+      capabilities: { learn: true, teach: true, manageMembers: false },
+    },
+  ])(
+    "blocks $path section content without the required capability",
+    async ({ path, role, capabilities }) => {
+      listedOrganizations = [member("org-a", "Org A", role)];
+      getOrganizationContext = async (id) => ({
+        ...organization(id, "Org A", role),
+        capabilities,
+      });
+      renderOrganizationApp(`${path}?organizationId=org-a`);
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(
+        /does not have access to this section/i,
+      );
+      expect(screen.queryByTestId("organization-content")).toBeNull();
+      expect(routeContentRenderCount).toBe(0);
+      expect(mocks.client.mutation).not.toHaveBeenCalled();
+    },
+  );
 
   it("shows capability navigation from the selected organization role", async () => {
     listedOrganizations = [
