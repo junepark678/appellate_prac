@@ -607,16 +607,51 @@ describe('organization isolation for sessions and scenarios', () => {
     const asAlice = t.withIdentity(identity('alice'))
     await t.mutation(internal.scenarios.seedPublished, {})
 
-    const sharedScenario = await asAlice.mutation(createPrivateScenarioRef, {
-      ...scenarioInput('Shared organization private scenario'),
-      institutionId: fixture.orgA,
-    })
-    const personalScenario = await asAlice.mutation(createPrivateScenarioRef, {
-      ...scenarioInput('Personal private scenario'),
-    })
+    const fixedClock = vi.spyOn(Date, 'now').mockReturnValue(1791093740000)
+    let sharedScenario: Scenario
+    let personalScenario: Scenario
+    try {
+      sharedScenario = await asAlice.mutation(createPrivateScenarioRef, {
+        ...scenarioInput('Shared organization private scenario'),
+        institutionId: fixture.orgA,
+      })
+      personalScenario = await asAlice.mutation(createPrivateScenarioRef, {
+        ...scenarioInput('Personal private scenario'),
+      })
+    } finally {
+      fixedClock.mockRestore()
+    }
     const omitted = await asAlice.query(listAvailableScenariosRef, {})
+    const [sharedRecord, personalRecord] = await t.run((ctx) =>
+      Promise.all([
+        ctx.db
+          .query('scenarios')
+          .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', sharedScenario.id))
+          .unique(),
+        ctx.db
+          .query('scenarios')
+          .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', personalScenario.id))
+          .unique(),
+      ]),
+    )
+    expect(sharedScenario.id).not.toBe(personalScenario.id)
+    expect(sharedRecord?._id).not.toBe(personalRecord?._id)
+    expect(sharedRecord).toMatchObject({
+      scenarioKey: sharedScenario.id,
+      institutionId: fixture.orgA,
+      title: 'Shared organization private scenario',
+    })
+    expect(personalRecord).toMatchObject({
+      scenarioKey: personalScenario.id,
+      title: 'Personal private scenario',
+    })
+    expect(personalRecord?.institutionId).not.toBe(fixture.orgA)
     expect(omitted.some((scenario) => scenario.id === personalScenario.id)).toBe(true)
     expect(omitted.some((scenario) => scenario.id === sharedScenario.id)).toBe(false)
+    expect(omitted.find((scenario) => scenario.id === personalScenario.id)).toMatchObject({
+      id: personalScenario.id,
+      title: 'Personal private scenario',
+    })
     expect(omitted.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
 
     const explicitShared = await asAlice.query(listAvailableScenariosRef, {
@@ -644,6 +679,78 @@ describe('organization isolation for sessions and scenarios', () => {
     expect(outsiderScenarios.some((scenario) => scenario.visibility === 'private')).toBe(false)
     expect(outsiderScenarios.some((scenario) => scenario.visibility === 'public_template')).toBe(true)
     expect(outsiderAfter).toEqual(outsiderBefore)
+  })
+
+  it('uses persisted IDs for same-clock template copies and scenario revisions', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedIsolationFixture(t)
+    await t.mutation(internal.scenarios.seedPublished, {})
+    const asAlice = t.withIdentity(identity('alice'))
+    let original: Scenario
+    let firstCopy: Scenario
+    let secondCopy: Scenario
+    let firstRevision: Scenario
+    let secondRevision: Scenario
+    const fixedClock = vi.spyOn(Date, 'now').mockReturnValue(1791093740000)
+    try {
+      original = await asAlice.mutation(createPrivateScenarioRef, {
+        ...scenarioInput('Revision source'),
+        institutionId: fixture.orgA,
+      })
+      firstCopy = await asAlice.mutation(copyTemplateRef, {
+        scenarioId: 'synthetic-employment-retaliation',
+        institutionId: fixture.orgA,
+      })
+      secondCopy = await asAlice.mutation(copyTemplateRef, {
+        scenarioId: 'synthetic-employment-retaliation',
+        institutionId: fixture.orgA,
+      })
+
+      await asAlice.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: original.id,
+      })
+      firstRevision = await asAlice.mutation(updatePrivateScenarioRef, {
+        scenarioId: original.id,
+        input: scenarioInput('First persisted revision'),
+      })
+      await asAlice.mutation(createSessionRef, {
+        institutionId: fixture.orgA,
+        scenarioId: firstRevision.id,
+      })
+      secondRevision = await asAlice.mutation(updatePrivateScenarioRef, {
+        scenarioId: firstRevision.id,
+        input: scenarioInput('Second persisted revision'),
+      })
+    } finally {
+      fixedClock.mockRestore()
+    }
+
+    const exposedIds = [
+      original.id,
+      firstCopy.id,
+      secondCopy.id,
+      firstRevision.id,
+      secondRevision.id,
+    ]
+    expect(new Set(exposedIds).size).toBe(exposedIds.length)
+    expect(firstRevision.scenarioFamilyKey).toBe(original.scenarioFamilyKey)
+    expect(secondRevision.scenarioFamilyKey).toBe(original.scenarioFamilyKey)
+
+    const storedScenarios = await t.run((ctx) =>
+      Promise.all(
+        exposedIds.map((scenarioKey) =>
+          ctx.db
+            .query('scenarios')
+            .withIndex('by_scenario_key', (index) => index.eq('scenarioKey', scenarioKey))
+            .unique(),
+        ),
+      ),
+    )
+    expect(storedScenarios.every((scenario) => scenario !== null)).toBe(true)
+    expect(new Set(storedScenarios.map((scenario) => scenario?._id)).size).toBe(
+      exposedIds.length,
+    )
   })
 
   it('fails closed to public templates when personal workspace ownership is inactive or malformed', async () => {

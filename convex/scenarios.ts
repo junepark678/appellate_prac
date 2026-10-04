@@ -33,6 +33,7 @@ import type { Scenario, ScenarioDocumentAsset, ScenarioIssue, ScenarioRecordExce
 import scenarioSeed from '../src/domain/scenarios.seed.json'
 
 const seedScenarios = scenarioSeed as Scenario[]
+const PENDING_SCENARIO_KEY = '__pending-scenario-key__'
 
 function parseJsonField<T>(json: string, label: string): T {
   try {
@@ -501,21 +502,21 @@ export const createPrivateScenario = mutation({
   handler: async (ctx, args) => {
     const { user } = await requireCurrentUser(ctx)
     const institutionId = await requireScenarioInstitution(ctx, user._id, args.institutionId)
-    const now = Date.now().toString(36)
-    const scenarioKey = `private-${user._id}-${now}`
     const scenarioId = await ctx.db.insert(
       'scenarios',
       scenarioDocFromInput(args, {
-        scenarioKey,
+        scenarioKey: PENDING_SCENARIO_KEY,
         institutionId,
         visibility: 'private',
         ownerUserId: user._id,
-        scenarioFamilyKey: scenarioKey,
+        scenarioFamilyKey: PENDING_SCENARIO_KEY,
         revision: 1,
         revisionStatus: 'draft',
         published: false,
       }),
     )
+    const scenarioKey = `private-${user._id}-${scenarioId}`
+    await ctx.db.patch(scenarioId, { scenarioKey, scenarioFamilyKey: scenarioKey })
     const scenario = await ctx.db.get(scenarioId)
     if (!scenario) throw new Error('Unable to create scenario')
     return scenarioFromDoc(scenario)
@@ -535,9 +536,8 @@ export const copyTemplateForCurrentUser = mutation({
     if (visibilityForDoc(template) !== 'public_template') {
       throw validationError('Only public templates can be copied.')
     }
-    const scenarioKey = `private-${template.scenarioKey}-${user._id}-${Date.now().toString(36)}`
     const privateScenarioId = await ctx.db.insert('scenarios', {
-      scenarioKey,
+      scenarioKey: PENDING_SCENARIO_KEY,
       institutionId,
       visibility: 'private',
       ownerUserId: user._id,
@@ -559,6 +559,8 @@ export const copyTemplateForCurrentUser = mutation({
       ...(template.sourceCaseUrl ? { sourceCaseUrl: template.sourceCaseUrl } : {}),
       published: false,
     })
+    const scenarioKey = `private-${template.scenarioKey}-${user._id}-${privateScenarioId}`
+    await ctx.db.patch(privateScenarioId, { scenarioKey })
     await cloneScenarioChildren(ctx, template._id, privateScenarioId)
     const privateScenario = await ctx.db.get(privateScenarioId)
     if (!privateScenario) throw new Error('Unable to copy scenario')
@@ -611,21 +613,24 @@ export const updatePrivateScenario = mutation({
       return scenarioFromDoc(updated, related.issues, related.recordExcerpts, related.assets)
     }
 
-    const scenarioKey = `${current.scenarioFamilyKey ?? current.scenarioKey}-r${(current.revision ?? 1) + 1}-${Date.now().toString(36)}`
+    const familyKey = current.scenarioFamilyKey ?? current.scenarioKey
+    const revision = (current.revision ?? 1) + 1
     const nextId = await ctx.db.insert(
       'scenarios',
       scenarioDocFromInput(args.input, {
-        scenarioKey,
+        scenarioKey: PENDING_SCENARIO_KEY,
         institutionId: current.institutionId,
         visibility: 'private',
         ownerUserId: user._id,
-        scenarioFamilyKey: current.scenarioFamilyKey ?? current.scenarioKey,
-        revision: (current.revision ?? 1) + 1,
+        scenarioFamilyKey: familyKey,
+        revision,
         revisionStatus: 'draft',
         createdFromScenarioId: current._id,
         published: false,
       }),
     )
+    const scenarioKey = `${familyKey}-r${revision}-${nextId}`
+    await ctx.db.patch(nextId, { scenarioKey })
     await cloneScenarioChildren(ctx, current._id, nextId)
     await ctx.db.patch(current._id, { supersededByScenarioId: nextId, revisionStatus: 'archived' })
     const next = await ctx.db.get(nextId)

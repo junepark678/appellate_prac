@@ -66,7 +66,7 @@ const listRosterRef = makeFunctionReference<
 >("cohorts:listRoster");
 const listMineRef = makeFunctionReference<
   "query",
-  Record<string, never>,
+  { institutionId?: Id<"institutions"> },
   {
     id: Id<"cohorts">;
     institutionId: Id<"institutions">;
@@ -94,7 +94,7 @@ const listForCohortRef = makeFunctionReference<
 >("assignments:listForCohort");
 const listMyAssignmentsRef = makeFunctionReference<
   "query",
-  Record<string, never>,
+  { institutionId?: Id<"institutions"> },
   {
     id: Id<"assignments">;
     cohortId: Id<"cohorts">;
@@ -462,6 +462,81 @@ async function seedAccessFixture(t: TestConvex<typeof schema>) {
 }
 
 describe("registered organization-scoped authorization", () => {
+  it("supports backward-compatible account-wide lists and selected organization filtering", async () => {
+    const t = convexTest(schema, modules);
+    const fixture = await seedAccessFixture(t);
+    const actor = t.withIdentity(identity("matrix-actor"));
+
+    const allCohorts = await actor.query(listMineRef, {});
+    expect(allCohorts.map((cohort) => cohort.id)).toEqual(
+      expect.arrayContaining([fixture.cohortA, fixture.cohortB]),
+    );
+    const selectedOrganizationACohorts = await actor.query(listMineRef, {
+      institutionId: fixture.organizationA,
+    });
+    expect(
+      selectedOrganizationACohorts.every(
+        (cohort) => cohort.institutionId === fixture.organizationA,
+      ),
+    ).toBe(true);
+    expect(selectedOrganizationACohorts.map((cohort) => cohort.id)).toContain(
+      fixture.cohortA,
+    );
+    expect(JSON.stringify(selectedOrganizationACohorts)).not.toContain(
+      "Cohort B secret title",
+    );
+    expect(
+      (
+        await actor.query(listMineRef, {
+          institutionId: fixture.organizationB,
+        })
+      ).map((cohort) => cohort.id),
+    ).toEqual([fixture.cohortB]);
+
+    expect(
+      (await actor.query(listMyAssignmentsRef, {})).map(
+        (assignment) => assignment.title,
+      ),
+    ).toEqual(["Published B"]);
+    expect(
+      (
+        await actor.query(listMyAssignmentsRef, {
+          institutionId: fixture.organizationB,
+        })
+      ).map((assignment) => assignment.title),
+    ).toEqual(["Published B"]);
+    expect(
+      await actor.query(listMyAssignmentsRef, {
+        institutionId: fixture.organizationA,
+      }),
+    ).toEqual([]);
+
+    await expectError(
+      actor.query(listMineRef, {
+        institutionId: fixture.foreignOrganization,
+      }),
+      AppErrorCode.NOT_FOUND,
+    );
+    await expectError(
+      actor.query(listMyAssignmentsRef, {
+        institutionId: fixture.foreignOrganization,
+      }),
+      AppErrorCode.NOT_FOUND,
+    );
+    await expectError(
+      t
+        .withIdentity(identity("inactive-actor"))
+        .query(listMineRef, { institutionId: fixture.organizationA }),
+      AppErrorCode.NOT_FOUND,
+    );
+    await expectError(
+      t
+        .withIdentity(identity("expired-actor"))
+        .query(listMyAssignmentsRef, { institutionId: fixture.organizationA }),
+      AppErrorCode.NOT_FOUND,
+    );
+  });
+
   it("keeps missing, foreign, suspended, expired, invalid, and paused cohorts indistinguishable", async () => {
     const t = convexTest(schema, modules);
     const fixture = await seedAccessFixture(t);

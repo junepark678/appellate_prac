@@ -119,6 +119,7 @@ type ViewTab = { key: ViewKey; label: string; icon: typeof PanelTop }
 const learnerRole: ParticipantRole = 'appellant'
 
 type CourtListenerSearchAction = (args: {
+  institutionId: Id<'institutions'>
   query: string
 }) => Promise<CourtListenerSearchResult[]>
 
@@ -281,7 +282,9 @@ function Home() {
   const liveAiReady =
     enableLiveAi && integrationStatus?.openRouterConfigured === true
   const courtListenerReady =
-    enableCourtListener && integrationStatus?.courtListenerConfigured === true
+    enableCourtListener &&
+    integrationStatus?.courtListenerConfigured === true &&
+    Boolean(activeSession?.institutionId)
   const liveAiUnavailableReason = !enableLiveAi
     ? 'Live AI events are disabled for this beta.'
     : integrationStatus?.openRouterConfigured === false
@@ -291,7 +294,9 @@ function Home() {
     ? 'CourtListener is disabled for this beta.'
     : integrationStatus?.courtListenerConfigured === false
       ? 'CourtListener is not configured in Convex.'
-      : 'CourtListener status is loading.'
+      : activeSession && !activeSession.institutionId
+        ? 'CourtListener search is unavailable for this session without an organization scope.'
+        : 'CourtListener status is loading.'
 
   useEffect(() => {
     if (!canUseConvex) return
@@ -533,7 +538,13 @@ function Home() {
     setRecapPending(true)
     setRecapError('')
     try {
-      setRecapResults(await searchCourtListener({ query: recapQuery }))
+      if (!activeSession?.institutionId) return
+      setRecapResults(
+        await searchCourtListener({
+          institutionId: activeSession.institutionId,
+          query: recapQuery,
+        }),
+      )
     } catch (error) {
       setRecapError(error instanceof Error ? error.message : 'CourtListener search failed')
       setRecapResults([])
