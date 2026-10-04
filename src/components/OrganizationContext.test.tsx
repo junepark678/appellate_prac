@@ -598,6 +598,7 @@ describe("OrganizationContextProvider", () => {
     const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
     const firstExpiry = new Date(now + 1_000).toISOString();
     const renewedExpiry = new Date(now + 2_000).toISOString();
+    const renewedAgainExpiry = new Date(now + 3_000).toISOString();
     vi.setSystemTime(now);
     getOrganizationContext = async (id) =>
       organization(id, "Org A", "admin", "shared", firstExpiry);
@@ -636,6 +637,31 @@ describe("OrganizationContextProvider", () => {
     );
     expect(screen.queryByText("Org A content (admin)")).toBeNull();
     expect(cancellationSpy).toHaveBeenCalledTimes(1);
+    expect(mocks.client.query).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      const watch = contextWatches.get("org-a");
+      if (!watch) throw new Error("Expected the organization context watch");
+      watch.error = undefined;
+      watch.result = organization(
+        "org-a",
+        "Org A",
+        "admin",
+        "shared",
+        renewedAgainExpiry,
+      );
+      for (const listener of watch.notifications) listener();
+    });
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(mocks.client.query).toHaveBeenCalledTimes(2);
+    expect(cancellationSpy).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes a selected sole membership at expiry and recovers to Personal", async () => {
@@ -687,6 +713,63 @@ describe("OrganizationContextProvider", () => {
     expect(
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-personal");
+  });
+
+  it("retries the expiry list refresh after the context watch recovers", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    const expiresAt = new Date(now + 1_000).toISOString();
+    vi.setSystemTime(now);
+    mocks.client.query.mockRejectedValueOnce(
+      new Error("temporary list refresh failure"),
+    );
+    getOrganizationContext = async (id) =>
+      organization(id, "Org A", "admin", "shared", expiresAt);
+    renderOrganizationApp("/app?organizationId=org-a");
+    await flushAsyncUpdates();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+
+    const watch = contextWatches.get("org-a");
+    expect(watch).toBeTruthy();
+    await act(async () => {
+      watch!.error = new Error("temporary context failure");
+      watch!.result = undefined;
+      for (const listener of watch!.notifications) listener();
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(mocks.client.query).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await act(async () => {
+      watch!.error = undefined;
+      watch!.result = organization(
+        "org-a",
+        "Org A",
+        "admin",
+        "shared",
+        expiresAt,
+      );
+      for (const listener of watch!.notifications) listener();
+    });
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(499);
+    });
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(mocks.client.query).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("alert").textContent ?? "").toMatch(
+      /organization is unavailable/i,
+    );
+    expect(mocks.client.query).toHaveBeenCalledTimes(2);
   });
 
   it("rejects captures when expiry has passed before a delayed timer runs", async () => {
