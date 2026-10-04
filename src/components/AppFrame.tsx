@@ -279,6 +279,15 @@ export function AppFrame({
                 ? 'Your selected organization does not have access to this section.'
                 : organizationContext.unavailableMessage ??
                   'This organization is unavailable. Choose an organization you can access.'}
+              {organizationContext.canRecoverUnavailableOrganization ? (
+                <button
+                  type="button"
+                  onClick={organizationContext.recoverToPersonalWorkspace}
+                  className="ml-2 rounded border border-amber-700 px-2 py-1 font-medium hover:bg-amber-100"
+                >
+                  Use personal workspace
+                </button>
+              ) : null}
               {organizationContext.canRetryOrganizationBootstrap ? (
                 <button
                   type="button"
