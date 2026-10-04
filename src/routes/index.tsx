@@ -303,6 +303,7 @@ export function Home() {
   const transportControllersRef = useRef(new Set<AbortController>())
   const uploadOperationRef = useRef<symbol | null>(null)
   const downloadOperationRef = useRef<symbol | null>(null)
+  const draftGenerationRef = useRef(0)
   const organizationScope = organizationContext.captureOrganizationContext()
   const activeScopeRef = useRef<{
     userId: string | null
@@ -330,6 +331,7 @@ export function Home() {
     downloadManager.revokeAll()
     uploadOperationRef.current = null
     downloadOperationRef.current = null
+    draftGenerationRef.current += 1
     setDocumentPending(false)
     setDocumentDownloadPendingId(null)
     setDocumentError('')
@@ -408,7 +410,7 @@ export function Home() {
 
   useEffect(() => {
     if (!activeSession) return
-    setDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
+    replaceDraft(createEmptyDraft(activeSession, 'notice_of_appeal'))
     setAvailableRecoveredDocuments(
       cachedUnfiledDocuments(
         userId,
@@ -452,8 +454,13 @@ export function Home() {
 
   function resetDraft(eventId = draft.eventId) {
     if (!activeSession) return
-    setDraft(createEmptyDraft(activeSession, eventId))
+    replaceDraft(createEmptyDraft(activeSession, eventId))
     setFilingMetadata(createDefaultMetadata(activeSession, eventId))
+  }
+
+  function replaceDraft(nextDraft: FilingDraft) {
+    draftGenerationRef.current += 1
+    setDraft(nextDraft)
   }
 
   function selectRecoveredDocument(documentId: string) {
@@ -486,7 +493,7 @@ export function Home() {
       const nextSession = await createCaseSession({ scenarioId })
       setActiveCaseSessionId(asCaseSessionId(nextSession.id))
       setTrialDocket(createTrialDocket(nextSession))
-      setDraft(createEmptyDraft(nextSession, 'notice_of_appeal'))
+      replaceDraft(createEmptyDraft(nextSession, 'notice_of_appeal'))
       setAvailableRecoveredDocuments([])
       setFilingMetadata(createDefaultMetadata(nextSession, 'notice_of_appeal'))
       setActiveView('docket')
@@ -520,7 +527,7 @@ export function Home() {
             caseSessionId: asCaseSessionId(activeSession.id),
             draft,
           })
-      setDraft(createEmptyDraft(nextSession, draft.eventId))
+      replaceDraft(createEmptyDraft(nextSession, draft.eventId))
       setFilingMetadata(createDefaultMetadata(nextSession, draft.eventId))
       setActiveView('docket')
     } catch (error) {
@@ -662,6 +669,7 @@ export function Home() {
     if (!activeSession || !canUseConvex || !userId) return
     const capturedSessionId = asCaseSessionId(activeSession.id)
     const requestedSessionId = activeCaseSessionId
+    const capturedDraftGeneration = draftGenerationRef.current
     const organizationCapture = organizationContext.captureOrganizationContext()
     const controller = new AbortController()
     const operationId = Symbol('document-upload')
@@ -720,18 +728,24 @@ export function Home() {
       )
       if (!isCurrentScope()) return
       rememberAvailableDocuments(documents)
-      setDraft((current) => appendUploadedDocuments(current, documents))
+      if (draftGenerationRef.current === capturedDraftGeneration) {
+        setDraft((current) => appendUploadedDocuments(current, documents))
+      }
     } catch (error) {
       if (!isCurrentScope()) return
       if (error instanceof DocumentUploadBatchError) {
         rememberAvailableDocuments(error.documents)
-        setDraft((current) => appendUploadedDocuments(current, error.documents))
+        if (draftGenerationRef.current === capturedDraftGeneration) {
+          setDraft((current) => appendUploadedDocuments(current, error.documents))
+        }
       }
-      setDocumentError(
-        error instanceof Error
-          ? error.message
-          : 'PDF analysis failed. The document was not attached.',
-      )
+      if (draftGenerationRef.current === capturedDraftGeneration) {
+        setDocumentError(
+          error instanceof Error
+            ? error.message
+            : 'PDF analysis failed. The document was not attached.',
+        )
+      }
     } finally {
       transportControllersRef.current.delete(controller)
       if (uploadOperationRef.current === operationId) {
@@ -781,8 +795,12 @@ export function Home() {
       link.rel = 'noopener'
       link.style.display = 'none'
       window.document.body.append(link)
-      link.click()
-      link.remove()
+      try {
+        link.click()
+      } finally {
+        link.remove()
+        downloadManager.revokeAfterDispatch(document.id)
+      }
     } catch (error) {
       if (isCurrentScope()) {
         setDocumentDownloadError(

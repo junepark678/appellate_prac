@@ -22,7 +22,10 @@ import type { TestConvex } from 'convex-test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import schema from '../../convex/schema'
-import { DocumentDownloadManager } from './document-download'
+import {
+  DocumentDownloadManager,
+  documentDownloadObjectUrlLifetimeMs,
+} from './document-download'
 import type { DownloadableDocument } from './document-download'
 import {
   documentUploadChunkBytes,
@@ -155,6 +158,50 @@ describe('guarded document download', () => {
       2,
       second,
     )
+  })
+
+  it('expires dispatched URLs for distinct documents and clears timers on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const bytes = new Uint8Array([37, 80, 68, 70, 45, 49])
+      const baseDocument = await downloadable(bytes)
+      const fixture = downloadWorkflow(baseDocument, bytes)
+      const manager = new DocumentDownloadManager(fixture.workflow)
+      const documents = ['one', 'two', 'three'].map((id) => ({
+        ...baseDocument,
+        id,
+      }))
+
+      const urls = []
+      for (const document of documents) {
+        const url = await manager.download(document)
+        urls.push(url)
+        manager.revokeAfterDispatch(document.id)
+      }
+      expect(fixture.objectUrls.createObjectURL).toHaveBeenCalledTimes(3)
+      expect(fixture.objectUrls.revokeObjectURL).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(documentDownloadObjectUrlLifetimeMs - 1)
+      expect(fixture.objectUrls.revokeObjectURL).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(fixture.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(3)
+      for (const url of urls) {
+        expect(fixture.objectUrls.revokeObjectURL).toHaveBeenCalledWith(url)
+      }
+
+      const unmountDocument = { ...baseDocument, id: 'unmount' }
+      const unmountUrl = await manager.download(unmountDocument)
+      manager.revokeAfterDispatch(unmountDocument.id)
+      manager.dispose()
+      expect(fixture.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(4)
+      expect(fixture.objectUrls.revokeObjectURL).toHaveBeenLastCalledWith(
+        unmountUrl,
+      )
+      await vi.advanceTimersByTimeAsync(documentDownloadObjectUrlLifetimeMs)
+      expect(fixture.objectUrls.revokeObjectURL).toHaveBeenCalledTimes(4)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('aborts an in-flight request and revokes on explicit cancellation', async () => {

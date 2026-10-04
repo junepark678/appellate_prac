@@ -32,6 +32,8 @@ export type DownloadableDocument = {
   sha256?: string
 }
 
+export const documentDownloadObjectUrlLifetimeMs = 60_000
+
 export type DocumentDownloadWorkflow = {
   siteUrl: string | undefined
   getAuthToken: () => Promise<string | null>
@@ -46,6 +48,10 @@ type DownloadEntry = {
 
 export class DocumentDownloadManager {
   private readonly entries = new Map<string, DownloadEntry>()
+  private readonly revokeTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >()
   private readonly fetcher: DocumentHttpFetcher
   private readonly objectUrls: Pick<
     typeof URL,
@@ -138,11 +144,26 @@ export class DocumentDownloadManager {
   }
 
   revoke(documentId: string) {
+    const timer = this.revokeTimers.get(documentId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.revokeTimers.delete(documentId)
     const entry = this.entries.get(documentId)
     if (!entry) return
     this.entries.delete(documentId)
     entry.controller.abort()
     if (entry.objectUrl) this.objectUrls.revokeObjectURL(entry.objectUrl)
+  }
+
+  revokeAfterDispatch(documentId: string) {
+    const entry = this.entries.get(documentId)
+    if (!entry?.objectUrl || this.disposed) return
+    const previousTimer = this.revokeTimers.get(documentId)
+    if (previousTimer !== undefined) clearTimeout(previousTimer)
+    const timer = setTimeout(() => {
+      this.revokeTimers.delete(documentId)
+      if (this.entries.get(documentId) === entry) this.revoke(documentId)
+    }, documentDownloadObjectUrlLifetimeMs)
+    this.revokeTimers.set(documentId, timer)
   }
 
   revokeAll() {

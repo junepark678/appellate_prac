@@ -1353,6 +1353,129 @@ describe("document transport route integration", () => {
     expect(completionCalls).toBe(1);
   });
 
+  it.each([
+    { change: "reset", phase: "upload" },
+    { change: "event change", phase: "upload" },
+    { change: "reset", phase: "persist" },
+    { change: "event change", phase: "persist" },
+  ] as const)(
+    "keeps a late $phase result available without attaching it after $change, then retries the stored receipt",
+    async ({ change, phase }) => {
+      vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
+      const session = homeSession(
+        `route-draft-generation-${change.replaceAll(" ", "-")}-${phase}`,
+        "Draft Generation Guard",
+      );
+      const recoveredBySession = new Map<string, UploadedDocument[]>();
+      installHomeQueries([session], recoveredBySession);
+      installDocumentHandlers(recoveredBySession);
+      setQueryResponse("caseSessions:getAvailableEcfEvents", undefined);
+
+      const chunkStarted = deferred<void>();
+      const chunkResponse = deferred<void>();
+      const persistStarted = deferred<UploadedDocument>();
+      const persistResponse = deferred<void>();
+      if (phase === "persist") {
+        mocks.mutationHandlers.set(
+          "caseSessions:persistDocumentAnalysis",
+          (args: {
+            caseSessionId: string;
+            intentId: string;
+            document: UploadedDocument;
+          }) => {
+            const document: UploadedDocument = {
+              ...args.document,
+              id: `route-document-${args.intentId}`,
+              analysisId: `route-analysis-${args.intentId}`,
+            };
+            recoveredBySession.set(args.caseSessionId, [document]);
+            persistStarted.resolve(document);
+            return persistResponse.promise.then(() => ({
+              document,
+              analysisId: document.analysisId ?? "route-analysis",
+            }));
+          },
+        );
+      }
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          if (init?.method === "GET") {
+            throw new Error("This test does not request a download.");
+          }
+          const bytes = new Uint8Array(await (init?.body as Blob).arrayBuffer());
+          if (phase === "upload") {
+            chunkStarted.resolve();
+            await chunkResponse.promise;
+          }
+          return chunkAcknowledgment(url, bytes);
+        }),
+      );
+
+      renderHomeRoute();
+      expect(
+        await screen.findByRole("heading", { name: "Draft Generation Guard" }),
+      ).toBeTruthy();
+      const input = await openDocumentStep();
+      const file = new File(
+        [`%PDF-1.7\n${change} during ${phase}`],
+        `${change.replaceAll(" ", "-")}-${phase}.pdf`,
+        { type: "application/pdf" },
+      );
+      fireEvent.change(input, { target: { files: [file] } });
+      expect(input.value).toBe("");
+      if (phase === "upload") await chunkStarted.promise;
+      else await persistStarted.promise;
+
+      if (change === "reset") {
+        fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: /Step 1 Event/ }));
+        fireEvent.click(
+          screen.getByRole("button", {
+            name: /Motion to Stay or for Injunction Pending Appeal/,
+          }),
+        );
+        fireEvent.click(
+          screen.getByRole("button", { name: /Step 3 Documents/ }),
+        );
+      }
+
+      if (phase === "upload") chunkResponse.resolve();
+      else persistResponse.resolve();
+
+      expect(
+        await screen.findByRole("button", {
+          name: `Add ${file.name} to draft`,
+        }),
+      ).toBeTruthy();
+      expect(screen.queryByText(`Main document: ${file.name}`)).toBeNull();
+
+      fireEvent.click(
+        screen.getByRole("button", { name: `Add ${file.name} to draft` }),
+      );
+      expect(await screen.findByText(`Main document: ${file.name}`)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+      expect(screen.queryByText(`Main document: ${file.name}`)).toBeNull();
+      expect(
+        screen.getByRole("button", { name: `Add ${file.name} to draft` }),
+      ).toBeTruthy();
+
+      const retryInput = screen.getByLabelText("PDF documents") as HTMLInputElement;
+      fireEvent.change(retryInput, { target: { files: [file] } });
+      expect(await screen.findByText(`Main document: ${file.name}`)).toBeTruthy();
+      expect(
+        mocks.mutationCalls.filter(
+          (call) => call.name === "caseSessions:persistDocumentAnalysis",
+        ),
+      ).toHaveLength(1);
+      expect(
+        mocks.mutationCalls.filter((call) => call.name === "documentUploads:begin"),
+      ).toHaveLength(1);
+    },
+  );
+
   it("keeps accepted filing PDFs downloadable in the filing view after reload without adding them to a draft", async () => {
     vi.stubEnv("VITE_CONVEX_SITE_URL", "https://fixture.convex.site");
     const objectUrls = installRouteObjectUrlMocks();
