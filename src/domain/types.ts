@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+import type { Id } from '../../convex/_generated/dataModel'
+
 export type CourtSystem = 'federal' | 'state' | 'territorial' | 'administrative'
 
 export type CourtLevel =
@@ -817,6 +819,7 @@ export type TrialDocket = {
 
 export type CaseSession = {
   id: string
+  institutionId?: Id<'institutions'>
   scenario: Scenario
   courtPackId: string
   status: CaseStatus

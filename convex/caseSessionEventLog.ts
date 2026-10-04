@@ -19,6 +19,10 @@
 
 import type { Id } from './_generated/dataModel'
 import type { MutationCtx } from './_generated/server'
+import { requireCurrentUser } from './authHelpers'
+import { requireInstitutionRole } from './authz'
+import { AppErrorCode, ConvexError, notFound, sessionLocked } from './errors'
+import { isOrganizationMembershipActive } from './organizationContracts'
 
 async function allocateCaseSessionEventSequence(
   ctx: MutationCtx,
@@ -53,6 +57,83 @@ export async function appendCaseSessionEvent(
   payload: Record<string, unknown>,
   actorUserId?: Id<'users'>,
 ) {
+  const { user } = await requireCurrentUser(ctx)
+  const session = await ctx.db.get(caseSessionId)
+  if (
+    !session ||
+    !session.institutionId ||
+    (actorUserId !== undefined && actorUserId !== user._id)
+  ) {
+    throw notFound('Case session')
+  }
+  const { institution, membership } = await requireInstitutionRole(
+    ctx,
+    session.institutionId,
+    ['learner'],
+  )
+  const isOwner = session.userId === user._id
+  const instructorReview =
+    !isOwner &&
+    eventType === 'instructor_review_submitted' &&
+    membership.role !== 'learner' &&
+    typeof payload.assignmentSessionId === 'string'
+
+  if (!isOwner && !instructorReview) throw notFound('Case session')
+
+  if (!isOwner) {
+    const ownerMemberships = await ctx.db
+      .query('institutionMemberships')
+      .withIndex('by_institution_user', (index) =>
+        index
+          .eq('institutionId', institution._id)
+          .eq('userId', session.userId),
+      )
+      .collect()
+    if (ownerMemberships.length > 1) {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'Organization membership is ambiguous')
+    }
+    if (!isOrganizationMembershipActive(institution, ownerMemberships[0] ?? null, Date.now())) {
+      throw notFound('Case session')
+    }
+    const assignmentSessions = await ctx.db
+      .query('assignmentSessions')
+      .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+      .collect()
+    const exactReviewSession = assignmentSessions.find(
+      (assignmentSession) =>
+        assignmentSession._id === payload.assignmentSessionId &&
+        assignmentSession.userId === session.userId,
+    )
+    const assignment = exactReviewSession
+      ? await ctx.db.get(exactReviewSession.assignmentId)
+      : null
+    const cohort = assignment ? await ctx.db.get(assignment.cohortId) : null
+    if (
+      !exactReviewSession ||
+      !assignment ||
+      !cohort ||
+      assignment.scenarioId !== session.scenarioId ||
+      cohort.institutionId !== session.institutionId
+    ) {
+      throw notFound('Case session')
+    }
+  }
+
+  const assignmentSessions = await ctx.db
+    .query('assignmentSessions')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  if (
+    isOwner &&
+    assignmentSessions.some(
+      (assignmentSession) =>
+        assignmentSession.submittedAt &&
+        (!assignmentSession.reopenedAt ||
+          assignmentSession.reopenedAt <= assignmentSession.submittedAt),
+    )
+  ) {
+    throw sessionLocked()
+  }
   const sequence = await allocateCaseSessionEventSequence(ctx, caseSessionId)
   await ctx.db.insert('caseSessionEvents', {
     caseSessionId,
@@ -60,6 +141,6 @@ export async function appendCaseSessionEvent(
     eventType,
     payloadJson: JSON.stringify(payload),
     createdAt: new Date().toISOString(),
-    ...(actorUserId ? { actorUserId } : {}),
+    actorUserId: user._id,
   })
 }

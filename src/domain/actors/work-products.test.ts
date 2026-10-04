@@ -148,13 +148,13 @@ function draft(eventId: string, document: UploadedDocument): FilingDraft {
   }
 }
 
-function briefedSession() {
+function briefedSession(openingBrief: UploadedDocument = briefPdf) {
   let session = createInitialSession()
   session = fileDraft(session, draft('notice_of_appeal', noticePdf))
   session = fileDraft(session, draft('appearance_disclosure', disclosurePdf))
   session = fileDraft(session, draft('docketing_statement', docketingPdf))
   session = fileDraft(session, draft('transcript_order_acknowledgment', transcriptPdf))
-  session = fileDraft(session, draft('opening_brief', briefPdf))
+  session = fileDraft(session, draft('opening_brief', openingBrief))
   session = fileDraft(session, draft('joint_appendix', appendixPdf))
   return session
 }
@@ -177,6 +177,41 @@ class FakeProvider implements AiProvider {
 }
 
 describe('actor work products', () => {
+  it('uses persisted analysis IDs once and keeps a document fallback only when needed', async () => {
+    const analysis = {
+      analyzerId: 'fixture-analyzer',
+      fileSizeBytes: briefPdf.sizeBytes,
+      mimeType: briefPdf.mimeType,
+      searchableText: true,
+      certificateOfServiceDetected: true,
+      certificateOfComplianceDetected: true,
+      sealedOrRedactionWarning: false,
+      warnings: [],
+    }
+    const provider = new FakeProvider({
+      title: 'Appellee strategy',
+      summary: 'Review the appellant opening brief.',
+      reasoning: [],
+      recommendations: [],
+      citations: [],
+      ruleRefs: [],
+    })
+    const withPersistedAnalysis = await generateActorWorkProductWithProvider({
+      session: briefedSession({ ...briefPdf, analysisId: 'analysis-real', analysis }),
+      provider,
+      kind: 'counterparty_strategy',
+    })
+    expect(withPersistedAnalysis.sourceDocumentAnalysisIds).toEqual(['analysis-real'])
+    expect(withPersistedAnalysis.sourceDocumentAnalysisIds).not.toContain('brief:analysis')
+
+    const withLegacyAnalysis = await generateActorWorkProductWithProvider({
+      session: briefedSession({ ...briefPdf, analysis }),
+      provider,
+      kind: 'counterparty_strategy',
+    })
+    expect(withLegacyAnalysis.sourceDocumentAnalysisIds).toEqual(['brief:analysis'])
+  })
+
   it('returns false instead of throwing for malformed optional array fields', () => {
     const malformedMemo = {
       title: 'Malformed memo',

@@ -72,10 +72,13 @@ function sourceDocumentAnalysisIds(session: CaseSession) {
   return new Set(
     activeFilings(session)
       .flatMap((filing) => filing.documents)
-      .flatMap((document) => [
-        ...(document.analysisId ? [document.analysisId] : []),
-        ...(document.analysis ? [`${document.id}:analysis`] : []),
-      ]),
+      .flatMap((document) =>
+        document.analysisId
+          ? [document.analysisId]
+          : document.analysis
+            ? [`${document.id}:analysis`]
+            : [],
+      ),
   )
 }
 
