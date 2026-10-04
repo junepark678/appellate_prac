@@ -2327,12 +2327,36 @@ export const importCourtListenerSource = mutation({
     await requireWritableCaseSession(ctx, args.caseSessionId)
     const session = await assembleCaseSession(ctx, caseSessionDoc)
     const sourceUrl = sourceUrlForCourtListenerResult(args.result)
-    const trialDocket = createImportedTrialDocket(session, args.result, sourceUrl)
+    const evidenceNotice = 'Caller-reported metadata; not verified court evidence.'
+    const addEvidenceNotice = (text: string) =>
+      text.startsWith(evidenceNotice)
+        ? text
+        : [evidenceNotice, text].join('\n\n')
+    const serverLabeledResult = {
+      ...args.result,
+      ...(args.result.snippet !== undefined
+        ? { snippet: addEvidenceNotice(args.result.snippet) }
+        : {}),
+      evidenceStatus: 'caller_reported_metadata',
+      evidenceNotice,
+    }
+    const derivedTrialDocket = createImportedTrialDocket(
+      session,
+      serverLabeledResult,
+      sourceUrl,
+    )
+    const trialDocket: TrialDocket = {
+      ...derivedTrialDocket,
+      entries: derivedTrialDocket.entries.map((entry) => ({
+        ...entry,
+        text: addEvidenceNotice(entry.text),
+      })),
+    }
     const importedAt = new Date().toISOString()
     const provenance = {
       ...args.result,
       evidenceStatus: 'caller_reported_metadata',
-      evidenceNotice: 'Caller-reported metadata; not verified court evidence.',
+      evidenceNotice,
     }
 
     await ctx.db.insert('sourceCases', {
@@ -2358,7 +2382,7 @@ export const importCourtListenerSource = mutation({
       tool: 'issueClerkOrder',
       actorId: 'ca4_clerk',
       title: 'CourtListener Record Imported',
-      text: `Imported ${args.result.caseNameFull ?? args.result.caseName ?? 'CourtListener docket'} (${args.result.docketNumber ?? 'no docket number'}) from ${args.result.court ?? 'CourtListener'}. Source: ${sourceUrl}`,
+      text: `Imported ${args.result.caseNameFull ?? args.result.caseName ?? 'CourtListener docket'} (${args.result.docketNumber ?? 'no docket number'}) from ${args.result.court ?? 'CourtListener'}. Source: ${sourceUrl}\n\n${evidenceNotice}`,
       ruleRefs: [
         {
           ruleId: `courtlistener-${args.result.docket_id ?? args.result.id}`,

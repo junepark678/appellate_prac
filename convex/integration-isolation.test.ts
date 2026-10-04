@@ -26,7 +26,7 @@ import type { Id } from './_generated/dataModel'
 import { internal } from './_generated/api'
 import { AppErrorCode } from './errors'
 import schema from './schema'
-import type { CaseSession } from '../src/domain/types'
+import type { CaseSession, TrialDocket } from '../src/domain/types'
 import type { CourtListenerSearchResult } from '../src/integrations/courtlistener'
 import { searchCourtListenerDockets } from '../src/integrations/courtlistener'
 
@@ -74,8 +74,13 @@ const createSessionRef = makeFunctionReference<
 const importCourtListenerSourceRef = makeFunctionReference<
   'mutation',
   { caseSessionId: Id<'caseSessions'>; result: CourtListenerSearchResult },
-  unknown
+  { session: CaseSession; trialDocket: TrialDocket }
 >('caseSessions:importCourtListenerSource')
+const getTrialDocketRef = makeFunctionReference<
+  'query',
+  { caseSessionId: Id<'caseSessions'> },
+  TrialDocket | null
+>('caseSessions:getTrialDocketForCurrentUser')
 
 const metadataNotice = 'Caller-reported metadata; not verified court evidence.'
 const testNow = '2026-10-04T12:00:00.000Z'
@@ -259,6 +264,31 @@ describe('organization isolation for integrations', () => {
       accepted: true,
     })
 
+    const aliceSession = await asAlice.mutation(createSessionRef, {
+      institutionId: fixture.organizationA,
+    })
+    const importedSearchResult = await asAlice.mutation(
+      importCourtListenerSourceRef,
+      {
+        caseSessionId: aliceSession.id as Id<'caseSessions'>,
+        result: results[0]!,
+      },
+    )
+    const importedSearchText =
+      importedSearchResult.trialDocket.entries[0]?.text ?? ''
+    expect(importedSearchText.split(metadataNotice)).toHaveLength(2)
+    expect(
+      importedSearchResult.session.docketEntries
+        .at(-1)
+        ?.text?.split(metadataNotice),
+    ).toHaveLength(2)
+    const persistedSearchDocket = await asAlice.query(getTrialDocketRef, {
+      caseSessionId: aliceSession.id as Id<'caseSessions'>,
+    })
+    expect(
+      persistedSearchDocket?.entries[0]?.text.split(metadataNotice),
+    ).toHaveLength(2)
+
     await expect(
       asAlice.action(searchRef, {
         institutionId: fixture.organizationB,
@@ -367,10 +397,26 @@ describe('organization isolation for integrations', () => {
       snippet: 'Imported caller text.',
     }
 
-    await asAlice.mutation(importCourtListenerSourceRef, {
+    const importedDirectResult = await asAlice.mutation(
+      importCourtListenerSourceRef,
+      {
+        caseSessionId: aliceSessionId,
+        result,
+      },
+    )
+    expect(importedDirectResult.trialDocket.entries[0]?.text).toContain(
+      metadataNotice,
+    )
+    expect(
+      importedDirectResult.trialDocket.entries[0]?.text.split(metadataNotice),
+    ).toHaveLength(2)
+    expect(importedDirectResult.session.docketEntries.at(-1)?.text).toContain(
+      metadataNotice,
+    )
+    const persistedDocket = await asAlice.query(getTrialDocketRef, {
       caseSessionId: aliceSessionId,
-      result,
     })
+    expect(persistedDocket?.entries[0]?.text).toContain(metadataNotice)
 
     await expectAppError(
       asAlice.mutation(importCourtListenerSourceRef, {
@@ -382,12 +428,16 @@ describe('organization isolation for integrations', () => {
 
     const after = await t.run(async (ctx) => {
       const sourceCases = await ctx.db.query('sourceCases').collect()
+      const trialDocketImports = await ctx.db
+        .query('trialDocketImports')
+        .collect()
       const scenario = scenarioBefore
         ? await ctx.db.get(scenarioBefore._id)
         : null
-      return { sourceCases, scenario }
+      return { sourceCases, trialDocketImports, scenario }
     })
     expect(after.sourceCases).toHaveLength(1)
+    expect(after.trialDocketImports).toHaveLength(1)
     expect(after.sourceCases[0]).toMatchObject({
       caseSessionId: aliceSessionId,
       scenarioId: scenarioBefore?._id,
@@ -402,6 +452,13 @@ describe('organization isolation for integrations', () => {
       evidenceStatus: 'caller_reported_metadata',
       evidenceNotice: metadataNotice,
     })
+    const persistedEntries = JSON.parse(
+      after.trialDocketImports[0]?.entriesJson ?? '[]',
+    ) as Array<{
+      text: string
+    }>
+    expect(persistedEntries[0]?.text).toContain(metadataNotice)
+    expect(persistedEntries[0]?.text.split(metadataNotice)).toHaveLength(2)
     expect(after.scenario).toEqual(scenarioBefore)
   })
 })
