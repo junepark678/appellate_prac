@@ -92,6 +92,7 @@ function errorStatus(error: unknown) {
   if (data?.metadata?.reason === 'UPLOAD_EXPIRED') return 410
   switch (data?.code) {
     case AppErrorCode.AUTH_REQUIRED:
+    case AppErrorCode.AUTH_USER_NOT_INITIALIZED:
       return 401
     case AppErrorCode.NOT_FOUND:
       return 404

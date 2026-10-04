@@ -707,6 +707,46 @@ describe('document upload receipts', () => {
     expect(foreign?.state).toBe('pending')
   })
 
+  it('returns an authentication status for an uninitialized identity on the registered chunk route', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const uninitialized = uploadClient(t, 'uninitialized-user')
+    const bytes = makePdf(12)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'uninitialized-caller.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const response = await uninitialized.fetch(
+      `/documents/chunk?intentId=${encodeURIComponent(intent.intentId)}&index=0`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      },
+    )
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
+    const saved = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.intent?.state).toBe('pending')
+    expect(saved.chunks).toHaveLength(0)
+    expect(saved.storage).toHaveLength(0)
+  })
+
   it('validates 25 MiB adversarial JSON in the Node action without a parsed object tree', async () => {
     const t = convexTest(schema, modules)
     const fixture = await seedFixture(t)
