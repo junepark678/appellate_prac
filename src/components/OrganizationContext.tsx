@@ -79,6 +79,7 @@ type PendingSelection = {
   organizationId: string;
   sequence: number;
   pathname: string;
+  targetPathname: string;
 };
 
 type SessionResult<T> = {
@@ -154,6 +155,13 @@ function isStudyPath(pathname: string) {
   return pathname === "/app" || pathname.startsWith("/app/");
 }
 
+function organizationSectionRoot(pathname: string) {
+  if (pathname === "/instructor" || pathname.startsWith("/instructor/"))
+    return "/instructor";
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) return "/admin";
+  return "/app";
+}
+
 function writeOrganizationToUrl(
   router: ReturnType<typeof useRouter>,
   pathname: string,
@@ -167,14 +175,15 @@ function writeOrganizationToUrl(
 }
 
 function cancelRegisteredWork(work: Set<() => void>) {
-  for (const cancel of [...work]) {
+  const callbacks = [...work];
+  work.clear();
+  for (const cancel of callbacks) {
     try {
       cancel();
     } catch {
       // A local cancellation callback must not block the organization switch.
     }
   }
-  work.clear();
 }
 
 export function OrganizationContextProvider({
@@ -234,9 +243,19 @@ export function OrganizationContextProvider({
     sessionKey: null,
   });
   const cancellationsRef = useRef(new Set<() => void>());
+  const providerActiveRef = useRef(true);
+
+  useEffect(() => {
+    providerActiveRef.current = true;
+    return () => {
+      providerActiveRef.current = false;
+      cancelRegisteredWork(cancellationsRef.current);
+    };
+  }, []);
 
   const activePendingSelection =
-    pendingSelection?.pathname === pathname &&
+    (pendingSelection?.pathname === pathname ||
+      pendingSelection?.targetPathname === pathname) &&
     pendingSelection.organizationId !== urlOrganizationId
       ? pendingSelection
       : null;
@@ -400,22 +419,35 @@ export function OrganizationContextProvider({
         pendingSelectionRef.current?.organizationId ?? urlOrganizationId;
       if (nextId === currentIntent) return;
 
+      const targetPathname = organizationSectionRoot(pathname);
       const nextSelection: PendingSelection = {
         organizationId: nextId,
         sequence: ++sequenceRef.current,
         pathname,
+        targetPathname,
       };
       pendingSelectionRef.current = nextSelection;
       setPendingSelection(nextSelection);
       identityRef.current = { organizationId: nextId, sessionKey };
       invalidateContext();
 
-      void writeOrganizationToUrl(router, pathname, nextId, false).catch(() => {
+      const navigation =
+        pathname === targetPathname
+          ? writeOrganizationToUrl(router, targetPathname, nextId, false)
+          : router.navigate({
+              to: targetPathname,
+              search: { organizationId: nextId },
+              replace: false,
+            } as never);
+      void navigation.catch(() => {
         if (pendingSelectionRef.current?.sequence !== nextSelection.sequence)
           return;
         pendingSelectionRef.current = null;
         setPendingSelection(null);
-        identityRef.current = { organizationId: urlOrganizationId, sessionKey };
+        identityRef.current = {
+          organizationId: urlOrganizationId,
+          sessionKey,
+        };
         invalidateContext();
       });
     },
@@ -430,24 +462,28 @@ export function OrganizationContextProvider({
   );
 
   const bootstrapAttemptRef = useRef<string | null>(null);
+  const shouldBootstrapPersonal =
+    !selectedOrganizationId &&
+    (isStudyPath(pathname) ||
+      (organizationsStatus === "ready" && organizations.length === 0));
   const retryOrganizationBootstrap = useCallback(() => {
     if (
       !inOrganizationScope ||
-      !isStudyPath(pathname) ||
+      !shouldBootstrapPersonal ||
       selectedOrganizationId
     )
       return;
     bootstrapAttemptRef.current = null;
     setBootstrapErrorSession(null);
     setBootstrapRetrySequence((current) => current + 1);
-  }, [inOrganizationScope, pathname, selectedOrganizationId]);
+  }, [inOrganizationScope, selectedOrganizationId, shouldBootstrapPersonal]);
 
   useEffect(() => {
     if (
       !inOrganizationScope ||
       !userReady ||
       !sessionKey ||
-      !isStudyPath(pathname) ||
+      !shouldBootstrapPersonal ||
       selectedOrganizationId
     ) {
       return;
@@ -503,6 +539,7 @@ export function OrganizationContextProvider({
     inOrganizationScope,
     pathname,
     bootstrapRetrySequence,
+    shouldBootstrapPersonal,
     router,
     scopeEpoch,
     selectedOrganizationId,
@@ -520,10 +557,10 @@ export function OrganizationContextProvider({
       return;
     const request = {
       organizationId: selectedOrganizationId,
-      generation,
       sessionKey,
     };
     let active = true;
+    let watchFailed = false;
     const watch = convex.watchQuery(api.organizations.getContext, {
       institutionId: request.organizationId as Id<"institutions">,
     });
@@ -531,29 +568,33 @@ export function OrganizationContextProvider({
       if (
         !active ||
         identityRef.current.organizationId !== request.organizationId ||
-        identityRef.current.sessionKey !== request.sessionKey ||
-        generationRef.current !== request.generation
+        identityRef.current.sessionKey !== request.sessionKey
       ) {
         return;
       }
       try {
         const organization = watch.localQueryResult();
         if (organization !== undefined) {
+          watchFailed = false;
           setResolvedContext({
             sessionKey,
             organizationId: request.organizationId,
-            generation: request.generation,
+            generation: generationRef.current,
             status: "ready",
             organization,
           });
         }
       } catch {
-        cancelRegisteredWork(cancellationsRef.current);
-        generationRef.current += 1;
+        if (!watchFailed) {
+          watchFailed = true;
+          generationRef.current += 1;
+          setGeneration(generationRef.current);
+          cancelRegisteredWork(cancellationsRef.current);
+        }
         setResolvedContext({
           sessionKey,
           organizationId: request.organizationId,
-          generation: request.generation,
+          generation: generationRef.current,
           status: "unavailable",
         });
       }
@@ -567,7 +608,6 @@ export function OrganizationContextProvider({
     };
   }, [
     convex,
-    generation,
     inOrganizationScope,
     selectedOrganizationId,
     sessionKey,
@@ -613,7 +653,7 @@ export function OrganizationContextProvider({
         status = "unavailable";
         unavailableMessage =
           "A personal workspace could not be selected. Choose an organization or try again.";
-      } else if (!isStudyPath(pathname)) {
+      } else if (!shouldBootstrapPersonal) {
         status = "unavailable";
         unavailableMessage = "Choose an organization to continue.";
       }
@@ -624,7 +664,7 @@ export function OrganizationContextProvider({
     inOrganizationScope &&
     userReady &&
     sessionKey !== null &&
-    isStudyPath(pathname) &&
+    shouldBootstrapPersonal &&
     !selectedOrganizationId &&
     bootstrapErrorSession !== null &&
     bootstrapErrorSession === sessionKey;
@@ -641,6 +681,7 @@ export function OrganizationContextProvider({
 
   const isCurrentOrganizationContext = useCallback(
     (capture: OrganizationContextCapture) =>
+      providerActiveRef.current &&
       statusRef.current === "ready" &&
       identityRef.current.organizationId === String(capture.organizationId) &&
       generationRef.current === capture.generation,
@@ -654,7 +695,14 @@ export function OrganizationContextProvider({
         return () => {};
       }
       cancellationsRef.current.add(cancel);
-      return () => cancellationsRef.current.delete(cancel);
+      return () => {
+        if (!cancellationsRef.current.delete(cancel)) return;
+        try {
+          cancel();
+        } catch {
+          // A local cancellation callback must not block component cleanup.
+        }
+      };
     },
     [status],
   );
