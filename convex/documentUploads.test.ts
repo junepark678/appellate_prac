@@ -1,0 +1,1798 @@
+/*
+ * Appellate Practice Simulator — federal appellate procedure training.
+ * Copyright (C) 2026 Rhajune Park
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+import { createHash } from 'node:crypto'
+import { Worker } from 'node:worker_threads'
+import { makeFunctionReference } from 'convex/server'
+import { convexTest } from 'convex-test'
+import type { TestConvex } from 'convex-test'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { Id } from './_generated/dataModel'
+import { AppErrorCode, type AppErrorData } from './errors'
+import { deleteOrRetryCleanup } from './documentUploadActions'
+import type { DocumentAnalysis, UploadedDocument } from '../src/domain/types'
+import schema from './schema'
+
+const chunkBytes = 4 * 1024 * 1024
+const maxFileBytes = 25 * 1024 * 1024
+const appOrigin = 'https://app.example.test'
+
+const modules = {
+  './_generated/api.ts': () => import('./_generated/api'),
+  './_generated/server.ts': () => import('./_generated/server'),
+  './authHelpers.ts': () => import('./authHelpers'),
+  './authz.ts': () => import('./authz'),
+  './caseSessionEventLog.ts': () => import('./caseSessionEventLog'),
+  './caseSessions.ts': () => import('./caseSessions'),
+  './documentUploadActions.ts': () => import('./documentUploadActions'),
+  './documentUploads.ts': () => import('./documentUploads'),
+  './errors.ts': () => import('./errors'),
+  './http.ts': () => import('./http'),
+  './organizationContracts.ts': () => import('./organizationContracts'),
+}
+
+type TestIdentity = {
+  issuer: string
+  subject: string
+  tokenIdentifier: string
+  name: string
+}
+
+const identity = (subject: string): TestIdentity => ({
+  issuer: 'https://identity.example.test',
+  subject,
+  tokenIdentifier: `https://identity.example.test|${subject}`,
+  name: subject,
+})
+
+type Scope =
+  | { kind: 'session'; caseSessionId: Id<'caseSessions'> }
+  | { kind: 'dataset'; versionId: Id<'organizationDatasetVersions'> }
+
+type BeginArgs = {
+  scope: Scope
+  fileName: string
+  sizeBytes: number
+  sha256: string
+  mimeType: 'application/pdf' | 'text/plain' | 'application/json'
+}
+
+type BeginResult = {
+  intentId: Id<'documentUploadIntents'>
+  chunkBytes: number
+  expiresAt: string
+}
+
+type PersistArgs = {
+  caseSessionId: Id<'caseSessions'>
+  intentId?: Id<'documentUploadIntents'>
+  document: UploadedDocument
+  analysis: DocumentAnalysis
+}
+
+type PersistResult = { document: UploadedDocument; analysisId: string }
+
+type AdvanceProcedureResult = {
+  session: { filings: Array<{ documents: UploadedDocument[] }> }
+  toolCall: { tool: string }
+}
+
+type SubmitFilingResult = {
+  filings: Array<{
+    documents: UploadedDocument[]
+    outcome: string
+  }>
+}
+
+const beginRef = makeFunctionReference<'mutation', BeginArgs, BeginResult>(
+  'documentUploads:begin',
+)
+const completeRef = makeFunctionReference<
+  'action',
+  { intentId: Id<'documentUploadIntents'> },
+  { intentId: Id<'documentUploadIntents'>; sizeBytes: number; sha256: string }
+>('documentUploadActions:complete')
+const cleanupOrphanedChunkRef = makeFunctionReference<
+  'action',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploadActions:cleanupOrphanedChunk')
+const queueOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  'queued' | 'referenced'
+>('documentUploads:queueOrphanedChunkCleanup')
+const retryOrphanedChunkCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:retryOrphanedChunkCleanup')
+const cancelRef = makeFunctionReference<
+  'action',
+  { intentId: Id<'documentUploadIntents'> },
+  null
+>('documentUploadActions:cancel')
+const persistRef = makeFunctionReference<
+  'mutation',
+  PersistArgs,
+  PersistResult
+>('caseSessions:persistDocumentAnalysis')
+const advanceProcedureRef = makeFunctionReference<
+  'mutation',
+  { caseSessionId: Id<'caseSessions'> },
+  AdvanceProcedureResult
+>('caseSessions:advanceProcedure')
+const submitFilingRef = makeFunctionReference<
+  'mutation',
+  {
+    caseSessionId: Id<'caseSessions'>
+    draft: {
+      eventId: string
+      participantRole: 'appellant'
+      title: string
+      documents: UploadedDocument[]
+      certificateOfService: boolean
+      certificateOfCompliance: boolean
+      sealed: boolean
+      notes: string
+    }
+  },
+  SubmitFilingResult
+>('caseSessions:submitFiling')
+const recordChunkRef = makeFunctionReference<
+  'mutation',
+  {
+    intentId: Id<'documentUploadIntents'>
+    index: number
+    storageId: Id<'_storage'>
+    sizeBytes: number
+    sha256: string
+  },
+  { accepted: boolean }
+>('documentUploads:recordChunk')
+const expireRef = makeFunctionReference<
+  'action',
+  { intentId: Id<'documentUploadIntents'> },
+  null
+>('documentUploadActions:expireUpload')
+
+function sha256(bytes: Uint8Array) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function makePdf(sizeBytes: number) {
+  const bytes = new Uint8Array(sizeBytes)
+  bytes.set(new TextEncoder().encode('%PDF-').subarray(0, sizeBytes))
+  return bytes
+}
+
+function makeEmptyObjectArrayJson(sizeBytes: number) {
+  if (!Number.isInteger((sizeBytes - 1) / 3)) {
+    throw new Error('This fixture size must fit a flat array of empty objects.')
+  }
+  const objectCount = (sizeBytes - 1) / 3
+  const bytes = new Uint8Array(sizeBytes)
+  let offset = 0
+  bytes[offset++] = 0x5b
+  for (let index = 0; index < objectCount; index += 1) {
+    bytes[offset++] = 0x7b
+    bytes[offset++] = 0x7d
+    if (index + 1 < objectCount) bytes[offset++] = 0x2c
+  }
+  bytes[offset] = 0x5d
+  return bytes
+}
+
+async function measurePeakRss<T>(task: () => Promise<T>) {
+  const sampler = new Worker(
+    `const { parentPort } = require('node:worker_threads');
+let peak = 0;
+let timer;
+parentPort.on('message', (command) => {
+  if (command === 'start') {
+    peak = process.memoryUsage().rss;
+    timer = setInterval(() => { peak = Math.max(peak, process.memoryUsage().rss); }, 1);
+    parentPort.postMessage({ baselineRssBytes: peak });
+  } else if (command === 'stop') {
+    clearInterval(timer);
+    peak = Math.max(peak, process.memoryUsage().rss);
+    parentPort.postMessage({ peakRssBytes: peak });
+  }
+});`,
+    { eval: true },
+  )
+  const nextMessage = <TMessage>() =>
+    new Promise<TMessage>((resolve, reject) => {
+      sampler.once('message', resolve)
+      sampler.once('error', reject)
+    })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      sampler.once('online', resolve)
+      sampler.once('error', reject)
+    })
+    sampler.postMessage('start')
+    const baseline = await nextMessage<{ baselineRssBytes: number }>()
+    let value: T | undefined
+    let failure: unknown
+    try {
+      value = await task()
+    } catch (error) {
+      failure = error
+    }
+    sampler.postMessage('stop')
+    const peak = await nextMessage<{ peakRssBytes: number }>()
+    if (failure !== undefined) throw failure
+    return { value: value as T, ...baseline, ...peak }
+  } finally {
+    await sampler.terminate()
+  }
+}
+
+function analysisFor(
+  sizeBytes: number,
+  mimeType = 'application/pdf',
+): DocumentAnalysis {
+  return {
+    analyzerId: 'fixture-analyzer',
+    fileSizeBytes: sizeBytes,
+    mimeType,
+    searchableText: true,
+    certificateOfServiceDetected: false,
+    certificateOfComplianceDetected: false,
+    sealedOrRedactionWarning: false,
+    warnings: [],
+  }
+}
+
+function analysisRowPayload(
+  analysis: DocumentAnalysis,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  const serializedAnalysis = JSON.stringify(analysis)
+  return {
+    caseSessionId,
+    documentId: 'x'.repeat(128),
+    analyzerId: analysis.analyzerId,
+    ...(typeof analysis.pageCount === 'number'
+      ? { pageCount: analysis.pageCount }
+      : {}),
+    fileSizeBytes: analysis.fileSizeBytes,
+    mimeType: analysis.mimeType,
+    searchableText: analysis.searchableText,
+    certificateOfServiceDetected: analysis.certificateOfServiceDetected,
+    certificateOfComplianceDetected: analysis.certificateOfComplianceDetected,
+    sealedOrRedactionWarning: analysis.sealedOrRedactionWarning,
+    warnings: analysis.warnings,
+    analysisJson: serializedAnalysis,
+    ...(analysis.normalizedText
+      ? { extractedTextHash: '00000000' }
+      : {}),
+    ...(typeof analysis.wordCount === 'number'
+      ? { wordCount: analysis.wordCount }
+      : {}),
+    ...(analysis.legalCitations
+      ? { citationCount: analysis.legalCitations.length }
+      : {}),
+    ...(analysis.recordCitations
+      ? { recordCitationCount: analysis.recordCitations.length }
+      : {}),
+    ...(analysis.appendixCitations
+      ? { appendixCitationCount: analysis.appendixCitations.length }
+      : {}),
+    createdAt: '2000-01-01T00:00:00.000Z',
+  }
+}
+
+function documentRowPayload(
+  document: UploadedDocument,
+  caseSessionId: Id<'caseSessions'>,
+  storageId: Id<'_storage'>,
+  analysis: DocumentAnalysis,
+) {
+  return {
+    caseSessionId,
+    storageId,
+    analysisId: 'x'.repeat(128),
+    fileName: document.fileName,
+    mimeType: document.mimeType,
+    sizeBytes: document.sizeBytes,
+    sha256: document.sha256,
+    ...(typeof document.pageCount === 'number'
+      ? { pageCount: document.pageCount }
+      : {}),
+    ...(document.extractedText
+      ? { extractedText: document.extractedText }
+      : {}),
+    ...(document.textExtractionStatus
+      ? { textExtractionStatus: document.textExtractionStatus }
+      : {}),
+    ...(typeof document.wordCount === 'number'
+      ? { wordCount: document.wordCount }
+      : {}),
+    extractedSignals: document.extractedSignals,
+    validationJson: JSON.stringify(analysis),
+  }
+}
+
+function serializedBytes(value: unknown) {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength
+}
+
+async function expectErrorCode(promise: Promise<unknown>, code: AppErrorCode) {
+  let caught: unknown
+  try {
+    await promise
+  } catch (error) {
+    caught = error
+  }
+  expect(caught).toBeDefined()
+  expect((caught as { data?: AppErrorData }).data?.code).toBe(code)
+}
+
+async function seedFixture(t: TestConvex<typeof schema>) {
+  return t.run(async (ctx) => {
+    const createdAt = new Date().toISOString()
+    const aliceId = await ctx.db.insert('users', {
+      authSubject: identity('alice').tokenIdentifier,
+      displayName: 'Alice',
+      monthlyAiBudgetCents: 0,
+    })
+    const bobId = await ctx.db.insert('users', {
+      authSubject: identity('bob').tokenIdentifier,
+      displayName: 'Bob',
+      monthlyAiBudgetCents: 0,
+    })
+    const institutionId = await ctx.db.insert('institutions', {
+      kind: 'shared',
+      createdAt,
+      name: 'Fixture org',
+      slug: 'fixture-org',
+      status: 'active',
+      monthlyAiBudgetCents: 0,
+    })
+    await ctx.db.insert('institutionMemberships', {
+      institutionId,
+      userId: aliceId,
+      role: 'instructor',
+      status: 'active',
+      createdAt,
+    })
+    await ctx.db.insert('institutionMemberships', {
+      institutionId,
+      userId: bobId,
+      role: 'learner',
+      status: 'active',
+      createdAt,
+    })
+    const scenarioId = await ctx.db.insert('scenarios', {
+      scenarioKey: 'upload-fixture-scenario',
+      visibility: 'public_template',
+      revisionStatus: 'published',
+      title: 'Upload fixture',
+      source: 'synthetic',
+      courtPackId: 'us-federal-ca4-civil-appeal',
+      shortCaption: 'Fixture v. Test',
+      lowerTribunal: 'Fixture court',
+      natureOfSuit: 'civil',
+      proceduralPosture: 'appeal',
+      issuesPresented: [],
+      meritsRecord: [],
+      published: true,
+    })
+    const aliceSessionId = await ctx.db.insert('caseSessions', {
+      institutionId,
+      scenarioId,
+      userId: aliceId,
+      courtPackId: 'us-federal-ca4-civil-appeal',
+      status: 'active',
+      simulatedDate: createdAt,
+    })
+    const bobSessionId = await ctx.db.insert('caseSessions', {
+      institutionId,
+      scenarioId,
+      userId: bobId,
+      courtPackId: 'us-federal-ca4-civil-appeal',
+      status: 'active',
+      simulatedDate: createdAt,
+    })
+    const datasetId = await ctx.db.insert('organizationDatasets', {
+      institutionId,
+      createdByUserId: aliceId,
+      title: 'Draft fixture',
+      description: '',
+      kind: 'source_data',
+      createdAt,
+      updatedAt: createdAt,
+    })
+    const versionId = await ctx.db.insert('organizationDatasetVersions', {
+      datasetId,
+      institutionId,
+      version: 1,
+      createdByUserId: aliceId,
+      state: 'draft',
+      title: 'Draft fixture',
+      description: '',
+      tags: [],
+      draftRevision: 0,
+      manifestJson: '{}',
+      reviewStatus: 'unreviewed',
+      createdAt,
+    })
+    return {
+      aliceId,
+      bobId,
+      institutionId,
+      aliceSessionId,
+      bobSessionId,
+      versionId,
+    }
+  })
+}
+
+function uploadClient(t: TestConvex<typeof schema>, subject = 'alice') {
+  const client = t.withIdentity(identity(subject))
+  return {
+    begin: (args: BeginArgs) => client.mutation(beginRef, args),
+    complete: (intentId: Id<'documentUploadIntents'>) =>
+      client.action(completeRef, { intentId }),
+    cancel: (intentId: Id<'documentUploadIntents'>) =>
+      client.action(cancelRef, { intentId }),
+    persist: (args: PersistArgs) => client.mutation(persistRef, args),
+    mutation: client.mutation,
+    action: client.action,
+    fetch: client.fetch,
+  }
+}
+
+async function postChunk(
+  client: ReturnType<typeof uploadClient>,
+  intentId: Id<'documentUploadIntents'>,
+  index: number,
+  bytes: Uint8Array,
+) {
+  return client.fetch(
+    `/documents/chunk?intentId=${encodeURIComponent(intentId)}&index=${index}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ephemeral-test-token',
+        Origin: appOrigin,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: new Blob([bytes.slice().buffer as ArrayBuffer]),
+    },
+  )
+}
+
+async function uploadBytes(
+  client: ReturnType<typeof uploadClient>,
+  intentId: Id<'documentUploadIntents'>,
+  bytes: Uint8Array,
+  order?: number[],
+) {
+  const chunks = Array.from(
+    { length: Math.ceil(bytes.byteLength / chunkBytes) },
+    (_, index) => index,
+  )
+  for (const index of order ?? chunks) {
+    const start = index * chunkBytes
+    const response = await postChunk(
+      client,
+      intentId,
+      index,
+      bytes.subarray(start, start + chunkBytes),
+    )
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
+  }
+}
+
+beforeEach(() => {
+  vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+})
+
+afterEach(() => {
+  vi.clearAllTimers()
+  vi.useRealTimers()
+  vi.unstubAllEnvs()
+})
+
+describe('document upload receipts', () => {
+  it('accepts a seven-chunk 25 MiB upload through the authenticated route and Node action, then consumes it exactly once', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(maxFileBytes)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'maximum.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    expect(intent.chunkBytes).toBe(chunkBytes)
+    expect(new Date(intent.expiresAt).getTime()).toBeGreaterThan(Date.now())
+
+    await uploadBytes(alice, intent.intentId, bytes, [5, 1, 6, 0, 4, 2, 3])
+    const duplicate = await postChunk(
+      alice,
+      intent.intentId,
+      3,
+      bytes.subarray(3 * chunkBytes, 4 * chunkBytes),
+    )
+    expect(duplicate.status).toBe(200)
+    const conflicting = await postChunk(
+      alice,
+      intent.intentId,
+      3,
+      makePdf(chunkBytes),
+    )
+    expect(conflicting.status).toBe(409)
+    expect(conflicting.headers.get('Cache-Control')).toBe('no-store')
+
+    const measuredCompletion = await measurePeakRss(() =>
+      alice.complete(intent.intentId),
+    )
+    const completed = measuredCompletion.value
+    expect(completed).toEqual({
+      intentId: intent.intentId,
+      sizeBytes: maxFileBytes,
+      sha256: sha256(bytes),
+    })
+    expect(completed).not.toHaveProperty('storageId')
+    expect(measuredCompletion.peakRssBytes).toBeLessThan(512 * 1024 * 1024)
+    console.info(
+      `[upload-memory] 25 MiB PDF complete: baseline ${(measuredCompletion.baselineRssBytes / 1024 / 1024).toFixed(1)} MiB, peak ${(measuredCompletion.peakRssBytes / 1024 / 1024).toFixed(1)} MiB RSS`,
+    )
+    await t.finishInProgressScheduledFunctions()
+
+    const rawStorage = 'caller-supplied-storage-id'
+    const document: UploadedDocument = {
+      id: 'untrusted-client-id',
+      fileName: 'maximum.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: maxFileBytes,
+      storageId: rawStorage,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    }
+    const analysis = analysisFor(maxFileBytes)
+    await expectErrorCode(
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: intent.intentId,
+        document,
+        analysis,
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+    const acceptedDocument: UploadedDocument = {
+      id: document.id,
+      fileName: document.fileName,
+      mimeType: document.mimeType,
+      sizeBytes: document.sizeBytes,
+      sha256: document.sha256,
+      extractedSignals: document.extractedSignals,
+    }
+    const first = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document: acceptedDocument,
+      analysis,
+    })
+    const retry = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document: acceptedDocument,
+      analysis,
+    })
+    expect(retry.document.id).toBe(first.document.id)
+    expect(retry.analysisId).toBe(first.analysisId)
+    expect(first.document.storageId).toBeUndefined()
+    expect(retry.document.storageId).toBeUndefined()
+    await t.action(expireRef, { intentId: intent.intentId })
+
+    const saved = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      documents: await ctx.db.query('documents').collect(),
+      analyses: await ctx.db.query('documentAnalyses').collect(),
+      storedFileSize: (
+        await ctx.storage.get((await ctx.db.get(intent.intentId))!.storageId!)
+      )?.size,
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+    }))
+    expect(saved.intent?.state).toBe('consumed')
+    expect(saved.intent?.documentId).toBe(first.document.id)
+    expect(saved.intent?.analysisId).toBe(first.analysisId)
+    expect(saved.documents).toHaveLength(1)
+    expect(saved.analyses).toHaveLength(1)
+    expect(saved.storedFileSize).toBe(maxFileBytes)
+    expect(saved.chunks).toHaveLength(0)
+  })
+
+  it('rejects one byte over the file cap, old raw endpoint calls, anonymous chunks, and foreign receipts', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bob = uploadClient(t, 'bob')
+    const overSize = makePdf(1)
+    await expectErrorCode(
+      alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName: 'large.pdf',
+        sizeBytes: maxFileBytes + 1,
+        sha256: sha256(overSize),
+        mimeType: 'application/pdf',
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+    await expectErrorCode(
+      t
+        .withIdentity(identity('alice'))
+        .mutation(
+          makeFunctionReference<
+            'mutation',
+            { caseSessionId: Id<'caseSessions'> },
+            string
+          >('caseSessions:generateDocumentUploadUrl'),
+          { caseSessionId: fixture.aliceSessionId },
+        ),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const anonymous = convexTest(schema, modules)
+    const denied = await anonymous.fetch(
+      '/documents/chunk?intentId=missing&index=0',
+      {
+        method: 'POST',
+        headers: {
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([new Uint8Array([1]).buffer as ArrayBuffer]),
+      },
+    )
+    expect(denied.status).toBe(401)
+    expect(denied.headers.get('Cache-Control')).toBe('no-store')
+    expect(denied.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
+    const disallowedOrigin = await alice.fetch(
+      '/documents/chunk?intentId=missing&index=0',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: 'https://attacker.example.test',
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([new Uint8Array([1]).buffer as ArrayBuffer]),
+      },
+    )
+    expect(disallowedOrigin.status).toBe(403)
+    expect(disallowedOrigin.headers.get('Cache-Control')).toBe('no-store')
+
+    const bytes = makePdf(12)
+    const bobIntent = await bob.begin({
+      scope: { kind: 'session', caseSessionId: fixture.bobSessionId },
+      fileName: 'foreign.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await expectErrorCode(
+      alice.complete(bobIntent.intentId),
+      AppErrorCode.NOT_FOUND,
+    )
+    await expectErrorCode(
+      alice.cancel(bobIntent.intentId),
+      AppErrorCode.NOT_FOUND,
+    )
+    const foreignChunk = await alice.fetch(
+      `/documents/chunk?intentId=${encodeURIComponent(bobIntent.intentId)}&index=0`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      },
+    )
+    expect(foreignChunk.status).toBe(404)
+    expect(foreignChunk.headers.get('Cache-Control')).toBe('no-store')
+    const foreign = await t.run(async (ctx) => ctx.db.get(bobIntent.intentId))
+    expect(foreign?.state).toBe('pending')
+  })
+
+  it('returns an authentication status for an uninitialized identity on the registered chunk route', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const uninitialized = uploadClient(t, 'uninitialized-user')
+    const bytes = makePdf(12)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'uninitialized-caller.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const response = await uninitialized.fetch(
+      `/documents/chunk?intentId=${encodeURIComponent(intent.intentId)}&index=0`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      },
+    )
+
+    expect(response.status).toBe(401)
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
+    const saved = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.intent?.state).toBe('pending')
+    expect(saved.chunks).toHaveLength(0)
+    expect(saved.storage).toHaveLength(0)
+  })
+
+  it('returns validation status for malformed intent IDs on the registered chunk route', async () => {
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const alice = uploadClient(t)
+    const bytes = makePdf(12)
+
+    const response = await alice.fetch(
+      '/documents/chunk?intentId=not-a-convex-id&index=0',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: new Blob([bytes.buffer as ArrayBuffer]),
+      },
+    )
+
+    expect(response.status).toBe(422)
+    const saved = await t.run(async (ctx) => ({
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.chunks).toHaveLength(0)
+    expect(saved.cleanup).toHaveLength(0)
+    expect(saved.storage).toHaveLength(0)
+  })
+
+  it('queues duplicate chunk temporaries and cleans only the unreferenced object', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv('DOCUMENT_ALLOWED_ORIGINS', appOrigin)
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'duplicate-chunk.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+
+    const first = await postChunk(alice, intent.intentId, 0, bytes)
+    const acceptedChunk = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .unique(),
+    )
+    expect(acceptedChunk).not.toBeNull()
+    expect(
+      await t.mutation(queueOrphanedChunkCleanupRef, {
+        storageId: acceptedChunk!.storageId,
+      }),
+    ).toBe('referenced')
+    const retry = await postChunk(alice, intent.intentId, 0, bytes)
+    expect(first.status).toBe(200)
+    expect(retry.status).toBe(200)
+
+    const queued = await t.run(async (ctx) =>
+      ctx.db.query('documentUploadCleanup').collect(),
+    )
+    expect(queued).toHaveLength(1)
+    let failDelete = true
+    const cleanupAttempt = await deleteOrRetryCleanup({
+      objectExists: () =>
+        t.run(async (ctx) =>
+          Boolean(await ctx.db.system.get('_storage', queued[0]!.storageId)),
+        ),
+      deleteObject: async () => {
+        if (failDelete) {
+          failDelete = false
+          throw new Error('temporary storage outage')
+        }
+        await t.run((ctx) => ctx.storage.delete(queued[0]!.storageId))
+      },
+      markDeleted: async () => undefined,
+      scheduleRetry: () =>
+        t.mutation(retryOrphanedChunkCleanupRef, {
+          storageId: queued[0]!.storageId,
+        }),
+    })
+    expect(cleanupAttempt).toBe('retry')
+    const retained = await t.run(async (ctx) => ({
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', queued[0]!.storageId),
+        )
+        .unique(),
+      tempStorage: await ctx.db.system.get('_storage', queued[0]!.storageId),
+    }))
+    expect(retained.cleanup?.attempts).toBe(1)
+    expect(retained.tempStorage).not.toBeNull()
+    vi.setSystemTime(retained.cleanup!.nextAttemptAt + 1)
+    await t.action(cleanupOrphanedChunkRef, {
+      storageId: queued[0]!.storageId,
+    })
+
+    const saved = await t.run(async (ctx) => ({
+      chunks: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .collect(),
+      cleanup: await ctx.db.query('documentUploadCleanup').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.chunks).toHaveLength(1)
+    expect(saved.cleanup).toHaveLength(0)
+    expect(saved.storage).toHaveLength(1)
+    expect(saved.storage[0]?._id).toBe(saved.chunks[0]?.storageId)
+  })
+
+  it('validates 25 MiB adversarial JSON in the Node action without a parsed object tree', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makeEmptyObjectArrayJson(maxFileBytes)
+    const intent = await alice.begin({
+      scope: { kind: 'dataset', versionId: fixture.versionId },
+      fileName: 'many-empty-objects.json',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/json',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+
+    const measuredCompletion = await measurePeakRss(() =>
+      alice.complete(intent.intentId),
+    )
+    expect(measuredCompletion.value).toEqual({
+      intentId: intent.intentId,
+      sizeBytes: maxFileBytes,
+      sha256: sha256(bytes),
+    })
+    expect(measuredCompletion.peakRssBytes).toBeLessThan(512 * 1024 * 1024)
+    console.info(
+      `[upload-memory] 25 MiB empty-object JSON complete: baseline ${(measuredCompletion.baselineRssBytes / 1024 / 1024).toFixed(1)} MiB, peak ${(measuredCompletion.peakRssBytes / 1024 / 1024).toFixed(1)} MiB RSS`,
+    )
+    const stored = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      return {
+        state: receipt?.state,
+        storageSize: receipt?.storageId
+          ? (await ctx.storage.get(receipt.storageId))?.size
+          : undefined,
+      }
+    })
+    expect(stored).toEqual({ state: 'stored', storageSize: maxFileBytes })
+  })
+
+  it('uses the shared organization contract for dataset drafts and locks session scopes', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bob = uploadClient(t, 'bob')
+    const data = new TextEncoder().encode('{"fixture":true}')
+    const datasetIntent = await alice.begin({
+      scope: { kind: 'dataset', versionId: fixture.versionId },
+      fileName: 'draft.json',
+      sizeBytes: data.byteLength,
+      sha256: sha256(data),
+      mimeType: 'application/json',
+    })
+    expect(datasetIntent.chunkBytes).toBe(chunkBytes)
+    await expectErrorCode(
+      bob.begin({
+        scope: { kind: 'dataset', versionId: fixture.versionId },
+        fileName: 'draft.json',
+        sizeBytes: data.byteLength,
+        sha256: sha256(data),
+        mimeType: 'application/json',
+      }),
+      AppErrorCode.AUTH_UNAUTHORIZED_ROLE,
+    )
+
+    await t.run(async (ctx) => {
+      const createdAt = new Date().toISOString()
+      const cohortId = await ctx.db.insert('cohorts', {
+        institutionId: fixture.institutionId,
+        title: 'Locked fixture',
+        term: 'test',
+        startsAt: createdAt,
+        endsAt: createdAt,
+        archived: false,
+      })
+      const scenarioId = (await ctx.db.query('caseSessions').first())!
+        .scenarioId
+      const assignmentId = await ctx.db.insert('assignments', {
+        cohortId,
+        scenarioId,
+        title: 'Locked assignment',
+        published: true,
+        createdByUserId: fixture.aliceId,
+        createdAt,
+      })
+      await ctx.db.insert('assignmentSessions', {
+        assignmentId,
+        caseSessionId: fixture.aliceSessionId,
+        userId: fixture.aliceId,
+        submittedAt: createdAt,
+      })
+    })
+    await expectErrorCode(
+      alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName: 'locked.pdf',
+        sizeBytes: 5,
+        sha256: sha256(new TextEncoder().encode('%PDF-')),
+        mimeType: 'application/pdf',
+      }),
+      AppErrorCode.SESSION_LOCKED,
+    )
+    const intents = await t.run(async (ctx) =>
+      ctx.db.query('documentUploadIntents').collect(),
+    )
+    expect(intents).toHaveLength(1)
+    expect(intents[0]?.scopeKind).toBe('dataset')
+  })
+
+  it('cleans a request-owned chunk when organization authorization is revoked after storage.store', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(8)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'revoked.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    const temporaryId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes], { type: 'application/octet-stream' }),
+      ),
+    )
+    await t.run(async (ctx) => {
+      const membership = await ctx.db
+        .query('institutionMemberships')
+        .withIndex('by_institution_user', (index) =>
+          index
+            .eq('institutionId', fixture.institutionId)
+            .eq('userId', fixture.aliceId),
+        )
+        .unique()
+      await ctx.db.patch(membership!._id, { status: 'suspended' })
+    })
+    await expectErrorCode(
+      alice.mutation(recordChunkRef, {
+        intentId: intent.intentId,
+        index: 0,
+        storageId: temporaryId,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+      }),
+      AppErrorCode.NOT_FOUND,
+    )
+    await t.run((ctx) => ctx.storage.delete(temporaryId))
+    const after = await t.run(async (ctx) => ({
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      stored: await ctx.db.system.get('_storage', temporaryId),
+      documents: await ctx.db.query('documents').collect(),
+    }))
+    expect(after.chunks).toHaveLength(0)
+    expect(after.stored).toBeNull()
+    expect(after.documents).toHaveLength(0)
+  })
+
+  it('cancellation and expired cleanup do not remove a consumed final document', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'retained.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const document = {
+      id: 'fixture-document',
+      fileName: 'retained.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    } satisfies UploadedDocument
+    const persisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document,
+      analysis: analysisFor(bytes.byteLength),
+    })
+    await expectErrorCode(alice.cancel(intent.intentId), AppErrorCode.CONFLICT)
+    await t.withIdentity(identity('alice')).run(async (ctx) => {
+      await ctx.db.patch(intent.intentId, {
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      })
+    })
+    await t.action(expireRef, { intentId: intent.intentId })
+    const retained = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      const document = await ctx.db.get(
+        persisted.document.id as Id<'documents'>,
+      )
+      return {
+        receipt,
+        document,
+        storedSize: receipt?.storageId
+          ? (await ctx.storage.get(receipt.storageId))?.size
+          : undefined,
+      }
+    })
+    expect(retained.receipt?.state).toBe('consumed')
+    expect(retained.document?._id).toBe(persisted.document.id)
+    expect(retained.storedSize).toBe(bytes.byteLength)
+  })
+
+  it('preserves consumed document and analysis IDs, actor sources, and storage through a procedure transition and retry', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'transition.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const document: UploadedDocument = {
+      id: 'client-document-id',
+      fileName: 'transition.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    }
+    const analysis = analysisFor(bytes.byteLength)
+    const persisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document,
+      analysis,
+    })
+    const storageId = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      await ctx.db.insert('actorWorkProducts', {
+        caseSessionId: fixture.aliceSessionId,
+        actorId: 'fixture-actor',
+        kind: 'counterparty_filing_draft',
+        status: 'proposed',
+        reviewStatus: 'proposed',
+        workProductJson: JSON.stringify({
+          eventId: 'notice_of_appeal',
+          participantRole: 'appellant',
+          title: 'Notice of Appeal',
+          documentFileName: 'notice-of-appeal.pdf',
+          documentText: 'Notice of appeal',
+          certificateOfService: true,
+          certificateOfCompliance: true,
+          sealed: false,
+          notes: '',
+          citations: [
+            {
+              id: 'source-1',
+              label: 'Uploaded document analysis',
+              sourceType: 'document_analysis',
+              sourceId: persisted.analysisId,
+            },
+          ],
+          ruleRefs: [],
+        }),
+        sourceDocumentAnalysisIds: [persisted.analysisId],
+        sourceFilingIds: [],
+        createdAt: new Date().toISOString(),
+      })
+      return receipt!.storageId!
+    })
+
+    await alice.mutation(advanceProcedureRef, {
+      caseSessionId: fixture.aliceSessionId,
+    })
+    const retry = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document,
+      analysis,
+    })
+    await t.finishInProgressScheduledFunctions()
+
+    const saved = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      const documentRecord = await ctx.db.get(
+        persisted.document.id as Id<'documents'>,
+      )
+      const analysisRecord = await ctx.db.get(
+        persisted.analysisId as Id<'documentAnalyses'>,
+      )
+      const product = await ctx.db
+        .query('actorWorkProducts')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .unique()
+      return {
+        receipt,
+        documentRecord,
+        analysisRecord,
+        product,
+        documentCount: (
+          await ctx.db
+            .query('documents')
+            .withIndex('by_case', (index) =>
+              index.eq('caseSessionId', fixture.aliceSessionId),
+            )
+            .collect()
+        ).length,
+        storageSize: (await ctx.storage.get(storageId))?.size,
+      }
+    })
+    expect(retry.document.id).toBe(persisted.document.id)
+    expect(retry.analysisId).toBe(persisted.analysisId)
+    expect(saved.receipt?.state).toBe('consumed')
+    expect(saved.receipt?.storageId).toBe(storageId)
+    expect(saved.receipt?.documentId).toBe(persisted.document.id)
+    expect(saved.receipt?.analysisId).toBe(persisted.analysisId)
+    expect(saved.documentRecord?._id).toBe(persisted.document.id)
+    expect(saved.documentRecord?.analysisId).toBe(persisted.analysisId)
+    expect(saved.analysisRecord?.documentId).toBe(persisted.document.id)
+    expect(saved.documentCount).toBe(1)
+    expect(saved.product?.sourceDocumentAnalysisIds).toEqual([
+      persisted.analysisId,
+    ])
+    expect(
+      JSON.parse(saved.product!.workProductJson).citations[0].sourceId,
+    ).toBe(persisted.analysisId)
+    expect(saved.storageSize).toBe(bytes.byteLength)
+  })
+
+  it('keeps an attached receipt-backed document across filing, procedure transition, and retry', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'notice-of-appeal.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await alice.complete(intent.intentId)
+    const analysis = analysisFor(bytes.byteLength)
+    const persisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document: {
+        id: 'client-notice-id',
+        fileName: 'notice-of-appeal.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        pageCount: 1,
+        extractedText: 'Notice of appeal from a final civil judgment.',
+        extractedSignals: ['notice of appeal'],
+      },
+      analysis: { ...analysis, pageCount: 1 },
+    })
+    expect(persisted.document.storageId).toBeUndefined()
+    const receiptStorageId = await t.run(
+      async (ctx) => (await ctx.db.get(intent.intentId))!.storageId!,
+    )
+
+    const filed = await alice.mutation(submitFilingRef, {
+      caseSessionId: fixture.aliceSessionId,
+      draft: {
+        eventId: 'notice_of_appeal',
+        participantRole: 'appellant',
+        title: 'Notice of Appeal',
+        documents: [persisted.document],
+        certificateOfService: true,
+        certificateOfCompliance: true,
+        sealed: false,
+        notes: 'Synthetic fixture filing',
+      },
+    })
+    expect(filed.filings.at(-1)?.outcome).not.toBe('rejected')
+    expect(filed.filings.at(-1)?.documents[0]?.id).toBe(persisted.document.id)
+    await alice.mutation(advanceProcedureRef, {
+      caseSessionId: fixture.aliceSessionId,
+    })
+    const retry = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: intent.intentId,
+      document: persisted.document,
+      analysis: persisted.document.analysis!,
+    })
+    await t.finishInProgressScheduledFunctions()
+
+    const saved = await t.run(async (ctx) => {
+      const receipt = await ctx.db.get(intent.intentId)
+      const filings = await ctx.db
+        .query('filings')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      const documentRecord = await ctx.db.get(
+        persisted.document.id as Id<'documents'>,
+      )
+      const analysisRecord = await ctx.db.get(
+        persisted.analysisId as Id<'documentAnalyses'>,
+      )
+      return {
+        receipt,
+        filings,
+        documentRecord,
+        analysisRecord,
+        storageSize: (await ctx.storage.get(receiptStorageId))?.size,
+        documentCount: (
+          await ctx.db
+            .query('documents')
+            .withIndex('by_case', (index) =>
+              index.eq('caseSessionId', fixture.aliceSessionId),
+            )
+            .collect()
+        ).length,
+      }
+    })
+    expect(retry.document.id).toBe(persisted.document.id)
+    expect(retry.analysisId).toBe(persisted.analysisId)
+    expect(saved.filings).toHaveLength(1)
+    expect(saved.filings[0]?.documentIds).toEqual([persisted.document.id])
+    expect(saved.filings[0]?.documentAnalysisIds).toEqual([
+      persisted.analysisId,
+    ])
+    expect(saved.receipt?.storageId).toBe(receiptStorageId)
+    expect(saved.documentRecord?._id).toBe(persisted.document.id)
+    expect(saved.documentRecord?.analysisId).toBe(persisted.analysisId)
+    expect(saved.analysisRecord?.documentId).toBe(persisted.document.id)
+    expect(saved.documentCount).toBe(1)
+    expect(saved.storageSize).toBe(bytes.byteLength)
+  })
+
+  it('enforces the aggregate 960 KiB UTF-8 row budget exactly before consuming an upload', async () => {
+    const rowLimitBytes = 960 * 1024
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(16)
+    const upload = async (fileName: string) => {
+      const intent = await alice.begin({
+        scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+        fileName,
+        sizeBytes: bytes.byteLength,
+        sha256: sha256(bytes),
+        mimeType: 'application/pdf',
+      })
+      await uploadBytes(alice, intent.intentId, bytes)
+      await alice.complete(intent.intentId)
+      return intent
+    }
+    const document = (fileName: string): UploadedDocument => ({
+      id: `client-${fileName}`,
+      fileName,
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    })
+    const exactIntent = await upload('exact-row.pdf')
+    const exactAnalysis = (asciiLength: number) => ({
+      ...analysisFor(bytes.byteLength),
+      legalCitations: [`${'é'.repeat(100_000)}${'x'.repeat(asciiLength)}`],
+    })
+    let low = 0
+    let high = 850_000
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (
+        serializedBytes(
+          analysisRowPayload(exactAnalysis(middle), fixture.aliceSessionId),
+        ) <= rowLimitBytes
+      ) {
+        low = middle
+      } else {
+        high = middle - 1
+      }
+    }
+    const exact = exactAnalysis(low)
+    expect(
+      serializedBytes(analysisRowPayload(exact, fixture.aliceSessionId)),
+    ).toBe(rowLimitBytes)
+    expect(JSON.stringify(exact).length).toBeLessThan(900_000)
+    const exactDocument = document('exact-row.pdf')
+    const exactStorageId = await t.run(
+      async (ctx) => (await ctx.db.get(exactIntent.intentId))!.storageId!,
+    )
+    expect(
+      serializedBytes(
+        documentRowPayload(
+          exactDocument,
+          fixture.aliceSessionId,
+          exactStorageId,
+          exact,
+        ),
+      ),
+    ).toBeLessThanOrEqual(rowLimitBytes)
+    const exactPersisted = await alice.persist({
+      caseSessionId: fixture.aliceSessionId,
+      intentId: exactIntent.intentId,
+      document: exactDocument,
+      analysis: exact,
+    })
+
+    const overIntent = await upload('over-row.pdf')
+    const overAnalysis = exactAnalysis(low + 1)
+    expect(
+      serializedBytes(analysisRowPayload(overAnalysis, fixture.aliceSessionId)),
+    ).toBe(rowLimitBytes + 1)
+    await expectErrorCode(
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: overIntent.intentId,
+        document: document('over-row.pdf'),
+        analysis: overAnalysis,
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const unicodeIntent = await upload('unicode-row.pdf')
+    const unicodeAnalysis = {
+      ...analysisFor(bytes.byteLength),
+      legalCitations: ['é'.repeat(492_000)],
+    }
+    expect(JSON.stringify(unicodeAnalysis).length).toBeLessThan(900_000)
+    expect(
+      serializedBytes(
+        analysisRowPayload(unicodeAnalysis, fixture.aliceSessionId),
+      ),
+    ).toBeGreaterThan(rowLimitBytes)
+    await expectErrorCode(
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: unicodeIntent.intentId,
+        document: document('unicode-row.pdf'),
+        analysis: unicodeAnalysis,
+      }),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const after = await t.run(async (ctx) => ({
+      exact: await ctx.db.get(exactIntent.intentId),
+      over: await ctx.db.get(overIntent.intentId),
+      unicode: await ctx.db.get(unicodeIntent.intentId),
+      documents: await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+      analyses: await ctx.db
+        .query('documentAnalyses')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect(),
+    }))
+    expect(exactPersisted.document.id).toBe(after.exact?.documentId)
+    expect(after.exact?.state).toBe('consumed')
+    expect(after.over?.state).toBe('stored')
+    expect(after.over?.documentId).toBeUndefined()
+    expect(after.over?.analysisId).toBeUndefined()
+    expect(after.unicode?.state).toBe('stored')
+    expect(after.unicode?.documentId).toBeUndefined()
+    expect(after.unicode?.analysisId).toBeUndefined()
+    expect(after.documents).toHaveLength(1)
+    expect(after.analyses).toHaveLength(1)
+  })
+
+  it('copies fragmented chunk streams into one bounded buffer and rejects a 4 MiB plus one byte body', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(16 * 1024)
+    const fragmentedIntent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'fragmented.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    let offset = 0
+    const fragmentedBody = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === bytes.byteLength) {
+          controller.close()
+          return
+        }
+        controller.enqueue(bytes.subarray(offset, offset + 1))
+        offset += 1
+      },
+    })
+    const fragmentedResponse = await alice.fetch(
+      `/documents/chunk?intentId=${encodeURIComponent(fragmentedIntent.intentId)}&index=0`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: fragmentedBody,
+        duplex: 'half',
+      } as RequestInit,
+    )
+    expect(fragmentedResponse.status).toBe(200)
+
+    const oversizeIntent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'oversize-stream.pdf',
+      sizeBytes: chunkBytes,
+      sha256: '0'.repeat(64),
+      mimeType: 'application/pdf',
+    })
+    const overChunk = new Uint8Array(chunkBytes + 1)
+    overChunk.set(new TextEncoder().encode('%PDF-'))
+    const oversizeBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(overChunk.subarray(0, chunkBytes))
+        controller.enqueue(overChunk.subarray(chunkBytes))
+        controller.close()
+      },
+    })
+    const oversizeResponse = await alice.fetch(
+      `/documents/chunk?intentId=${encodeURIComponent(oversizeIntent.intentId)}&index=0`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ephemeral-test-token',
+          Origin: appOrigin,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: oversizeBody,
+        duplex: 'half',
+      } as RequestInit,
+    )
+    expect(oversizeResponse.status).toBe(413)
+    const saved = await t.run(async (ctx) => ({
+      fragmentedChunks: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', fragmentedIntent.intentId),
+        )
+        .collect(),
+      oversizeChunks: await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', oversizeIntent.intentId),
+        )
+        .collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(saved.fragmentedChunks).toHaveLength(1)
+    expect(saved.oversizeChunks).toHaveLength(0)
+    expect(saved.storage).toHaveLength(1)
+  })
+
+  it('cancel removes pending chunk objects and rows', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(256)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'cancel-pending.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    const chunk = await t.run(async (ctx) =>
+      ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', intent.intentId),
+        )
+        .unique(),
+    )
+    expect(chunk).not.toBeNull()
+    await alice.cancel(intent.intentId)
+    const after = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      storedSize: (await ctx.storage.get(chunk!.storageId))?.size,
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(after.intent?.state).toBe('cancelled')
+    expect(after.chunks).toHaveLength(0)
+    expect(after.storedSize).toBeUndefined()
+    expect(after.storage).toHaveLength(0)
+  })
+
+  it('serializes cancel against complete and against exactly-once consumption', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(256)
+    const cancelVsComplete = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'cancel-complete.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, cancelVsComplete.intentId, bytes)
+    const uploadedChunkStorageId = await t.run(
+      async (ctx) =>
+        (await ctx.db
+          .query('documentUploadChunks')
+          .withIndex('by_intent_index', (index) =>
+            index.eq('intentId', cancelVsComplete.intentId),
+          )
+          .unique())!.storageId,
+    )
+    const [cancelResult, completeResult] = await Promise.allSettled([
+      alice.cancel(cancelVsComplete.intentId),
+      alice.complete(cancelVsComplete.intentId),
+    ])
+    if (cancelResult.status === 'rejected') throw cancelResult.reason
+    if (completeResult.status === 'rejected') {
+      expect(
+        (completeResult.reason as { data?: AppErrorData }).data?.code,
+      ).toBe(AppErrorCode.CONFLICT)
+    }
+    expect(['fulfilled', 'rejected']).toContain(cancelResult.status)
+    expect(['fulfilled', 'rejected']).toContain(completeResult.status)
+    await t.action(expireRef, { intentId: cancelVsComplete.intentId })
+    const cancelledState = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(cancelVsComplete.intentId),
+      chunks: await ctx.db.query('documentUploadChunks').collect(),
+      documents: await ctx.db.query('documents').collect(),
+      storage: await ctx.db.system.query('_storage').collect(),
+    }))
+    expect(cancelledState.intent?.state).toBe('cancelled')
+    expect(cancelledState.chunks).toEqual([])
+    expect(cancelledState.documents).toHaveLength(0)
+    expect(cancelledState.storage.map((item) => item._id)).not.toContain(
+      uploadedChunkStorageId,
+    )
+    if (cancelledState.intent?.storageId) {
+      expect(cancelledState.storage.map((item) => item._id)).not.toContain(
+        cancelledState.intent.storageId,
+      )
+    }
+    expect(cancelledState.storage).toEqual([])
+
+    const cancelVsConsume = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'cancel-consume.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, cancelVsConsume.intentId, bytes)
+    await alice.complete(cancelVsConsume.intentId)
+    const document: UploadedDocument = {
+      id: 'retry-id-is-ignored',
+      fileName: 'cancel-consume.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedSignals: [],
+    }
+    const [cancelAttempt, consumeAttempt] = await Promise.allSettled([
+      alice.cancel(cancelVsConsume.intentId),
+      alice.persist({
+        caseSessionId: fixture.aliceSessionId,
+        intentId: cancelVsConsume.intentId,
+        document,
+        analysis: analysisFor(bytes.byteLength),
+      }),
+    ])
+    await t.action(expireRef, { intentId: cancelVsConsume.intentId })
+    const consumedState = await t.run(async (ctx) => {
+      const intent = await ctx.db.get(cancelVsConsume.intentId)
+      const documents = await ctx.db
+        .query('documents')
+        .withIndex('by_case', (index) =>
+          index.eq('caseSessionId', fixture.aliceSessionId),
+        )
+        .collect()
+      return {
+        intent,
+        documents,
+        finalSize:
+          intent?.storageId && (await ctx.storage.get(intent.storageId))
+            ? (await ctx.storage.get(intent.storageId))!.size
+            : undefined,
+      }
+    })
+    if (consumedState.intent?.state === 'consumed') {
+      expect(consumeAttempt.status).toBe('fulfilled')
+      expect(cancelAttempt.status).toBe('rejected')
+      expect(consumedState.documents).toHaveLength(1)
+      expect(consumedState.documents[0]?._id).toBe(
+        consumedState.intent.documentId,
+      )
+      expect(consumedState.finalSize).toBe(bytes.byteLength)
+    } else {
+      expect(consumedState.intent?.state).toBe('cancelled')
+      expect(consumeAttempt.status).toBe('rejected')
+      expect(cancelAttempt.status).toBe('fulfilled')
+      expect(consumedState.documents).toHaveLength(0)
+      expect(consumedState.finalSize).toBeUndefined()
+    }
+  })
+
+  it('rejects invalid PDF signatures, full hashes, chunk hashes, UTF-8 and JSON without documents', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = new TextEncoder().encode('not a PDF')
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'invalid.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await expectErrorCode(
+      alice.complete(intent.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+    const saved = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      documents: await ctx.db.query('documents').collect(),
+    }))
+    expect(saved.intent?.state).toBe('cancelled')
+    expect(saved.documents).toHaveLength(0)
+
+    const pdf = makePdf(16)
+    const wrongFullHash = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'wrong-full-hash.pdf',
+      sizeBytes: pdf.byteLength,
+      sha256: '0'.repeat(64),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, wrongFullHash.intentId, pdf)
+    await expectErrorCode(
+      alice.complete(wrongFullHash.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const wrongChunkHash = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'wrong-chunk-hash.pdf',
+      sizeBytes: pdf.byteLength,
+      sha256: sha256(pdf),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, wrongChunkHash.intentId, pdf)
+    await t.run(async (ctx) => {
+      const chunk = await ctx.db
+        .query('documentUploadChunks')
+        .withIndex('by_intent_index', (index) =>
+          index.eq('intentId', wrongChunkHash.intentId),
+        )
+        .unique()
+      await ctx.db.patch(chunk!._id, { sha256: 'f'.repeat(64) })
+    })
+    await expectErrorCode(
+      alice.complete(wrongChunkHash.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const invalidText = new Uint8Array([0xff])
+    const textIntent = await alice.begin({
+      scope: { kind: 'dataset', versionId: fixture.versionId },
+      fileName: 'invalid.txt',
+      sizeBytes: invalidText.byteLength,
+      sha256: sha256(invalidText),
+      mimeType: 'text/plain',
+    })
+    await uploadBytes(alice, textIntent.intentId, invalidText)
+    await expectErrorCode(
+      alice.complete(textIntent.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const invalidJson = new TextEncoder().encode('{broken')
+    const jsonIntent = await alice.begin({
+      scope: { kind: 'dataset', versionId: fixture.versionId },
+      fileName: 'invalid.json',
+      sizeBytes: invalidJson.byteLength,
+      sha256: sha256(invalidJson),
+      mimeType: 'application/json',
+    })
+    await uploadBytes(alice, jsonIntent.intentId, invalidJson)
+    await expectErrorCode(
+      alice.complete(jsonIntent.intentId),
+      AppErrorCode.VALIDATION_ERROR,
+    )
+
+    const all = await t.run(async (ctx) => ({
+      documents: await ctx.db.query('documents').collect(),
+      receipts: await ctx.db.query('documentUploadIntents').collect(),
+    }))
+    expect(all.documents).toHaveLength(0)
+    expect(
+      all.receipts.filter((receipt) => receipt.state !== 'cancelled'),
+    ).toHaveLength(0)
+  })
+})

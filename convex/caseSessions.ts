@@ -18,6 +18,7 @@
  */
 
 // TODO: Import from './errors' once error module is integrated
+import { makeFunctionReference } from 'convex/server'
 import { v } from 'convex/values'
 
 import { action, internalMutation, internalQuery, mutation, query } from './_generated/server'
@@ -34,7 +35,10 @@ import {
   sessionLocked,
   validationError,
 } from './errors'
-import { isOrganizationMembershipActive } from './organizationContracts'
+import {
+  isOrganizationMembershipActive,
+  validateUploadIntentTransition,
+} from './organizationContracts'
 import {
   actorWorkProductKindValidator,
   actorWorkProductValidator,
@@ -127,7 +131,22 @@ const defaultScenarioKey = 'synthetic-employment-retaliation'
 const openRouterCooldownMs = 10_000
 const estimatedOpenRouterCostCents = 1
 const AI_CALL_TIMEOUT_MS = 30_000
+const maxDocumentRowBytes = 960 * 1024
+const documentRowEncoder = new TextEncoder()
+// Sizing runs before inserts, so reserve room for each generated Convex ID.
+const generatedDocumentIdBudgetPlaceholder = 'x'.repeat(128)
 const seedScenarios = scenarioSeed as Scenario[]
+
+function fitsDocumentRowByteBudget(payload: unknown) {
+  const serialized = JSON.stringify(payload)
+  if (serialized === undefined) return false
+  const boundedBytes = new Uint8Array(maxDocumentRowBytes + 1)
+  const encoded = documentRowEncoder.encodeInto(serialized, boundedBytes)
+  return (
+    encoded.read === serialized.length &&
+    encoded.written <= maxDocumentRowBytes
+  )
+}
 
 function rejectClientStorageClaims(documents: UploadedDocument[]) {
   if (documents.some((document) => document.storageId !== undefined)) {
@@ -1157,6 +1176,13 @@ async function assembleCaseSession(
 async function deleteExistingSessionState(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
+  preservedDocuments: Map<
+    string,
+    {
+      document: Doc<'documents'>
+      analysis: Doc<'documentAnalyses'>
+    }
+  >,
 ) {
   const [
     participants,
@@ -1248,11 +1274,14 @@ async function deleteExistingSessionState(
         .collect(),
     ])
 
+  const preservedAnalysisIds = new Set(
+    [...preservedDocuments.values()].map((preserved) => preserved.analysis._id),
+  )
   await Promise.all(
     [
       ...participants,
-      ...documents,
-      ...documentAnalyses,
+      ...documents.filter((document) => !preservedDocuments.has(document._id)),
+      ...documentAnalyses.filter((analysis) => !preservedAnalysisIds.has(analysis._id)),
       ...filings,
       ...docketEntries,
       ...deadlines,
@@ -1271,11 +1300,62 @@ async function deleteExistingSessionState(
   )
 }
 
+async function loadReceiptBackedDocuments(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  const receipts = await ctx.db
+    .query('documentUploadIntents')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  const preserved = new Map<
+    string,
+    { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
+  >()
+  for (const receipt of receipts) {
+    if (receipt.state !== 'consumed') continue
+    if (
+      receipt.scopeKind !== 'session' ||
+      !receipt.caseSessionId ||
+      !receipt.storageId ||
+      !receipt.documentId ||
+      !receipt.analysisId
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Consumed upload linkage is incomplete',
+      )
+    }
+    const document = await ctx.db.get(receipt.documentId)
+    const analysis = await ctx.db.get(receipt.analysisId)
+    if (
+      !document ||
+      !analysis ||
+      document.caseSessionId !== caseSessionId ||
+      document.storageId !== receipt.storageId ||
+      document.analysisId !== analysis._id ||
+      analysis.caseSessionId !== caseSessionId ||
+      analysis.documentId !== document._id
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Consumed upload linkage is invalid',
+      )
+    }
+    preserved.set(String(document._id), { document, analysis })
+  }
+  return preserved
+}
+
 async function replaceSessionState(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
   session: CaseSession,
 ) {
+  const receiptBackedDocuments = await loadReceiptBackedDocuments(
+    ctx,
+    caseSessionId,
+  )
   const actorWorkProducts = await ctx.db
     .query('actorWorkProducts')
     .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
@@ -1293,7 +1373,11 @@ async function replaceSessionState(
       ? { legalTrainingDisclaimerAcceptedAt: session.legalTrainingDisclaimerAcceptedAt }
       : {}),
   })
-  await deleteExistingSessionState(ctx, caseSessionId)
+  await deleteExistingSessionState(
+    ctx,
+    caseSessionId,
+    receiptBackedDocuments,
+  )
 
   await Promise.all(
     session.participants.map((participant) =>
@@ -1312,24 +1396,67 @@ async function replaceSessionState(
     const documentIds: Array<Id<'documents'>> = []
     const documentAnalysisIds: Array<Id<'documentAnalyses'>> = []
     for (const document of filing.documents) {
-      const documentId = await ctx.db.insert('documents', {
-        caseSessionId,
-        ...(document.storageId ? { storageId: document.storageId as Id<'_storage'> } : {}),
-        ...(document.sha256 ? { sha256: document.sha256 } : {}),
-        fileName: document.fileName,
-        mimeType: document.mimeType,
-        sizeBytes: document.sizeBytes,
-        ...(typeof document.pageCount === 'number' ? { pageCount: document.pageCount } : {}),
-        ...(document.extractedText ? { extractedText: document.extractedText } : {}),
-        ...(document.textExtractionStatus
-          ? { textExtractionStatus: document.textExtractionStatus }
-          : {}),
-        ...(typeof document.wordCount === 'number' ? { wordCount: document.wordCount } : {}),
-        extractedSignals: document.extractedSignals,
-        ...(document.analysis ? { validationJson: JSON.stringify(document.analysis) } : {}),
-      })
+      const receiptBacked = receiptBackedDocuments.get(document.id)
+      let documentId: Id<'documents'>
+      if (receiptBacked) {
+        if (
+          document.fileName !== receiptBacked.document.fileName ||
+          document.mimeType !== receiptBacked.document.mimeType ||
+          document.sizeBytes !== receiptBacked.document.sizeBytes ||
+          (document.sha256 !== undefined &&
+            document.sha256 !== receiptBacked.document.sha256) ||
+          (document.storageId !== undefined &&
+            document.storageId !== receiptBacked.document.storageId) ||
+          (document.analysisId !== undefined &&
+            document.analysisId !== receiptBacked.analysis._id)
+        ) {
+          throw new ConvexError(
+            AppErrorCode.CONFLICT,
+            'Receipt-backed document does not match its stored record',
+          )
+        }
+        documentId = receiptBacked.document._id
+        documentAnalysisIds.push(receiptBacked.analysis._id)
+        analysisIdMap.set(
+          String(receiptBacked.analysis._id),
+          receiptBacked.analysis._id,
+        )
+        analysisIdMap.set(
+          `${document.id}:analysis`,
+          receiptBacked.analysis._id,
+        )
+      } else {
+        documentId = await ctx.db.insert('documents', {
+          caseSessionId,
+          ...(document.storageId
+            ? { storageId: document.storageId as Id<'_storage'> }
+            : {}),
+          ...(document.sha256 ? { sha256: document.sha256 } : {}),
+          fileName: document.fileName,
+          mimeType: document.mimeType,
+          sizeBytes: document.sizeBytes,
+          ...(typeof document.pageCount === 'number'
+            ? { pageCount: document.pageCount }
+            : {}),
+          ...(document.extractedText
+            ? { extractedText: document.extractedText }
+            : {}),
+          ...(document.textExtractionStatus
+            ? { textExtractionStatus: document.textExtractionStatus }
+            : {}),
+          ...(typeof document.wordCount === 'number'
+            ? { wordCount: document.wordCount }
+            : {}),
+          extractedSignals: document.extractedSignals,
+          ...(document.analysis
+            ? { validationJson: JSON.stringify(document.analysis) }
+            : {}),
+        })
+      }
       documentIdMap.set(document.id, documentId)
-      if (document.analysis) {
+      if (receiptBacked) {
+        // The consumed receipt owns these rows; preserve their IDs and blob link.
+      } else if (document.analysis) {
         const analysis = document.analysis
         const analysisId = await ctx.db.insert('documentAnalyses', {
           caseSessionId,
@@ -2064,6 +2191,7 @@ export const generateDocumentUploadUrl = mutation({
 export const persistDocumentAnalysis = mutation({
   args: {
     caseSessionId: v.id('caseSessions'),
+    intentId: v.optional(v.id('documentUploadIntents')),
     document: uploadedDocumentValidator,
     analysis: documentAnalysisValidator,
   },
@@ -2072,13 +2200,364 @@ export const persistDocumentAnalysis = mutation({
     analysisId: v.string(),
   }),
   handler: async (ctx, args) => {
+    if (!args.intentId)
+      throw validationError(
+        'Use an authenticated document upload intent.',
+        'intentId',
+      )
     const { user } = await requireCurrentUser(ctx)
-    await requireAuthorizedSessionDoc(ctx, args.caseSessionId, user._id)
+    const { session } = await requireOwnedSession(ctx, args.caseSessionId)
+    const receipt = await ctx.db.get(args.intentId)
+    if (!receipt || receipt.userId !== user._id)
+      throw notFound('Upload receipt')
+    if (
+      receipt.scopeKind !== 'session' ||
+      receipt.caseSessionId !== session._id ||
+      receipt.institutionId !== session.institutionId ||
+      receipt.datasetVersionId !== undefined
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload receipt scope mismatch',
+      )
+    }
+
+    if (receipt.state === 'consumed') {
+      if (!receipt.documentId || !receipt.analysisId) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Consumed upload linkage is incomplete',
+        )
+      }
+      const existingDocument = await ctx.db.get(receipt.documentId)
+      const existingAnalysis = await ctx.db.get(receipt.analysisId)
+      if (
+        !existingDocument ||
+        !existingAnalysis ||
+        existingDocument.caseSessionId !== session._id ||
+        existingDocument.analysisId !== existingAnalysis._id ||
+        existingAnalysis.caseSessionId !== session._id ||
+        existingAnalysis.documentId !== existingDocument._id
+      ) {
+        throw new ConvexError(
+          AppErrorCode.CONFLICT,
+          'Consumed upload linkage is invalid',
+        )
+      }
+      const existing: UploadedDocument = {
+        id: existingDocument._id,
+        ...(existingDocument.sha256 ? { sha256: existingDocument.sha256 } : {}),
+        fileName: existingDocument.fileName,
+        mimeType: existingDocument.mimeType,
+        sizeBytes: existingDocument.sizeBytes,
+        ...(typeof existingDocument.pageCount === 'number'
+          ? { pageCount: existingDocument.pageCount }
+          : {}),
+        ...(existingDocument.extractedText
+          ? { extractedText: existingDocument.extractedText }
+          : {}),
+        ...(existingDocument.textExtractionStatus
+          ? { textExtractionStatus: existingDocument.textExtractionStatus }
+          : {}),
+        ...(typeof existingDocument.wordCount === 'number'
+          ? { wordCount: existingDocument.wordCount }
+          : {}),
+        analysisId: existingAnalysis._id,
+        analysis: analysisFromDoc(existingAnalysis),
+        extractedSignals: existingDocument.extractedSignals,
+      }
+      return { document: existing, analysisId: existingAnalysis._id }
+    }
+
     await requireWritableCaseSession(ctx, args.caseSessionId)
-    throw validationError('Use document upload intents')
+    if (receipt.state !== 'stored' || !receipt.storageId) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Upload receipt is not ready for consumption',
+      )
+    }
+    const expiresAt = Date.parse(receipt.expiresAt)
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new ConvexError(AppErrorCode.CONFLICT, 'Upload receipt expired', {
+        reason: 'UPLOAD_EXPIRED',
+      })
+    }
+    if (args.document.storageId !== undefined) {
+      throw validationError(
+        'Document storage IDs must come from an upload receipt.',
+        'storageId',
+      )
+    }
+    if (
+      args.document.fileName !== receipt.fileName ||
+      args.document.mimeType !== receipt.mimeType ||
+      args.document.sizeBytes !== receipt.sizeBytes ||
+      (args.document.sha256 !== undefined &&
+        args.document.sha256 !== receipt.sha256) ||
+      args.analysis.fileSizeBytes !== receipt.sizeBytes ||
+      args.analysis.mimeType !== receipt.mimeType
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Document metadata does not match upload receipt',
+      )
+    }
+
+    if (args.document.fileName.length > 200) {
+      throw validationError(
+        'File name exceeds the simulator storage limit.',
+        'fileName',
+      )
+    }
+    if ((args.analysis.normalizedText?.length ?? 0) > 200_000) {
+      throw validationError(
+        'Extracted PDF text exceeds the simulator storage limit.',
+      )
+    }
+    if ((args.document.extractedText?.length ?? 0) > 200_000) {
+      throw validationError(
+        'Extracted PDF text exceeds the simulator storage limit.',
+      )
+    }
+    if (args.document.extractedSignals.length > 80) {
+      throw validationError(
+        'Document signal count exceeds the simulator storage limit.',
+      )
+    }
+    for (const pageCount of [
+      args.document.pageCount,
+      args.analysis.pageCount,
+    ]) {
+      if (
+        typeof pageCount === 'number' &&
+        (!Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 500)
+      ) {
+        throw validationError('PDF page count must be between 1 and 500.')
+      }
+    }
+    if (
+      args.document.pageCount !== undefined &&
+      args.analysis.pageCount !== undefined &&
+      args.document.pageCount !== args.analysis.pageCount
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Document page count does not match analysis',
+      )
+    }
+    const serializedAnalysis = JSON.stringify(args.analysis)
+    if (serializedAnalysis.length > 900_000) {
+      throw validationError('PDF analysis exceeds the simulator storage limit.')
+    }
+    const createdAt = new Date().toISOString()
+    const documentRowPayload = {
+      caseSessionId: args.caseSessionId,
+      storageId: receipt.storageId,
+      analysisId: generatedDocumentIdBudgetPlaceholder,
+      fileName: args.document.fileName,
+      mimeType: args.document.mimeType,
+      sizeBytes: args.document.sizeBytes,
+      sha256: receipt.sha256,
+      ...(typeof args.document.pageCount === 'number'
+        ? { pageCount: args.document.pageCount }
+        : {}),
+      ...(args.document.extractedText
+        ? { extractedText: args.document.extractedText }
+        : {}),
+      ...(args.document.textExtractionStatus
+        ? { textExtractionStatus: args.document.textExtractionStatus }
+        : {}),
+      ...(typeof args.document.wordCount === 'number'
+        ? { wordCount: args.document.wordCount }
+        : {}),
+      extractedSignals: args.document.extractedSignals,
+      validationJson: serializedAnalysis,
+    }
+    const analysisRowPayload = {
+      caseSessionId: args.caseSessionId,
+      documentId: generatedDocumentIdBudgetPlaceholder,
+      analyzerId: args.analysis.analyzerId,
+      ...(typeof args.analysis.pageCount === 'number'
+        ? { pageCount: args.analysis.pageCount }
+        : {}),
+      fileSizeBytes: args.analysis.fileSizeBytes,
+      mimeType: args.analysis.mimeType,
+      searchableText: args.analysis.searchableText,
+      certificateOfServiceDetected: args.analysis.certificateOfServiceDetected,
+      certificateOfComplianceDetected:
+        args.analysis.certificateOfComplianceDetected,
+      sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
+      warnings: args.analysis.warnings,
+      analysisJson: serializedAnalysis,
+      ...(args.analysis.normalizedText
+        ? { extractedTextHash: hashText(args.analysis.normalizedText) }
+        : {}),
+      ...(typeof args.analysis.wordCount === 'number'
+        ? { wordCount: args.analysis.wordCount }
+        : {}),
+      ...(args.analysis.legalCitations
+        ? { citationCount: args.analysis.legalCitations.length }
+        : {}),
+      ...(args.analysis.recordCitations
+        ? { recordCitationCount: args.analysis.recordCitations.length }
+        : {}),
+      ...(args.analysis.appendixCitations
+        ? { appendixCitationCount: args.analysis.appendixCitations.length }
+        : {}),
+      createdAt,
+    }
+    if (
+      !fitsDocumentRowByteBudget(documentRowPayload) ||
+      !fitsDocumentRowByteBudget(analysisRowPayload)
+    ) {
+      throw validationError(
+        'Document analysis exceeds the simulator per-record storage limit.',
+      )
+    }
+    const storageId = receipt.storageId
+    const metadata = await ctx.db.system.get('_storage', storageId)
+    if (!metadata) throw notFound('Uploaded PDF storage')
+    if (metadata.size > 25 * 1024 * 1024) {
+      throw validationError('PDF exceeds the simulator upload size limit.')
+    }
+    if (
+      metadata.contentType &&
+      !metadata.contentType.toLowerCase().startsWith('application/pdf')
+    ) {
+      throw validationError('Uploaded file storage is not a PDF.')
+    }
+    if (
+      metadata.size !== receipt.sizeBytes ||
+      args.document.sizeBytes !== metadata.size ||
+      args.analysis.fileSizeBytes !== metadata.size
+    ) {
+      throw validationError(
+        'Uploaded PDF metadata does not match stored file metadata.',
+      )
+    }
+    const existingDocument = await ctx.db
+      .query('documents')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .first()
+    if (existingDocument) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Uploaded PDF storage is already associated with a document',
+      )
+    }
+    const verified = { storageId, sha256: receipt.sha256 }
+
+    const documentId = await ctx.db.insert('documents', {
+      caseSessionId: args.caseSessionId,
+      storageId: verified.storageId,
+      ...(verified.sha256 ? { sha256: verified.sha256 } : {}),
+      fileName: args.document.fileName,
+      mimeType: args.document.mimeType,
+      sizeBytes: args.document.sizeBytes,
+      ...(typeof args.document.pageCount === 'number'
+        ? { pageCount: args.document.pageCount }
+        : {}),
+      ...(args.document.extractedText
+        ? { extractedText: args.document.extractedText }
+        : {}),
+      ...(args.document.textExtractionStatus
+        ? { textExtractionStatus: args.document.textExtractionStatus }
+        : {}),
+      ...(typeof args.document.wordCount === 'number'
+        ? { wordCount: args.document.wordCount }
+        : {}),
+      extractedSignals: args.document.extractedSignals,
+      validationJson: serializedAnalysis,
+    })
+    const analysisId = await ctx.db.insert('documentAnalyses', {
+      caseSessionId: args.caseSessionId,
+      documentId,
+      analyzerId: args.analysis.analyzerId,
+      ...(typeof args.analysis.pageCount === 'number'
+        ? { pageCount: args.analysis.pageCount }
+        : {}),
+      fileSizeBytes: args.analysis.fileSizeBytes,
+      mimeType: args.analysis.mimeType,
+      searchableText: args.analysis.searchableText,
+      certificateOfServiceDetected: args.analysis.certificateOfServiceDetected,
+      certificateOfComplianceDetected:
+        args.analysis.certificateOfComplianceDetected,
+      sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
+      warnings: args.analysis.warnings,
+      analysisJson: serializedAnalysis,
+      ...(typeof args.analysis.wordCount === 'number'
+        ? { wordCount: args.analysis.wordCount }
+        : {}),
+      ...(args.analysis.legalCitations
+        ? { citationCount: args.analysis.legalCitations.length }
+        : {}),
+      ...(args.analysis.recordCitations
+        ? { recordCitationCount: args.analysis.recordCitations.length }
+        : {}),
+      ...(args.analysis.appendixCitations
+        ? { appendixCitationCount: args.analysis.appendixCitations.length }
+        : {}),
+      createdAt,
+    })
+    await ctx.db.patch(documentId, { analysisId })
+
+    const receiptFields = {
+      institutionId: receipt.institutionId,
+      scopeKind: receipt.scopeKind,
+      ...(receipt.caseSessionId
+        ? { caseSessionId: receipt.caseSessionId }
+        : {}),
+      ...(receipt.datasetVersionId
+        ? { datasetVersionId: receipt.datasetVersionId }
+        : {}),
+      userId: receipt.userId,
+      fileName: receipt.fileName,
+      sizeBytes: receipt.sizeBytes,
+      sha256: receipt.sha256,
+      mimeType: receipt.mimeType,
+      chunkCount: receipt.chunkCount,
+      state: receipt.state,
+      expiresAt: receipt.expiresAt,
+      createdAt: receipt.createdAt,
+      ...(receipt.storageId ? { storageId: receipt.storageId } : {}),
+      ...(receipt.documentId ? { documentId: receipt.documentId } : {}),
+      ...(receipt.analysisId ? { analysisId: receipt.analysisId } : {}),
+      ...(receipt.datasetAssetId
+        ? { datasetAssetId: receipt.datasetAssetId }
+        : {}),
+    }
+    const nextReceiptFields = {
+      ...receiptFields,
+      state: 'consumed' as const,
+      documentId,
+      analysisId,
+    }
+    validateUploadIntentTransition(receiptFields, nextReceiptFields)
+    await ctx.db.patch(receipt._id, {
+      state: 'consumed',
+      documentId,
+      analysisId,
+    })
+
+    const cleanupConsumedChunksRef = makeFunctionReference<
+      'action',
+      { intentId: Id<'documentUploadIntents'> },
+      null
+    >('documentUploadActions:cleanupChunks')
+    await ctx.scheduler.runAfter(0, cleanupConsumedChunksRef, {
+      intentId: receipt._id,
+    })
+
+    const document: UploadedDocument = {
+      ...args.document,
+      id: documentId,
+      ...(verified.sha256 ? { sha256: verified.sha256 } : {}),
+      analysisId,
+      analysis: args.analysis,
+    }
+    return { document, analysisId }
   },
 })
-
 export const getDocumentAnalysesForCurrentUser = query({
   args: {
     caseSessionId: v.id('caseSessions'),
