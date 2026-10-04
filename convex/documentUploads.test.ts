@@ -82,6 +82,7 @@ type QueueCleanupArgs = {
   intentId?: Id<'documentUploadIntents'>
 }
 type BeginCleanupArgs = { storageId: Id<'_storage'> }
+type RetryCleanupArgs = { storageId: Id<'_storage'> }
 type UploadModuleOverrides = Partial<{
   recordChunk: (
     ctx: MutationCtx,
@@ -95,6 +96,10 @@ type UploadModuleOverrides = Partial<{
     ctx: MutationCtx,
     args: BeginCleanupArgs,
   ) => Promise<boolean>
+  retryUploadStorageCleanup: (
+    ctx: MutationCtx,
+    args: RetryCleanupArgs,
+  ) => Promise<null>
 }>
 
 function withRegisteredHandler<T extends object>(
@@ -132,6 +137,14 @@ function modulesWithUploadOverrides(overrides: UploadModuleOverrides) {
               beginUploadStorageCleanup: withRegisteredHandler(
                 uploads.beginUploadStorageCleanup,
                 overrides.beginUploadStorageCleanup,
+              ),
+            }
+          : {}),
+        ...(overrides.retryUploadStorageCleanup
+          ? {
+              retryUploadStorageCleanup: withRegisteredHandler(
+                uploads.retryUploadStorageCleanup,
+                overrides.retryUploadStorageCleanup,
               ),
             }
           : {}),
@@ -247,6 +260,11 @@ const retryUploadStorageCleanupRef = makeFunctionReference<
   { storageId: Id<'_storage'> },
   null
 >('documentUploads:retryUploadStorageCleanup')
+const watchUploadStorageCleanupRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:watchUploadStorageCleanup')
 const cancelRef = makeFunctionReference<
   'action',
   { intentId: Id<'documentUploadIntents'> },
@@ -976,6 +994,181 @@ describe('document upload receipts', () => {
     expect(referenceCheckAttempts).toBe(6)
     expect(afterSuccess.cleanup).toBeNull()
     expect(afterSuccess.storage).toBeNull()
+  })
+
+  it('hourly watchdog re-arms failed cleanup and stops for missing or referenced rows', async () => {
+    vi.useFakeTimers()
+    let failBegin = true
+    let failRetry = true
+    const uploads = await import('./documentUploads')
+    const originalBeginHandler = (
+      uploads.beginUploadStorageCleanup as unknown as {
+        _handler: NonNullable<
+          UploadModuleOverrides['beginUploadStorageCleanup']
+        >
+      }
+    )._handler
+    const originalRetryHandler = (
+      uploads.retryUploadStorageCleanup as unknown as {
+        _handler: NonNullable<
+          UploadModuleOverrides['retryUploadStorageCleanup']
+        >
+      }
+    )._handler
+    const t = convexTest(
+      schema,
+      modulesWithUploadOverrides({
+        beginUploadStorageCleanup: async (ctx, args) => {
+          if (failBegin) throw new Error('reference lookup unavailable')
+          return originalBeginHandler(ctx, args)
+        },
+        retryUploadStorageCleanup: async (ctx, args) => {
+          if (failRetry) throw new Error('retry scheduling unavailable')
+          return originalRetryHandler(ctx, args)
+        },
+      }),
+    )
+    const fixture = await seedFixture(t)
+    const bytes = makePdf(128)
+    const storageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], {
+          type: 'application/octet-stream',
+        }),
+      ),
+    )
+    await t.mutation(queueUploadCleanupRef, { storageIds: [storageId] })
+
+    const scheduledFor = async (id: Id<'_storage'>) =>
+      t.run(async (ctx) =>
+        (await ctx.db.system.query('_scheduled_functions').collect()).filter(
+          (job) => JSON.stringify(job.args).includes(String(id)),
+        ),
+      )
+    const initialJobs = await scheduledFor(storageId)
+    expect(initialJobs).toHaveLength(2)
+    expect(initialJobs.map((job) => job.name).join(' ')).toContain(
+      'watchUploadStorageCleanup',
+    )
+    expect(
+      initialJobs.find((job) =>
+        job.name.endsWith('documentUploads:watchUploadStorageCleanup'),
+      )?.scheduledTime,
+    ).toBe(Date.now() + 60 * 60 * 1000)
+
+    await expect(
+      t.action(cleanupUploadStorageRef, { storageId }),
+    ).rejects.toThrow('retry scheduling unavailable')
+    expect(
+      await t.run((ctx) =>
+        ctx.db
+          .query('documentUploadCleanup')
+          .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+          .unique(),
+      ),
+    ).not.toBeNull()
+
+    await t.mutation(watchUploadStorageCleanupRef, { storageId })
+    const rearmedJobs = await scheduledFor(storageId)
+    expect(rearmedJobs).toHaveLength(4)
+    expect(
+      rearmedJobs.filter((job) =>
+        job.name.endsWith('documentUploadActions:cleanupUploadStorage'),
+      ),
+    ).toHaveLength(2)
+    expect(
+      rearmedJobs.filter((job) =>
+        job.name.endsWith('documentUploads:watchUploadStorageCleanup'),
+      ),
+    ).toHaveLength(2)
+
+    failBegin = false
+    failRetry = false
+    await t.action(cleanupUploadStorageRef, { storageId })
+    const afterCleanup = await scheduledFor(storageId)
+    await t.mutation(watchUploadStorageCleanupRef, { storageId })
+    expect(await scheduledFor(storageId)).toHaveLength(afterCleanup.length)
+
+    const deleteFailureStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], {
+          type: 'application/octet-stream',
+        }),
+      ),
+    )
+    await t.mutation(queueUploadCleanupRef, {
+      storageIds: [deleteFailureStorageId],
+    })
+    failRetry = true
+    await expect(
+      deleteOrRetryCleanup({
+        objectExists: () => Promise.resolve(true),
+        deleteObject: async () => {
+          throw new Error('storage delete unavailable')
+        },
+        markDeleted: async () => undefined,
+        scheduleRetry: () =>
+          t.mutation(retryUploadStorageCleanupRef, {
+            storageId: deleteFailureStorageId,
+          }),
+      }),
+    ).rejects.toThrow('retry scheduling unavailable')
+    await t.mutation(watchUploadStorageCleanupRef, {
+      storageId: deleteFailureStorageId,
+    })
+    expect(await scheduledFor(deleteFailureStorageId)).toHaveLength(4)
+    failRetry = false
+    await t.action(cleanupUploadStorageRef, {
+      storageId: deleteFailureStorageId,
+    })
+    const afterDeleteRecovery = await scheduledFor(deleteFailureStorageId)
+    await t.mutation(watchUploadStorageCleanupRef, {
+      storageId: deleteFailureStorageId,
+    })
+    expect(await scheduledFor(deleteFailureStorageId)).toHaveLength(
+      afterDeleteRecovery.length,
+    )
+
+    const referencedStorageId = await t.run(async (ctx) => {
+      const id = await ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], {
+          type: 'application/octet-stream',
+        }),
+      )
+      await ctx.db.insert('documents', {
+        caseSessionId: fixture.aliceSessionId,
+        storageId: id,
+        fileName: 'retained-watchdog-reference.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: bytes.byteLength,
+        extractedSignals: [],
+      })
+      await ctx.db.insert('documentUploadCleanup', {
+        storageId: id,
+        attempts: 0,
+        nextAttemptAt: Date.now(),
+        createdAt: new Date().toISOString(),
+      })
+      return id
+    })
+    const beforeReferencedWatch = await scheduledFor(referencedStorageId)
+    await t.mutation(watchUploadStorageCleanupRef, {
+      storageId: referencedStorageId,
+    })
+    const afterReferencedWatch = await t.run(async (ctx) => ({
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', referencedStorageId),
+        )
+        .unique(),
+      storage: await ctx.db.system.get('_storage', referencedStorageId),
+    }))
+    expect(afterReferencedWatch.cleanup).toBeNull()
+    expect(afterReferencedWatch.storage).not.toBeNull()
+    expect(await scheduledFor(referencedStorageId)).toHaveLength(
+      beforeReferencedWatch.length,
+    )
   })
 
   it('enforces inclusive 4 MiB resulting sizes, 12 MiB hard bounds, and UTF-8 accounting', () => {

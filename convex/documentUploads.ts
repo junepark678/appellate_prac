@@ -45,6 +45,7 @@ const maxChunks = 7
 const intentLifetimeMs = 15 * 60 * 1000
 const maxCleanupRetryDelayMs = 60 * 60 * 1000
 const maxCleanupRetryAttempts = 31
+const cleanupWatchdogIntervalMs = 60 * 60 * 1000
 // Convex Node actions are capped at ten minutes, so this lease cannot expire
 // while a healthy completion action is still running.
 const completionClaimLeaseMs = 11 * 60 * 1000
@@ -59,6 +60,11 @@ const cleanupUploadStorageRef = makeFunctionReference<
   { storageId: Id<'_storage'> },
   null
 >('documentUploadActions:cleanupUploadStorage')
+const cleanupWatchdogRef = makeFunctionReference<
+  'mutation',
+  { storageId: Id<'_storage'> },
+  null
+>('documentUploads:watchUploadStorageCleanup')
 
 function uploadExpired(): ConvexError {
   return new ConvexError(AppErrorCode.CONFLICT, 'Upload intent expired', {
@@ -344,6 +350,14 @@ async function queueUploadStorageCleanup(
       createdAt: new Date().toISOString(),
     })
     await ctx.scheduler.runAfter(0, cleanupUploadStorageRef, { storageId })
+    // This durable mutation re-arms the at-most-once action if its first
+    // attempt and the action's retry mutation both fail. Scheduling it in the
+    // same transaction guarantees every new outbox row has a watchdog.
+    await ctx.scheduler.runAfter(
+      cleanupWatchdogIntervalMs,
+      cleanupWatchdogRef,
+      { storageId },
+    )
     queuedIds.push(storageId)
   }
   return queuedIds
@@ -570,6 +584,34 @@ export const finishUploadStorageCleanup = internalMutation({
     }
     await ctx.db.delete(cleanup._id)
     return true
+  },
+})
+
+export const watchUploadStorageCleanup = internalMutation({
+  args: { storageId: v.id('_storage') },
+  returns: v.null(),
+  handler: async (ctx, { storageId }) => {
+    const cleanup = await ctx.db
+      .query('documentUploadCleanup')
+      .withIndex('by_storage', (index) => index.eq('storageId', storageId))
+      .unique()
+    if (!cleanup) return null
+    if (await uploadStorageIsReferenced(ctx, storageId, cleanup.intentId)) {
+      await ctx.db.delete(cleanup._id)
+      return null
+    }
+
+    // Actions are at-most-once. Re-arm only due work and keep one bounded
+    // hourly watchdog chain while the same unreferenced outbox row exists.
+    if (cleanup.nextAttemptAt <= Date.now()) {
+      await ctx.scheduler.runAfter(0, cleanupUploadStorageRef, { storageId })
+    }
+    await ctx.scheduler.runAfter(
+      cleanupWatchdogIntervalMs,
+      cleanupWatchdogRef,
+      { storageId },
+    )
+    return null
   },
 })
 
