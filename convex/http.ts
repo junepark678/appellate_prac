@@ -25,6 +25,25 @@ import { enqueueCleanupWithBoundedRetry } from './documentUploadCleanup'
 import { AppErrorCode, ConvexError, validationError } from './errors'
 
 const maxChunkBytes = 4 * 1024 * 1024
+const maxDocumentBytes = 25 * 1024 * 1024
+
+type CorsPolicy = {
+  methods: string
+  allowedHeaders: string
+  exposedHeaders?: string
+  nosniff?: boolean
+}
+
+const uploadCors: CorsPolicy = {
+  methods: 'POST, OPTIONS',
+  allowedHeaders: 'Authorization, Content-Type',
+}
+const downloadCors: CorsPolicy = {
+  methods: 'GET, OPTIONS',
+  allowedHeaders: 'Authorization',
+  exposedHeaders: 'Content-Disposition, Content-Type, X-Document-Size',
+  nosniff: true,
+}
 
 const authorizeChunkRef = makeFunctionReference<
   'query',
@@ -50,6 +69,18 @@ const queueUploadCleanupRef = makeFunctionReference<
   { storageIds: Id<'_storage'>[] },
   Id<'_storage'>[]
 >('documentUploads:queueUploadCleanup')
+const authorizeDocumentChunkRef = makeFunctionReference<
+  'query',
+  { documentId: string; chunk: number },
+  {
+    storageId: Id<'_storage'>
+    fileName: string
+    mimeType: string
+    sizeBytes: number
+    startBytes: number
+    chunkSizeBytes: number
+  }
+>('documentDownloads:authorizeChunk')
 
 async function queueTemporaryChunkCleanup(
   ctx: ActionCtx,
@@ -86,16 +117,25 @@ function allowedOrigins() {
   )
 }
 
-function responseHeaders(request: Request): Headers {
+function responseHeaders(
+  request: Request,
+  policy: CorsPolicy = uploadCors,
+): Headers {
   const headers = new Headers({
     'Cache-Control': 'no-store',
     Vary: 'Origin',
   })
+  if (policy.nosniff) {
+    headers.set('X-Content-Type-Options', 'nosniff')
+  }
   const origin = request.headers.get('Origin')
   if (origin && allowedOrigins().has(origin)) {
     headers.set('Access-Control-Allow-Origin', origin)
-    headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS')
-    headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+    headers.set('Access-Control-Allow-Methods', policy.methods)
+    headers.set('Access-Control-Allow-Headers', policy.allowedHeaders)
+    if (policy.exposedHeaders) {
+      headers.set('Access-Control-Expose-Headers', policy.exposedHeaders)
+    }
     headers.set('Access-Control-Max-Age', '600')
   }
   return headers
@@ -115,6 +155,7 @@ function errorStatus(error: unknown) {
           }
         )?.data
   if (data?.metadata?.reason === 'UPLOAD_EXPIRED') return 410
+  if (data?.metadata?.reason === 'DOCUMENT_OVERSIZE') return 413
   switch (data?.code) {
     case AppErrorCode.AUTH_REQUIRED:
     case AppErrorCode.AUTH_USER_NOT_INITIALIZED:
@@ -151,6 +192,50 @@ function errorResponse(request: Request, error: unknown) {
     status: errorStatus(error),
     headers,
   })
+}
+
+function downloadErrorResponse(request: Request, error: unknown) {
+  const headers = responseHeaders(request, downloadCors)
+  headers.set('Content-Type', 'application/json; charset=utf-8')
+  const status =
+    (error as { httpStatus?: number })?.httpStatus ?? errorStatus(error)
+  return new Response(
+    JSON.stringify({ error: 'Document content request failed.' }),
+    {
+      status,
+      headers,
+    },
+  )
+}
+
+function sanitizeAttachmentFilename(value: string) {
+  const cleaned = Array.from(
+    value
+      .normalize('NFKC')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .trim(),
+  )
+    .slice(0, 200)
+    .join('')
+  if (!cleaned || cleaned === '.' || cleaned === '..') return 'document.pdf'
+  return cleaned
+}
+
+function attachmentDisposition(value: string) {
+  const filename = sanitizeAttachmentFilename(value)
+  const fallback =
+    filename
+      .replace(/[^\x20-\x7e]/g, '_')
+      .replace(/["\\]/g, '_')
+      .replace(/[^A-Za-z0-9._ -]/g, '_')
+      .trim()
+      .replace(/^[. ]+|[. ]+$/g, '') || 'document.pdf'
+  const encoded = encodeURIComponent(filename).replace(
+    /[!'()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
 }
 
 async function readBoundedBody(request: Request, expectedBytes: number) {
@@ -330,12 +415,140 @@ const chunkRoute = httpAction(async (ctx, request) => {
   }
 })
 
+const documentContentRoute = httpAction(async (ctx, request) => {
+  const headers = responseHeaders(request, downloadCors)
+  const origin = request.headers.get('Origin')
+  if (origin && !allowedOrigins().has(origin)) {
+    return new Response(null, { status: 403, headers })
+  }
+  if (!origin && request.method === 'OPTIONS') {
+    return new Response(null, { status: 403, headers })
+  }
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers })
+  }
+  if (request.method !== 'GET') {
+    headers.set('Allow', 'GET, OPTIONS')
+    return new Response(null, { status: 405, headers })
+  }
+  if (!(await ctx.auth.getUserIdentity())) {
+    headers.set('Content-Type', 'application/json; charset=utf-8')
+    return new Response(
+      JSON.stringify({ error: 'Document content request failed.' }),
+      { status: 401, headers },
+    )
+  }
+
+  try {
+    const url = new URL(request.url)
+    const documentIds = url.searchParams.getAll('documentId')
+    const chunks = url.searchParams.getAll('chunk')
+    if (
+      documentIds.length !== 1 ||
+      !documentIds[0] ||
+      chunks.length !== 1 ||
+      !/^(0|[1-9]\d*)$/.test(chunks[0] ?? '')
+    ) {
+      throw validationError(
+        'A document ID and non-negative chunk index are required.',
+      )
+    }
+    const chunk = Number(chunks[0])
+    if (!Number.isSafeInteger(chunk)) {
+      throw validationError(
+        'Document chunk index is outside the supported range.',
+      )
+    }
+    const args = { documentId: documentIds[0], chunk }
+    const authorized = await ctx.runQuery(authorizeDocumentChunkRef, args)
+    if (
+      !Number.isSafeInteger(authorized.sizeBytes) ||
+      authorized.sizeBytes < 1 ||
+      authorized.sizeBytes > maxDocumentBytes ||
+      authorized.chunkSizeBytes < 1 ||
+      authorized.chunkSizeBytes > maxChunkBytes
+    ) {
+      const error = validationError(
+        'Document exceeds the supported download size.',
+      )
+      throw Object.assign(error, { httpStatus: 413 })
+    }
+
+    const blob = await ctx.storage.get(authorized.storageId)
+    if (!blob)
+      throw new ConvexError(AppErrorCode.NOT_FOUND, 'Document not found')
+    if (blob.size !== authorized.sizeBytes) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Document storage metadata is inconsistent',
+      )
+    }
+    const bytes = await blob
+      .slice(
+        authorized.startBytes,
+        authorized.startBytes + authorized.chunkSizeBytes,
+      )
+      .arrayBuffer()
+    if (bytes.byteLength !== authorized.chunkSizeBytes) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Document storage metadata is inconsistent',
+      )
+    }
+
+    // Recheck authorization after loading the bytes so a revoked reader cannot
+    // receive this slice if membership or the document link changed mid-request.
+    const finalAuthorization = await ctx.runQuery(
+      authorizeDocumentChunkRef,
+      args,
+    )
+    if (
+      finalAuthorization.storageId !== authorized.storageId ||
+      finalAuthorization.sizeBytes !== authorized.sizeBytes ||
+      finalAuthorization.startBytes !== authorized.startBytes ||
+      finalAuthorization.chunkSizeBytes !== authorized.chunkSizeBytes ||
+      finalAuthorization.fileName !== authorized.fileName ||
+      finalAuthorization.mimeType !== authorized.mimeType
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Document changed during download',
+      )
+    }
+
+    const contentType =
+      authorized.mimeType === 'application/pdf'
+        ? 'application/pdf'
+        : 'application/octet-stream'
+    headers.set('Content-Type', contentType)
+    headers.set('Content-Length', String(bytes.byteLength))
+    headers.set(
+      'Content-Disposition',
+      attachmentDisposition(authorized.fileName),
+    )
+    headers.set('X-Document-Size', String(authorized.sizeBytes))
+    return new Response(bytes, { status: 200, headers })
+  } catch (error) {
+    return downloadErrorResponse(request, error)
+  }
+})
+
 const http = httpRouter()
 http.route({ path: '/documents/chunk', method: 'POST', handler: chunkRoute })
 http.route({
   path: '/documents/chunk',
   method: 'OPTIONS',
   handler: chunkRoute,
+})
+http.route({
+  path: '/documents/content',
+  method: 'GET',
+  handler: documentContentRoute,
+})
+http.route({
+  path: '/documents/content',
+  method: 'OPTIONS',
+  handler: documentContentRoute,
 })
 
 export default http
