@@ -29,6 +29,7 @@ import { lazy, Suspense, type ReactNode } from 'react'
 
 import appCss from '../styles.css?url'
 import { convex } from '../convex'
+import { OrganizationContextProvider } from '../components/OrganizationContext'
 
 const AppDevtools = import.meta.env.DEV
   ? lazy(() =>
@@ -74,7 +75,7 @@ function RootDocument({ children }: { children: ReactNode }) {
       <body>
         <ClerkProvider>
           <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
-            {children}
+            <OrganizationContextProvider>{children}</OrganizationContextProvider>
             {AppDevtools ? (
               <Suspense fallback={null}>
                 <AppDevtools />

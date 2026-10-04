@@ -399,7 +399,11 @@ describe("organization APIs", () => {
       name: "Alpha",
       slug: "alpha",
     });
-    await insertMembership(t, alphaId, aliceId, { role: "instructor" });
+    const alphaMembershipExpiry = "2099-01-01T00:00:00.000Z";
+    await insertMembership(t, alphaId, aliceId, {
+      role: "instructor",
+      expiresAt: alphaMembershipExpiry,
+    });
     const zetaId = await insertInstitution(t, { name: "Zeta", slug: "zeta" });
     await insertMembership(t, zetaId, aliceId, { role: "learner" });
     const pausedId = await insertInstitution(t, {
@@ -497,6 +501,7 @@ describe("organization APIs", () => {
       name: "Alpha",
       kind: "shared",
       role: "instructor",
+      expiresAt: alphaMembershipExpiry,
       capabilities: { manageMembers: false, teach: true, learn: true },
     });
     expect(
