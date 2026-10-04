@@ -55,6 +55,8 @@ type OrganizationContextValue = {
   unavailableMessage: string | null;
   canRecoverUnavailableOrganization: boolean;
   recoverToPersonalWorkspace: () => void;
+  canRetryUserInitialization: boolean;
+  retryUserInitialization: () => void;
   canRetryOrganizationBootstrap: boolean;
   retryOrganizationBootstrap: () => void;
   organizations: OrganizationMemberDTO[];
@@ -72,6 +74,7 @@ const noCapabilities: OrganizationCapabilities = {
   teach: false,
   learn: false,
 };
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 const OrganizationContext = createContext<OrganizationContextValue | null>(
   null,
@@ -220,6 +223,8 @@ export function OrganizationContextProvider({
     ? (user?.id ?? "authenticated-session")
     : null;
   const [userState, setUserState] = useState<SessionResult<null> | null>(null);
+  const [userInitializationRetrySequence, setUserInitializationRetrySequence] =
+    useState(0);
   const [organizationList, setOrganizationList] = useState<SessionResult<
     OrganizationMemberDTO[]
   > | null>(null);
@@ -328,7 +333,14 @@ export function OrganizationContextProvider({
     return () => {
       active = false;
     };
-  }, [authReady, authenticated, inOrganizationScope, scopeEpoch, sessionKey]);
+  }, [
+    authReady,
+    authenticated,
+    inOrganizationScope,
+    scopeEpoch,
+    sessionKey,
+    userInitializationRetrySequence,
+  ]);
 
   const userReady =
     inOrganizationScope &&
@@ -337,6 +349,19 @@ export function OrganizationContextProvider({
     userState?.sessionKey === sessionKey &&
     userState.scopeEpoch === scopeEpoch &&
     userState.status === "ready";
+
+  const canRetryUserInitialization =
+    inOrganizationScope &&
+    authenticated &&
+    sessionKey !== null &&
+    userState?.sessionKey === sessionKey &&
+    userState.scopeEpoch === scopeEpoch &&
+    userState.status === "unavailable";
+  const retryUserInitialization = useCallback(() => {
+    if (!canRetryUserInitialization || !sessionKey) return;
+    setUserState({ sessionKey, scopeEpoch, status: "loading" });
+    setUserInitializationRetrySequence((current) => current + 1);
+  }, [canRetryUserInitialization, scopeEpoch, sessionKey]);
 
   useEffect(() => {
     if (!inOrganizationScope || !userReady || !sessionKey) return;
@@ -565,6 +590,58 @@ export function OrganizationContextProvider({
     };
     let active = true;
     let watchFailed = false;
+    let contextExpired = false;
+    let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+    let expiryTimerSequence = 0;
+    const clearExpiryTimer = () => {
+      expiryTimerSequence += 1;
+      if (expiryTimer !== null) {
+        clearTimeout(expiryTimer);
+        expiryTimer = null;
+      }
+    };
+    const setContextUnavailable = () => {
+      if (!contextExpired) {
+        contextExpired = true;
+        generationRef.current += 1;
+        setGeneration(generationRef.current);
+        cancelRegisteredWork(cancellationsRef.current);
+      }
+      setResolvedContext({
+        sessionKey,
+        organizationId: request.organizationId,
+        generation: generationRef.current,
+        status: "unavailable",
+      });
+    };
+    const scheduleExpiration = (expiresAt: number) => {
+      clearExpiryTimer();
+      const sequence = expiryTimerSequence;
+      const checkExpiration = () => {
+        if (
+          !active ||
+          sequence !== expiryTimerSequence ||
+          identityRef.current.organizationId !== request.organizationId ||
+          identityRef.current.sessionKey !== request.sessionKey
+        ) {
+          return;
+        }
+        const remaining = expiresAt - Date.now();
+        if (remaining > 0) {
+          expiryTimer = setTimeout(
+            checkExpiration,
+            Math.min(remaining, MAX_TIMEOUT_MS),
+          );
+          return;
+        }
+        expiryTimer = null;
+        setContextUnavailable();
+      };
+      expiryTimer = setTimeout(
+        checkExpiration,
+        Math.min(Math.max(expiresAt - Date.now(), 0), MAX_TIMEOUT_MS),
+      );
+    };
     const watch = convex.watchQuery(api.organizations.getContext, {
       institutionId: request.organizationId as Id<"institutions">,
     });
@@ -579,7 +656,23 @@ export function OrganizationContextProvider({
       try {
         const organization = watch.localQueryResult();
         if (organization !== undefined) {
+          const expiresAt =
+            organization.expiresAt === undefined
+              ? null
+              : Date.parse(organization.expiresAt);
+          if (
+            expiresAt !== null &&
+            (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+          ) {
+            clearExpiryTimer();
+            watchFailed = false;
+            setContextUnavailable();
+            return;
+          }
           watchFailed = false;
+          contextExpired = false;
+          if (expiresAt === null) clearExpiryTimer();
+          else scheduleExpiration(expiresAt);
           setResolvedContext({
             sessionKey,
             organizationId: request.organizationId,
@@ -589,6 +682,7 @@ export function OrganizationContextProvider({
           });
         }
       } catch {
+        clearExpiryTimer();
         if (!watchFailed) {
           watchFailed = true;
           generationRef.current += 1;
@@ -608,6 +702,7 @@ export function OrganizationContextProvider({
 
     return () => {
       active = false;
+      clearExpiryTimer();
       unsubscribe();
     };
   }, [
@@ -639,8 +734,7 @@ export function OrganizationContextProvider({
   ) {
     if (userState.status === "unavailable") {
       status = "unavailable";
-      unavailableMessage =
-        "Your account could not be initialized. Try again after signing in.";
+      unavailableMessage = "Your account could not be initialized. Try again.";
     } else if (
       userReady &&
       selectedOrganizationId &&
@@ -709,9 +803,7 @@ export function OrganizationContextProvider({
     void router
       .navigate({ to: "/app", search, replace: false } as never)
       .catch(() => {
-        if (
-          pendingSelectionRef.current?.sequence !== nextSelection.sequence
-        ) {
+        if (pendingSelectionRef.current?.sequence !== nextSelection.sequence) {
           return;
         }
         pendingSelectionRef.current = null;
@@ -793,6 +885,8 @@ export function OrganizationContextProvider({
       retryOrganizationBootstrap,
       canRecoverUnavailableOrganization,
       recoverToPersonalWorkspace,
+      canRetryUserInitialization,
+      retryUserInitialization,
       organizations,
       organizationsStatus,
       selectOrganization,
@@ -804,6 +898,7 @@ export function OrganizationContextProvider({
       activePendingSelection,
       canRecoverUnavailableOrganization,
       canRetryOrganizationBootstrap,
+      canRetryUserInitialization,
       captureOrganizationContext,
       isCurrentOrganizationContext,
       organization,
@@ -812,6 +907,7 @@ export function OrganizationContextProvider({
       registerOrganizationCancellation,
       retryOrganizationBootstrap,
       recoverToPersonalWorkspace,
+      retryUserInitialization,
       selectOrganization,
       selectedOrganizationId,
       status,
