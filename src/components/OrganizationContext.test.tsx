@@ -696,6 +696,7 @@ describe("OrganizationContextProvider", () => {
           name: path === "/" ? "Study" : "Privacy Notice",
         }),
       ).toBeTruthy();
+      expect(screen.getByRole("link", { name: "Study" }).tagName).toBe("A");
       expect(mocks.client.mutation).not.toHaveBeenCalled();
     },
   );
