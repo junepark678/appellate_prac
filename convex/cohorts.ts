@@ -595,7 +595,9 @@ export const acceptInvite = mutation({
 });
 
 export const listMine = query({
-  args: {},
+  args: {
+    institutionId: v.optional(v.id("institutions")),
+  },
   returns: v.array(
     v.object({
       id: v.id("cohorts"),
@@ -607,12 +609,17 @@ export const listMine = query({
       archived: v.boolean(),
     }),
   ),
-  handler: async (ctx) => {
-    const { user } = await requireCurrentUser(ctx);
-    const organizationMemberships = await ctx.db
-      .query("institutionMemberships")
-      .withIndex("by_user", (index) => index.eq("userId", user._id))
-      .collect();
+  handler: async (ctx, args) => {
+    const selectedAccess = args.institutionId
+      ? await requireInstitutionRole(ctx, args.institutionId, ["learner"])
+      : undefined;
+    const { user } = selectedAccess ?? (await requireCurrentUser(ctx));
+    const organizationMemberships = selectedAccess
+      ? [selectedAccess.membership]
+      : await ctx.db
+          .query("institutionMemberships")
+          .withIndex("by_user", (index) => index.eq("userId", user._id))
+          .collect();
     const enrollments = await ctx.db
       .query("cohortMemberships")
       .withIndex("by_user", (index) => index.eq("userId", user._id))

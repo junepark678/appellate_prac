@@ -24,7 +24,11 @@ import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 import { requireCurrentUser } from "./authHelpers";
-import { requireCohortRole, writeAuditLog } from "./authz";
+import {
+  requireCohortRole,
+  requireInstitutionRole,
+  writeAuditLog,
+} from "./authz";
 import { appendCaseSessionEvent } from "./caseSessionEventLog";
 import {
   AppErrorCode,
@@ -768,7 +772,9 @@ export const listForCohort = query({
 });
 
 export const listMine = query({
-  args: {},
+  args: {
+    institutionId: v.optional(v.id("institutions")),
+  },
   returns: v.array(
     v.object({
       id: v.id("assignments"),
@@ -785,8 +791,11 @@ export const listMine = query({
       reviewedAt: v.optional(v.string()),
     }),
   ),
-  handler: async (ctx) => {
-    const { user } = await requireCurrentUser(ctx);
+  handler: async (ctx, args) => {
+    const selectedAccess = args.institutionId
+      ? await requireInstitutionRole(ctx, args.institutionId, ["learner"])
+      : undefined;
+    const { user } = selectedAccess ?? (await requireCurrentUser(ctx));
     const enrollments = await ctx.db
       .query("cohortMemberships")
       .withIndex("by_user", (index) => index.eq("userId", user._id))
@@ -796,6 +805,9 @@ export const listMine = query({
     for (const enrollment of enrollments) {
       const cohort = await ctx.db.get(enrollment.cohortId);
       if (!cohort || cohort.archived) continue;
+      if (args.institutionId && cohort.institutionId !== args.institutionId) {
+        continue;
+      }
       const institution = await ctx.db.get(cohort.institutionId);
       if (
         institution &&
