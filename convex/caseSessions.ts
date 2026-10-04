@@ -1301,7 +1301,7 @@ async function deleteExistingSessionState(
 }
 
 async function loadReceiptBackedDocuments(
-  ctx: WriteCtx,
+  ctx: ReadCtx,
   caseSessionId: Id<'caseSessions'>,
 ) {
   const receipts = await ctx.db
@@ -1345,6 +1345,36 @@ async function loadReceiptBackedDocuments(
     preserved.set(String(document._id), { document, analysis })
   }
   return preserved
+}
+
+async function bindReceiptBackedFilingSubmission(
+  ctx: ReadCtx,
+  caseSessionId: Id<'caseSessions'>,
+  submission: FilingSubmission,
+): Promise<FilingSubmission> {
+  const receiptBackedDocuments = await loadReceiptBackedDocuments(
+    ctx,
+    caseSessionId,
+  )
+  const bindDocument = (document: UploadedDocument) => {
+    const receiptBacked = receiptBackedDocuments.get(document.id)
+    if (!receiptBacked) return document
+    const canonical = documentFromDoc(
+      receiptBacked.document,
+      receiptBacked.analysis,
+    )
+    delete canonical.storageId
+    return canonical
+  }
+
+  return {
+    ...submission,
+    mainDocument: bindDocument(submission.mainDocument),
+    attachments: submission.attachments.map((attachment) => ({
+      ...attachment,
+      document: bindDocument(attachment.document),
+    })),
+  }
 }
 
 async function replaceSessionState(
@@ -2158,7 +2188,12 @@ export const preflightFiling = query({
       ...args.submission.attachments.map((attachment) => attachment.document),
     ])
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    return preflightEcfFiling(session, args.submission as FilingSubmission)
+    const submission = await bindReceiptBackedFilingSubmission(
+      ctx,
+      caseSessionDoc._id,
+      args.submission as FilingSubmission,
+    )
+    return preflightEcfFiling(session, submission)
   },
 })
 
@@ -2485,6 +2520,9 @@ export const persistDocumentAnalysis = mutation({
       sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
       warnings: args.analysis.warnings,
       analysisJson: serializedAnalysis,
+      ...(args.analysis.normalizedText
+        ? { extractedTextHash: hashText(args.analysis.normalizedText) }
+        : {}),
       ...(typeof args.analysis.wordCount === 'number'
         ? { wordCount: args.analysis.wordCount }
         : {}),
@@ -2611,7 +2649,12 @@ export const submitEcfFiling = mutation({
       ...args.submission.attachments.map((attachment) => attachment.document),
     ])
     const session = await assembleCaseSession(ctx, caseSessionDoc)
-    const result = submitEcfFilingDomain(session, args.submission as FilingSubmission)
+    const submission = await bindReceiptBackedFilingSubmission(
+      ctx,
+      caseSessionDoc._id,
+      args.submission as FilingSubmission,
+    )
+    const result = submitEcfFilingDomain(session, submission)
     const nextSession = transitionAfterFiling(result.session)
     const saved = await replaceSessionState(ctx, caseSessionDoc._id, nextSession)
 

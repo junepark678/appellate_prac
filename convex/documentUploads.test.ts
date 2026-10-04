@@ -27,7 +27,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Id } from './_generated/dataModel'
 import { AppErrorCode, type AppErrorData } from './errors'
 import { deleteOrRetryCleanup } from './documentUploadActions'
-import type { DocumentAnalysis, UploadedDocument } from '../src/domain/types'
+import type {
+  CaseSession,
+  DocumentAnalysis,
+  EcfReceipt,
+  FilingSubmission,
+  PreflightCheckResult,
+  UploadedDocument,
+} from '../src/domain/types'
+import { defaultFilingMetadata } from '../src/domain/filing/ecf'
 import schema from './schema'
 
 const chunkBytes = 4 * 1024 * 1024
@@ -147,6 +155,16 @@ const persistRef = makeFunctionReference<
   PersistArgs,
   PersistResult
 >('caseSessions:persistDocumentAnalysis')
+const preflightFilingRef = makeFunctionReference<
+  'query',
+  { caseSessionId: Id<'caseSessions'>; submission: FilingSubmission },
+  PreflightCheckResult
+>('caseSessions:preflightFiling')
+const submitEcfFilingRef = makeFunctionReference<
+  'mutation',
+  { caseSessionId: Id<'caseSessions'>; submission: FilingSubmission },
+  { session: CaseSession; preflight: PreflightCheckResult; receipt: EcfReceipt | null }
+>('caseSessions:submitEcfFiling')
 const advanceProcedureRef = makeFunctionReference<
   'mutation',
   { caseSessionId: Id<'caseSessions'> },
@@ -188,6 +206,14 @@ const expireRef = makeFunctionReference<
 
 function sha256(bytes: Uint8Array) {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+function textHash(value: string) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (Math.imul(31, hash) + value.charCodeAt(index)) | 0
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0')
 }
 
 function makePdf(sizeBytes: number) {
@@ -471,6 +497,7 @@ function uploadClient(t: TestConvex<typeof schema>, subject = 'alice') {
     persist: (args: PersistArgs) => client.mutation(persistRef, args),
     mutation: client.mutation,
     action: client.action,
+    query: client.query,
     fetch: client.fetch,
   }
 }
@@ -517,6 +544,42 @@ async function uploadBytes(
     expect(response.headers.get('Cache-Control')).toBe('no-store')
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe(appOrigin)
   }
+}
+
+async function uploadReceiptDocument(
+  alice: ReturnType<typeof uploadClient>,
+  caseSessionId: Id<'caseSessions'>,
+  extractedText: string,
+) {
+  const bytes = makePdf(128)
+  const fileName = 'receipt-backed.pdf'
+  const intent = await alice.begin({
+    scope: { kind: 'session', caseSessionId },
+    fileName,
+    sizeBytes: bytes.byteLength,
+    sha256: sha256(bytes),
+    mimeType: 'application/pdf',
+  })
+  await uploadBytes(alice, intent.intentId, bytes)
+  await alice.complete(intent.intentId)
+  const persisted = await alice.persist({
+    caseSessionId,
+    intentId: intent.intentId,
+    document: {
+      id: 'client-receipt-document',
+      fileName,
+      mimeType: 'application/pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      extractedText,
+      extractedSignals: ['source document'],
+    },
+    analysis: {
+      ...analysisFor(bytes.byteLength),
+      normalizedText: extractedText,
+    },
+  })
+  return { intent, persisted }
 }
 
 async function failNextUploadStorageDelete(
@@ -1370,6 +1433,116 @@ describe('document upload receipts', () => {
     expect(saved.storageSize).toBe(bytes.byteLength)
   })
 
+  it('uses the persisted receipt-backed report for ECF preflight and submission', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const { persisted } = await uploadReceiptDocument(
+      alice,
+      fixture.aliceSessionId,
+      'Uploaded source document without writ petition signals.',
+    )
+    const storedAnalysis = await t.run((ctx) =>
+      ctx.db.get(persisted.analysisId as Id<'documentAnalyses'>),
+    )
+    expect(storedAnalysis?.extractedTextHash).toBe(
+      textHash(persisted.document.analysis!.normalizedText!),
+    )
+    const submission: FilingSubmission = {
+      eventId: 'joint_appendix',
+      participantRole: 'appellant',
+      title: 'Joint Appendix',
+      mainDocument: persisted.document,
+      attachments: [],
+      metadata: {
+        ...defaultFilingMetadata('joint_appendix'),
+        representedPartyId: 'appellant',
+      },
+      notes: '',
+    }
+    const args = { caseSessionId: fixture.aliceSessionId, submission }
+    const storedReportPreflight = await alice.query(preflightFilingRef, args)
+    expect(
+      storedReportPreflight.issues.some(
+        (issue) => issue.code === 'appendix_pagination_signal_missing',
+      ),
+    ).toBe(true)
+
+    const alteredSubmission: FilingSubmission = {
+      ...submission,
+      mainDocument: {
+        ...persisted.document,
+        extractedText: 'Joint appendix pagination. Appendix page J.A. 1.',
+        extractedSignals: [
+          ...persisted.document.extractedSignals,
+          'pagination appendix page ja',
+        ],
+        analysis: {
+          ...persisted.document.analysis!,
+          normalizedText: 'Joint appendix pagination. Appendix page J.A. 1.',
+          certificateOfServiceDetected: true,
+          certificateOfComplianceDetected: true,
+        },
+      },
+    }
+    const alteredArgs = { ...args, submission: alteredSubmission }
+    const alteredPreflight = await alice.query(preflightFilingRef, alteredArgs)
+    expect(alteredPreflight).toEqual(storedReportPreflight)
+
+    const submitted = await alice.mutation(submitEcfFilingRef, alteredArgs)
+    expect(submitted.preflight).toEqual(storedReportPreflight)
+    const filing = submitted.session.filings.find(
+      (candidate) => candidate.eventId === submission.eventId,
+    )
+    expect(filing).toBeDefined()
+    expect(filing!.documents[0]?.extractedText).toBe(
+      persisted.document.extractedText,
+    )
+    expect(filing!.documents[0]?.extractedSignals).toEqual(
+      persisted.document.extractedSignals,
+    )
+    const savedSubmission = JSON.parse(
+      filing!.submissionJson!,
+    ) as FilingSubmission
+    expect(savedSubmission.mainDocument).toEqual(persisted.document)
+  })
+
+  it('submits an unchanged receipt-backed document through the ECF workflow', async () => {
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const { persisted } = await uploadReceiptDocument(
+      alice,
+      fixture.aliceSessionId,
+      'Notice of appeal from a final civil judgment.',
+    )
+    const submission: FilingSubmission = {
+      eventId: 'notice_of_appeal',
+      participantRole: 'appellant',
+      title: 'Notice of Appeal',
+      mainDocument: persisted.document,
+      attachments: [],
+      metadata: {
+        ...defaultFilingMetadata('notice_of_appeal'),
+        representedPartyId: 'appellant',
+      },
+      notes: '',
+    }
+    const args = { caseSessionId: fixture.aliceSessionId, submission }
+    const preflight = await alice.query(preflightFilingRef, args)
+    expect(preflight.accepted).toBe(true)
+
+    const submitted = await alice.mutation(submitEcfFilingRef, args)
+    expect(submitted.preflight).toEqual(preflight)
+    expect(submitted.receipt).not.toBeNull()
+    const filing = submitted.session.filings.at(-1)
+    expect(filing?.outcome).not.toBe('rejected')
+    expect(filing?.documents[0]).toMatchObject(persisted.document)
+    expect(
+      JSON.parse(filing!.submissionJson!) as FilingSubmission,
+    ).toMatchObject({ mainDocument: persisted.document })
+  })
+
   it('enforces the aggregate 960 KiB UTF-8 row budget exactly before consuming an upload', async () => {
     const rowLimitBytes = 960 * 1024
     const t = convexTest(schema, modules)
@@ -1899,6 +2072,75 @@ describe('document upload receipts', () => {
     expect(after.winner).not.toBeNull()
     expect(after.loser).toBeNull()
     expect(after.cleanup).toHaveLength(0)
+  })
+
+  it('queues a late final blob for cleanup inside cancelled completion finalization', async () => {
+    vi.useFakeTimers()
+    const t = convexTest(schema, modules)
+    const fixture = await seedFixture(t)
+    const alice = uploadClient(t)
+    const bytes = makePdf(128)
+    const intent = await alice.begin({
+      scope: { kind: 'session', caseSessionId: fixture.aliceSessionId },
+      fileName: 'late-finalization.pdf',
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+      mimeType: 'application/pdf',
+    })
+    await uploadBytes(alice, intent.intentId, bytes)
+    await t.run((ctx) =>
+      ctx.db.patch(intent.intentId, {
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      }),
+    )
+    await t.action(expireRef, { intentId: intent.intentId })
+
+    const finalStorageId = await t.run((ctx) =>
+      ctx.storage.store(
+        new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }),
+      ),
+    )
+    const finalized = await alice.mutation(finalizeCompletionRef, {
+      intentId: intent.intentId,
+      storageId: finalStorageId,
+      sizeBytes: bytes.byteLength,
+      sha256: sha256(bytes),
+    })
+    expect(finalized).toEqual({
+      storageId: finalStorageId,
+      accepted: false,
+      cancelled: true,
+    })
+
+    const queued = await t.run((ctx) =>
+      ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', finalStorageId),
+        )
+        .unique(),
+    )
+    expect(queued?.intentId).toBe(intent.intentId)
+    expect(
+      await t.run((ctx) => ctx.db.system.get('_storage', finalStorageId)),
+    ).not.toBeNull()
+
+    await t.action(cleanupUploadStorageRef, { storageId: finalStorageId })
+    const afterFinalCleanup = await t.run(async (ctx) => ({
+      intent: await ctx.db.get(intent.intentId),
+      storage: await ctx.db.system.get('_storage', finalStorageId),
+      cleanup: await ctx.db
+        .query('documentUploadCleanup')
+        .withIndex('by_storage', (index) =>
+          index.eq('storageId', finalStorageId),
+        )
+        .unique(),
+    }))
+    expect(afterFinalCleanup.intent?.state).toBe('cancelled')
+    expect(afterFinalCleanup.intent?.storageId).toBe(finalStorageId)
+    expect(afterFinalCleanup.storage).toBeNull()
+    expect(afterFinalCleanup.cleanup).toBeNull()
+    await runQueuedUploadCleanup(t)
   })
 
   it('keeps dataset asset storage referenced during expired receipt cleanup', async () => {

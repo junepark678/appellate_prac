@@ -707,6 +707,7 @@ export const finalizeCompletion = internalMutation({
         )
         await ctx.db.patch(intent._id, { storageId: args.storageId })
       }
+      await queueUploadStorageCleanup(ctx, [args.storageId], intent._id)
       return { storageId: args.storageId, accepted: false, cancelled: true }
     }
     if (intent.state !== 'pending') {
