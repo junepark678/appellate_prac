@@ -22,53 +22,53 @@ import {
   Scripts,
   createRootRoute,
   retainSearchParams,
-} from "@tanstack/react-router";
-import { ClerkProvider } from "@clerk/tanstack-react-start";
-import { useAuth } from "@clerk/tanstack-react-start";
-import { ConvexProviderWithClerk } from "convex/react-clerk";
-import { lazy, Suspense, type ReactNode } from "react";
+} from '@tanstack/react-router'
+import { ClerkProvider } from '@clerk/tanstack-react-start'
+import { useAuth } from '@clerk/tanstack-react-start'
+import { ConvexProviderWithClerk } from 'convex/react-clerk'
+import { lazy, Suspense, type ReactNode } from 'react'
 
-import appCss from "../styles.css?url";
-import { convex } from "../convex";
-import { OrganizationContextProvider } from "../components/OrganizationContext";
+import appCss from '../styles.css?url'
+import { convex } from '../convex'
+import { OrganizationContextProvider } from '../components/OrganizationContext'
 
 const AppDevtools = import.meta.env.DEV
   ? lazy(() =>
-      import("../components/devtools/AppDevtools").then((module) => ({
+      import('../components/devtools/AppDevtools').then((module) => ({
         default: module.AppDevtools,
       })),
     )
-  : null;
+  : null
 
-import { RouteErrorBoundary } from "../components/RouteErrorBoundary";
+import { RouteErrorBoundary } from '../components/RouteErrorBoundary'
 
 export const Route = createRootRoute({
   search: {
-    middlewares: [retainSearchParams(["organizationId"])],
+    middlewares: [retainSearchParams(['organizationId'])],
   },
   head: () => ({
     meta: [
       {
-        charSet: "utf-8",
+        charSet: 'utf-8',
       },
       {
-        name: "viewport",
-        content: "width=device-width, initial-scale=1",
+        name: 'viewport',
+        content: 'width=device-width, initial-scale=1',
       },
       {
-        title: "Appellate Practice Simulator",
+        title: 'Appellate Practice Simulator',
       },
     ],
     links: [
       {
-        rel: "stylesheet",
+        rel: 'stylesheet',
         href: appCss,
       },
     ],
   }),
   errorComponent: RouteErrorBoundary,
   shellComponent: RootDocument,
-});
+})
 
 function RootDocument({ children }: { children: ReactNode }) {
   return (
@@ -79,9 +79,7 @@ function RootDocument({ children }: { children: ReactNode }) {
       <body>
         <ClerkProvider>
           <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
-            <OrganizationContextProvider>
-              {children}
-            </OrganizationContextProvider>
+            <OrganizationContextProvider>{children}</OrganizationContextProvider>
             {AppDevtools ? (
               <Suspense fallback={null}>
                 <AppDevtools />
@@ -92,5 +90,5 @@ function RootDocument({ children }: { children: ReactNode }) {
         <Scripts />
       </body>
     </html>
-  );
+  )
 }
