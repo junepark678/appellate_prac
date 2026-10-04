@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => ({
   convexAuth: { isAuthenticated: true, isLoading: false },
   client: {
     watchQuery: vi.fn(),
+    query: vi.fn(),
     mutation: vi.fn(),
   },
   upsertCurrentUser: vi.fn(),
@@ -366,6 +367,9 @@ beforeEach(() => {
   mocks.client.mutation
     .mockReset()
     .mockResolvedValue({ institutionId: "org-personal" as Id<"institutions"> });
+  mocks.client.query
+    .mockReset()
+    .mockImplementation(async () => listedOrganizations);
   listedOrganizations = [member("org-a", "Org A", "admin")];
   getOrganizationContext = async (id) =>
     organization(id, `Org ${id.slice(-1).toUpperCase()}`, "admin");
@@ -482,7 +486,7 @@ describe("OrganizationContextProvider", () => {
       for (const listener of watch.listeners) listener();
     });
 
-    expect((await screen.findByRole("alert")).textContent).toMatch(
+    expect(screen.getByRole("alert").textContent).toMatch(
       /organization is unavailable/i,
     );
     expect(screen.queryByText("Org A content (admin)")).toBeNull();
@@ -505,6 +509,35 @@ describe("OrganizationContextProvider", () => {
       (router.state.location.search as Record<string, unknown>).organizationId,
     ).toBe("org-a");
   });
+
+  it.each(["instructor", "learner"] as const)(
+    "invalidates captures and cancels work when authorization changes to %s in place",
+    async (role) => {
+      const { router } = renderOrganizationApp("/app?organizationId=org-a");
+      expect(await screen.findByText("Org A content (admin)")).toBeTruthy();
+      await waitFor(() =>
+        expect(cancellationRegistrationCount).toBeGreaterThan(0),
+      );
+      const capture = latestCapture;
+      expect(capture).not.toBeNull();
+      expect(isCaptureCurrent(capture!)).toBe(true);
+
+      await act(async () => {
+        const watch = contextWatches.get("org-a");
+        if (!watch) throw new Error("Expected the organization context watch");
+        watch.result = organization("org-a", "Org A", role);
+        for (const listener of watch.notifications) listener();
+      });
+
+      expect(screen.getByText(`Org A content (${role})`)).toBeTruthy();
+      expect(router.state.location.pathname).toBe("/app");
+      expect(isCaptureCurrent(capture!)).toBe(false);
+      expect(cancellationSpy).toHaveBeenCalledTimes(1);
+      expect(latestCapture).not.toBeNull();
+      expect(latestCapture!.generation).not.toBe(capture!.generation);
+      expect(isCaptureCurrent(latestCapture!)).toBe(true);
+    },
+  );
 
   it("invalidates captures and cancels registered work at the membership expiry boundary", async () => {
     vi.useFakeTimers();
@@ -603,6 +636,57 @@ describe("OrganizationContextProvider", () => {
     );
     expect(screen.queryByText("Org A content (admin)")).toBeNull();
     expect(cancellationSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a selected sole membership at expiry and recovers to Personal", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-10-04T12:00:00.000Z").valueOf();
+    const expiresAt = new Date(now + 1_000).toISOString();
+    vi.setSystemTime(now);
+    listedOrganizations = [member("org-a", "Org A", "admin")];
+    mocks.client.query.mockImplementation(async () =>
+      Date.now() < Date.parse(expiresAt) ? listedOrganizations : [],
+    );
+    getOrganizationContext = async (id) =>
+      id === "org-a"
+        ? organization(id, "Org A", "admin", "shared", expiresAt)
+        : organization(id, "Personal workspace", "admin", "personal");
+    const { router } = renderOrganizationApp("/app?organizationId=org-a");
+    await flushAsyncUpdates();
+
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Org A" })).toBeTruthy();
+    expect(mocks.client.query).not.toHaveBeenCalled();
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(screen.getByRole("option", { name: "Org A" })).toBeTruthy();
+    expect(screen.getByText("Org A content (admin)")).toBeTruthy();
+    expect(mocks.client.query).not.toHaveBeenCalled();
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /organization is unavailable/i,
+    );
+    expect(screen.queryByText("Org A content (admin)")).toBeNull();
+    expect(screen.queryByRole("option", { name: "Org A" })).toBeNull();
+    expect(mocks.client.query).toHaveBeenCalledTimes(1);
+    expect(mocks.client.mutation).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use personal workspace" }),
+    );
+    await flushAsyncUpdates();
+    expect(screen.getByText("Personal workspace content (admin)")).toBeTruthy();
+    expect(mocks.client.mutation).toHaveBeenCalledTimes(1);
+    expect(
+      (router.state.location.search as Record<string, unknown>).organizationId,
+    ).toBe("org-personal");
   });
 
   it("rejects captures when expiry has passed before a delayed timer runs", async () => {
