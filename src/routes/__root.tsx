@@ -21,7 +21,6 @@ import {
   HeadContent,
   Scripts,
   createRootRoute,
-  retainSearchParams,
 } from '@tanstack/react-router'
 import { ClerkProvider } from '@clerk/tanstack-react-start'
 import { useAuth } from '@clerk/tanstack-react-start'
@@ -43,9 +42,6 @@ const AppDevtools = import.meta.env.DEV
 import { RouteErrorBoundary } from '../components/RouteErrorBoundary'
 
 export const Route = createRootRoute({
-  search: {
-    middlewares: [retainSearchParams(['organizationId'])],
-  },
   head: () => ({
     meta: [
       {
