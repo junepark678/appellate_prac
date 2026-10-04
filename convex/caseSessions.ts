@@ -131,7 +131,22 @@ const defaultScenarioKey = 'synthetic-employment-retaliation'
 const openRouterCooldownMs = 10_000
 const estimatedOpenRouterCostCents = 1
 const AI_CALL_TIMEOUT_MS = 30_000
+const maxDocumentRowBytes = 960 * 1024
+const documentRowEncoder = new TextEncoder()
+// Sizing runs before inserts, so reserve room for each generated Convex ID.
+const generatedDocumentIdBudgetPlaceholder = 'x'.repeat(128)
 const seedScenarios = scenarioSeed as Scenario[]
+
+function fitsDocumentRowByteBudget(payload: unknown) {
+  const serialized = JSON.stringify(payload)
+  if (serialized === undefined) return false
+  const boundedBytes = new Uint8Array(maxDocumentRowBytes + 1)
+  const encoded = documentRowEncoder.encodeInto(serialized, boundedBytes)
+  return (
+    encoded.read === serialized.length &&
+    encoded.written <= maxDocumentRowBytes
+  )
+}
 
 function rejectClientStorageClaims(documents: UploadedDocument[]) {
   if (documents.some((document) => document.storageId !== undefined)) {
@@ -1161,6 +1176,13 @@ async function assembleCaseSession(
 async function deleteExistingSessionState(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
+  preservedDocuments: Map<
+    string,
+    {
+      document: Doc<'documents'>
+      analysis: Doc<'documentAnalyses'>
+    }
+  >,
 ) {
   const [
     participants,
@@ -1252,11 +1274,14 @@ async function deleteExistingSessionState(
         .collect(),
     ])
 
+  const preservedAnalysisIds = new Set(
+    [...preservedDocuments.values()].map((preserved) => preserved.analysis._id),
+  )
   await Promise.all(
     [
       ...participants,
-      ...documents,
-      ...documentAnalyses,
+      ...documents.filter((document) => !preservedDocuments.has(document._id)),
+      ...documentAnalyses.filter((analysis) => !preservedAnalysisIds.has(analysis._id)),
       ...filings,
       ...docketEntries,
       ...deadlines,
@@ -1275,11 +1300,62 @@ async function deleteExistingSessionState(
   )
 }
 
+async function loadReceiptBackedDocuments(
+  ctx: WriteCtx,
+  caseSessionId: Id<'caseSessions'>,
+) {
+  const receipts = await ctx.db
+    .query('documentUploadIntents')
+    .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
+    .collect()
+  const preserved = new Map<
+    string,
+    { document: Doc<'documents'>; analysis: Doc<'documentAnalyses'> }
+  >()
+  for (const receipt of receipts) {
+    if (receipt.state !== 'consumed') continue
+    if (
+      receipt.scopeKind !== 'session' ||
+      !receipt.caseSessionId ||
+      !receipt.storageId ||
+      !receipt.documentId ||
+      !receipt.analysisId
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Consumed upload linkage is incomplete',
+      )
+    }
+    const document = await ctx.db.get(receipt.documentId)
+    const analysis = await ctx.db.get(receipt.analysisId)
+    if (
+      !document ||
+      !analysis ||
+      document.caseSessionId !== caseSessionId ||
+      document.storageId !== receipt.storageId ||
+      document.analysisId !== analysis._id ||
+      analysis.caseSessionId !== caseSessionId ||
+      analysis.documentId !== document._id
+    ) {
+      throw new ConvexError(
+        AppErrorCode.CONFLICT,
+        'Consumed upload linkage is invalid',
+      )
+    }
+    preserved.set(String(document._id), { document, analysis })
+  }
+  return preserved
+}
+
 async function replaceSessionState(
   ctx: WriteCtx,
   caseSessionId: Id<'caseSessions'>,
   session: CaseSession,
 ) {
+  const receiptBackedDocuments = await loadReceiptBackedDocuments(
+    ctx,
+    caseSessionId,
+  )
   const actorWorkProducts = await ctx.db
     .query('actorWorkProducts')
     .withIndex('by_case', (index) => index.eq('caseSessionId', caseSessionId))
@@ -1297,7 +1373,11 @@ async function replaceSessionState(
       ? { legalTrainingDisclaimerAcceptedAt: session.legalTrainingDisclaimerAcceptedAt }
       : {}),
   })
-  await deleteExistingSessionState(ctx, caseSessionId)
+  await deleteExistingSessionState(
+    ctx,
+    caseSessionId,
+    receiptBackedDocuments,
+  )
 
   await Promise.all(
     session.participants.map((participant) =>
@@ -1316,24 +1396,67 @@ async function replaceSessionState(
     const documentIds: Array<Id<'documents'>> = []
     const documentAnalysisIds: Array<Id<'documentAnalyses'>> = []
     for (const document of filing.documents) {
-      const documentId = await ctx.db.insert('documents', {
-        caseSessionId,
-        ...(document.storageId ? { storageId: document.storageId as Id<'_storage'> } : {}),
-        ...(document.sha256 ? { sha256: document.sha256 } : {}),
-        fileName: document.fileName,
-        mimeType: document.mimeType,
-        sizeBytes: document.sizeBytes,
-        ...(typeof document.pageCount === 'number' ? { pageCount: document.pageCount } : {}),
-        ...(document.extractedText ? { extractedText: document.extractedText } : {}),
-        ...(document.textExtractionStatus
-          ? { textExtractionStatus: document.textExtractionStatus }
-          : {}),
-        ...(typeof document.wordCount === 'number' ? { wordCount: document.wordCount } : {}),
-        extractedSignals: document.extractedSignals,
-        ...(document.analysis ? { validationJson: JSON.stringify(document.analysis) } : {}),
-      })
+      const receiptBacked = receiptBackedDocuments.get(document.id)
+      let documentId: Id<'documents'>
+      if (receiptBacked) {
+        if (
+          document.fileName !== receiptBacked.document.fileName ||
+          document.mimeType !== receiptBacked.document.mimeType ||
+          document.sizeBytes !== receiptBacked.document.sizeBytes ||
+          (document.sha256 !== undefined &&
+            document.sha256 !== receiptBacked.document.sha256) ||
+          (document.storageId !== undefined &&
+            document.storageId !== receiptBacked.document.storageId) ||
+          (document.analysisId !== undefined &&
+            document.analysisId !== receiptBacked.analysis._id)
+        ) {
+          throw new ConvexError(
+            AppErrorCode.CONFLICT,
+            'Receipt-backed document does not match its stored record',
+          )
+        }
+        documentId = receiptBacked.document._id
+        documentAnalysisIds.push(receiptBacked.analysis._id)
+        analysisIdMap.set(
+          String(receiptBacked.analysis._id),
+          receiptBacked.analysis._id,
+        )
+        analysisIdMap.set(
+          `${document.id}:analysis`,
+          receiptBacked.analysis._id,
+        )
+      } else {
+        documentId = await ctx.db.insert('documents', {
+          caseSessionId,
+          ...(document.storageId
+            ? { storageId: document.storageId as Id<'_storage'> }
+            : {}),
+          ...(document.sha256 ? { sha256: document.sha256 } : {}),
+          fileName: document.fileName,
+          mimeType: document.mimeType,
+          sizeBytes: document.sizeBytes,
+          ...(typeof document.pageCount === 'number'
+            ? { pageCount: document.pageCount }
+            : {}),
+          ...(document.extractedText
+            ? { extractedText: document.extractedText }
+            : {}),
+          ...(document.textExtractionStatus
+            ? { textExtractionStatus: document.textExtractionStatus }
+            : {}),
+          ...(typeof document.wordCount === 'number'
+            ? { wordCount: document.wordCount }
+            : {}),
+          extractedSignals: document.extractedSignals,
+          ...(document.analysis
+            ? { validationJson: JSON.stringify(document.analysis) }
+            : {}),
+        })
+      }
       documentIdMap.set(document.id, documentId)
-      if (document.analysis) {
+      if (receiptBacked) {
+        // The consumed receipt owns these rows; preserve their IDs and blob link.
+      } else if (document.analysis) {
         const analysis = document.analysis
         const analysisId = await ctx.db.insert('documentAnalyses', {
           caseSessionId,
@@ -2222,8 +2345,74 @@ export const persistDocumentAnalysis = mutation({
         'Document page count does not match analysis',
       )
     }
-    if (JSON.stringify(args.analysis).length > 900_000) {
+    const serializedAnalysis = JSON.stringify(args.analysis)
+    if (serializedAnalysis.length > 900_000) {
       throw validationError('PDF analysis exceeds the simulator storage limit.')
+    }
+    const createdAt = new Date().toISOString()
+    const documentRowPayload = {
+      caseSessionId: args.caseSessionId,
+      storageId: receipt.storageId,
+      analysisId: generatedDocumentIdBudgetPlaceholder,
+      fileName: args.document.fileName,
+      mimeType: args.document.mimeType,
+      sizeBytes: args.document.sizeBytes,
+      sha256: receipt.sha256,
+      ...(typeof args.document.pageCount === 'number'
+        ? { pageCount: args.document.pageCount }
+        : {}),
+      ...(args.document.extractedText
+        ? { extractedText: args.document.extractedText }
+        : {}),
+      ...(args.document.textExtractionStatus
+        ? { textExtractionStatus: args.document.textExtractionStatus }
+        : {}),
+      ...(typeof args.document.wordCount === 'number'
+        ? { wordCount: args.document.wordCount }
+        : {}),
+      extractedSignals: args.document.extractedSignals,
+      validationJson: serializedAnalysis,
+    }
+    const analysisRowPayload = {
+      caseSessionId: args.caseSessionId,
+      documentId: generatedDocumentIdBudgetPlaceholder,
+      analyzerId: args.analysis.analyzerId,
+      ...(typeof args.analysis.pageCount === 'number'
+        ? { pageCount: args.analysis.pageCount }
+        : {}),
+      fileSizeBytes: args.analysis.fileSizeBytes,
+      mimeType: args.analysis.mimeType,
+      searchableText: args.analysis.searchableText,
+      certificateOfServiceDetected: args.analysis.certificateOfServiceDetected,
+      certificateOfComplianceDetected:
+        args.analysis.certificateOfComplianceDetected,
+      sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
+      warnings: args.analysis.warnings,
+      analysisJson: serializedAnalysis,
+      ...(args.analysis.normalizedText
+        ? { extractedTextHash: hashText(args.analysis.normalizedText) }
+        : {}),
+      ...(typeof args.analysis.wordCount === 'number'
+        ? { wordCount: args.analysis.wordCount }
+        : {}),
+      ...(args.analysis.legalCitations
+        ? { citationCount: args.analysis.legalCitations.length }
+        : {}),
+      ...(args.analysis.recordCitations
+        ? { recordCitationCount: args.analysis.recordCitations.length }
+        : {}),
+      ...(args.analysis.appendixCitations
+        ? { appendixCitationCount: args.analysis.appendixCitations.length }
+        : {}),
+      createdAt,
+    }
+    if (
+      !fitsDocumentRowByteBudget(documentRowPayload) ||
+      !fitsDocumentRowByteBudget(analysisRowPayload)
+    ) {
+      throw validationError(
+        'Document analysis exceeds the simulator per-record storage limit.',
+      )
     }
     const storageId = receipt.storageId
     const metadata = await ctx.db.system.get('_storage', storageId)
@@ -2278,7 +2467,7 @@ export const persistDocumentAnalysis = mutation({
         ? { wordCount: args.document.wordCount }
         : {}),
       extractedSignals: args.document.extractedSignals,
-      validationJson: JSON.stringify(args.analysis),
+      validationJson: serializedAnalysis,
     })
     const analysisId = await ctx.db.insert('documentAnalyses', {
       caseSessionId: args.caseSessionId,
@@ -2295,7 +2484,7 @@ export const persistDocumentAnalysis = mutation({
         args.analysis.certificateOfComplianceDetected,
       sealedOrRedactionWarning: args.analysis.sealedOrRedactionWarning,
       warnings: args.analysis.warnings,
-      analysisJson: JSON.stringify(args.analysis),
+      analysisJson: serializedAnalysis,
       ...(typeof args.analysis.wordCount === 'number'
         ? { wordCount: args.analysis.wordCount }
         : {}),
@@ -2308,7 +2497,7 @@ export const persistDocumentAnalysis = mutation({
       ...(args.analysis.appendixCitations
         ? { appendixCitationCount: args.analysis.appendixCitations.length }
         : {}),
-      createdAt: new Date().toISOString(),
+      createdAt,
     })
     await ctx.db.patch(documentId, { analysisId })
 

@@ -91,6 +91,364 @@ function sha256(bytes: Uint8Array) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+function hasValidUtf8(bytes: Uint8Array) {
+  const isContinuation = (value: number | undefined) =>
+    value !== undefined && value >= 0x80 && value <= 0xbf
+  let index = 0
+  while (index < bytes.length) {
+    const first = bytes[index]!
+    if (first <= 0x7f) {
+      index += 1
+      continue
+    }
+    const second = bytes[index + 1]
+    const third = bytes[index + 2]
+    const fourth = bytes[index + 3]
+    if (first >= 0xc2 && first <= 0xdf) {
+      if (!isContinuation(second)) return false
+      index += 2
+      continue
+    }
+    if (first === 0xe0) {
+      if (
+        second === undefined ||
+        second < 0xa0 ||
+        second > 0xbf ||
+        !isContinuation(third)
+      ) {
+        return false
+      }
+      index += 3
+      continue
+    }
+    if ((first >= 0xe1 && first <= 0xec) || (first >= 0xee && first <= 0xef)) {
+      if (!isContinuation(second) || !isContinuation(third)) return false
+      index += 3
+      continue
+    }
+    if (first === 0xed) {
+      if (
+        second === undefined ||
+        second < 0x80 ||
+        second > 0x9f ||
+        !isContinuation(third)
+      ) {
+        return false
+      }
+      index += 3
+      continue
+    }
+    if (first === 0xf0) {
+      if (
+        second === undefined ||
+        second < 0x90 ||
+        second > 0xbf ||
+        !isContinuation(third) ||
+        !isContinuation(fourth)
+      ) {
+        return false
+      }
+      index += 4
+      continue
+    }
+    if (first >= 0xf1 && first <= 0xf3) {
+      if (
+        !isContinuation(second) ||
+        !isContinuation(third) ||
+        !isContinuation(fourth)
+      ) {
+        return false
+      }
+      index += 4
+      continue
+    }
+    if (first === 0xf4) {
+      if (
+        second === undefined ||
+        second < 0x80 ||
+        second > 0x8f ||
+        !isContinuation(third) ||
+        !isContinuation(fourth)
+      ) {
+        return false
+      }
+      index += 4
+      continue
+    }
+    return false
+  }
+  return true
+}
+
+const jsonWhitespace = (byte: number | undefined) =>
+  byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d
+
+function skipJsonWhitespace(bytes: Uint8Array, start: number) {
+  let index = start
+  while (jsonWhitespace(bytes[index])) index += 1
+  return index
+}
+
+function scanJsonString(bytes: Uint8Array, start: number): number | undefined {
+  if (bytes[start] !== 0x22) return undefined
+  let index = start + 1
+  while (index < bytes.length) {
+    const byte = bytes[index]!
+    if (byte === 0x22) return index + 1
+    if (byte < 0x20) return undefined
+    if (byte !== 0x5c) {
+      index += 1
+      continue
+    }
+    index += 1
+    const escaped = bytes[index]
+    if (
+      escaped === 0x22 ||
+      escaped === 0x5c ||
+      escaped === 0x2f ||
+      escaped === 0x62 ||
+      escaped === 0x66 ||
+      escaped === 0x6e ||
+      escaped === 0x72 ||
+      escaped === 0x74
+    ) {
+      index += 1
+      continue
+    }
+    if (escaped !== 0x75 || index + 4 >= bytes.length) return undefined
+    for (let digit = 1; digit <= 4; digit += 1) {
+      const hex = bytes[index + digit]!
+      if (
+        !(
+          (hex >= 0x30 && hex <= 0x39) ||
+          (hex >= 0x41 && hex <= 0x46) ||
+          (hex >= 0x61 && hex <= 0x66)
+        )
+      ) {
+        return undefined
+      }
+    }
+    index += 5
+  }
+  return undefined
+}
+
+function scanJsonNumber(bytes: Uint8Array, start: number): number | undefined {
+  let index = start
+  if (bytes[index] === 0x2d) index += 1
+  const firstDigit = bytes[index]
+  if (firstDigit === 0x30) {
+    index += 1
+  } else if (
+    firstDigit !== undefined &&
+    firstDigit >= 0x31 &&
+    firstDigit <= 0x39
+  ) {
+    index += 1
+    while (
+      bytes[index] !== undefined &&
+      bytes[index]! >= 0x30 &&
+      bytes[index]! <= 0x39
+    ) {
+      index += 1
+    }
+  } else {
+    return undefined
+  }
+  if (bytes[index] === 0x2e) {
+    index += 1
+    if (
+      bytes[index] === undefined ||
+      bytes[index]! < 0x30 ||
+      bytes[index]! > 0x39
+    ) {
+      return undefined
+    }
+    while (
+      bytes[index] !== undefined &&
+      bytes[index]! >= 0x30 &&
+      bytes[index]! <= 0x39
+    ) {
+      index += 1
+    }
+  }
+  if (bytes[index] === 0x65 || bytes[index] === 0x45) {
+    index += 1
+    if (bytes[index] === 0x2b || bytes[index] === 0x2d) index += 1
+    if (
+      bytes[index] === undefined ||
+      bytes[index]! < 0x30 ||
+      bytes[index]! > 0x39
+    ) {
+      return undefined
+    }
+    while (
+      bytes[index] !== undefined &&
+      bytes[index]! >= 0x30 &&
+      bytes[index]! <= 0x39
+    ) {
+      index += 1
+    }
+  }
+  return index
+}
+
+function scanJsonValue(bytes: Uint8Array, start: number): number | undefined {
+  const byte = bytes[start]
+  if (byte === 0x22) return scanJsonString(bytes, start)
+  if (byte === 0x5b || byte === 0x7b) return start + 1
+  if (byte === 0x2d || (byte !== undefined && byte >= 0x30 && byte <= 0x39)) {
+    return scanJsonNumber(bytes, start)
+  }
+  const literal =
+    byte === 0x74
+      ? 'true'
+      : byte === 0x66
+        ? 'false'
+        : byte === 0x6e
+          ? 'null'
+          : undefined
+  if (!literal || start + literal.length > bytes.length) return undefined
+  for (let offset = 0; offset < literal.length; offset += 1) {
+    if (bytes[start + offset] !== literal.charCodeAt(offset)) return undefined
+  }
+  return start + literal.length
+}
+
+function hasValidJson(bytes: Uint8Array) {
+  const arrayFirst = 1
+  const arrayValue = 2
+  const arrayAfterValue = 3
+  const objectFirst = 4
+  const objectKey = 5
+  const objectColon = 6
+  const objectValue = 7
+  const objectAfterValue = 8
+  const maxDepth = Math.floor(bytes.length / 2)
+  let frames = new Uint8Array(Math.min(maxDepth, 32))
+  let depth = 0
+  let rootState = 0
+  let index = skipJsonWhitespace(
+    bytes,
+    bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0,
+  )
+
+  const pushFrame = (state: number) => {
+    if (depth === maxDepth) return false
+    if (depth === frames.length) {
+      const nextCapacity = Math.min(maxDepth, Math.max(1, frames.length * 2))
+      const next = new Uint8Array(nextCapacity)
+      next.set(frames)
+      frames = next
+    }
+    frames[depth] = state
+    depth += 1
+    return true
+  }
+
+  while (true) {
+    index = skipJsonWhitespace(bytes, index)
+    if (rootState === 0) {
+      const next = scanJsonValue(bytes, index)
+      if (next === undefined) return false
+      rootState = 1
+      index = next
+      const first = bytes[index - 1]
+      if (first === 0x5b) {
+        if (!pushFrame(arrayFirst)) return false
+      } else if (first === 0x7b) {
+        if (!pushFrame(objectFirst)) return false
+      } else {
+        rootState = 2
+      }
+      continue
+    }
+    if (rootState === 2) return index === bytes.length
+    if (depth === 0) {
+      rootState = 2
+      continue
+    }
+
+    const frameIndex = depth - 1
+    const state = frames[frameIndex]!
+    const byte = bytes[index]
+    if (state === arrayFirst || state === arrayValue) {
+      if (state === arrayFirst && byte === 0x5d) {
+        depth -= 1
+        index += 1
+        if (depth === 0) rootState = 2
+        continue
+      }
+      const next = scanJsonValue(bytes, index)
+      if (next === undefined) return false
+      frames[frameIndex] = arrayAfterValue
+      index = next
+      const first = bytes[index - 1]
+      if (first === 0x5b) {
+        if (!pushFrame(arrayFirst)) return false
+      } else if (first === 0x7b) {
+        if (!pushFrame(objectFirst)) return false
+      }
+      continue
+    }
+    if (state === arrayAfterValue) {
+      if (byte === 0x2c) {
+        frames[frameIndex] = arrayValue
+        index += 1
+      } else if (byte === 0x5d) {
+        depth -= 1
+        index += 1
+        if (depth === 0) rootState = 2
+      } else {
+        return false
+      }
+      continue
+    }
+    if (state === objectFirst || state === objectKey) {
+      if (state === objectFirst && byte === 0x7d) {
+        depth -= 1
+        index += 1
+        if (depth === 0) rootState = 2
+        continue
+      }
+      const next = scanJsonString(bytes, index)
+      if (next === undefined) return false
+      frames[frameIndex] = objectColon
+      index = next
+      continue
+    }
+    if (state === objectColon) {
+      if (byte !== 0x3a) return false
+      frames[frameIndex] = objectValue
+      index += 1
+      continue
+    }
+    if (state === objectValue) {
+      const next = scanJsonValue(bytes, index)
+      if (next === undefined) return false
+      frames[frameIndex] = objectAfterValue
+      index = next
+      const first = bytes[index - 1]
+      if (first === 0x5b) {
+        if (!pushFrame(arrayFirst)) return false
+      } else if (first === 0x7b) {
+        if (!pushFrame(objectFirst)) return false
+      }
+      continue
+    }
+    if (byte === 0x2c) {
+      frames[frameIndex] = objectKey
+      index += 1
+    } else if (byte === 0x7d) {
+      depth -= 1
+      index += 1
+      if (depth === 0) rootState = 2
+    } else {
+      return false
+    }
+  }
+}
+
 function assertContentType(bytes: Uint8Array, mimeType: string) {
   if (mimeType === 'application/pdf') {
     if (
@@ -105,18 +463,11 @@ function assertContentType(bytes: Uint8Array, mimeType: string) {
     }
     return
   }
-  let text: string
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-  } catch {
+  if (!hasValidUtf8(bytes)) {
     throw validationError('Text upload content is not valid UTF-8.')
   }
-  if (mimeType === 'application/json') {
-    try {
-      JSON.parse(text)
-    } catch {
-      throw validationError('JSON upload content is not valid JSON.')
-    }
+  if (mimeType === 'application/json' && !hasValidJson(bytes)) {
+    throw validationError('JSON upload content is not valid JSON.')
   }
 }
 

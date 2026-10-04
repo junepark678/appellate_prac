@@ -133,7 +133,7 @@ async function readBoundedBody(request: Request, expectedBytes: number) {
   }
   if (!request.body) throw validationError('Upload chunk body is required.')
 
-  const pieces: Uint8Array[] = []
+  const bytes = new Uint8Array(expectedBytes)
   let received = 0
   const reader = request.body.getReader()
   try {
@@ -141,27 +141,22 @@ async function readBoundedBody(request: Request, expectedBytes: number) {
       const { done, value } = await reader.read()
       if (done) break
       if (!value) continue
-      received += value.byteLength
-      if (received > expectedBytes || received > maxChunkBytes) {
+      if (
+        value.byteLength > expectedBytes - received ||
+        value.byteLength > maxChunkBytes - received
+      ) {
         await reader.cancel()
         const error = validationError('Upload chunk exceeds its expected size.')
         throw Object.assign(error, { httpStatus: 413 })
       }
-      pieces.push(value)
+      bytes.set(value, received)
+      received += value.byteLength
     }
   } finally {
     reader.releaseLock()
   }
   if (received !== expectedBytes)
     throw validationError('Upload chunk size does not match its intent.')
-
-  const bytes = new Uint8Array(received)
-  let offset = 0
-  for (const piece of pieces) {
-    bytes.set(piece, offset)
-    offset += piece.byteLength
-  }
-  pieces.length = 0
   return bytes
 }
 
