@@ -17,33 +17,206 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { createFileRoute, Link } from '@tanstack/react-router'
-import { useMutation, useQuery } from 'convex/react'
-import { Play, Send } from 'lucide-react'
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMutation, useQuery } from "convex/react";
+import { Play, Send } from "lucide-react";
 
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
-import { AppFrame, EmptyState } from '../components/AppFrame'
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { AppFrame, EmptyState } from "../components/AppFrame";
+import {
+  type OrganizationContextCapture,
+  useOrganizationContext,
+} from "../components/OrganizationContext";
 
-export const Route = createFileRoute('/app/assignments/$assignmentId')({
+export const Route = createFileRoute("/app/assignments/$assignmentId")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    cohortId: typeof search.cohortId === "string" ? search.cohortId : undefined,
+    organizationId:
+      typeof search.organizationId === "string"
+        ? search.organizationId
+        : undefined,
+  }),
   component: AssignmentDetail,
-})
+});
 
 function AssignmentDetail() {
-  const { assignmentId } = Route.useParams()
-  const assignment = useQuery(api.assignments.get, {
-    assignmentId: assignmentId as Id<'assignments'>,
-  })
-  const startSession = useMutation(api.assignments.startSession)
-  const submitSession = useMutation(api.assignments.submitSession)
+  const { assignmentId } = Route.useParams();
+  const { cohortId } = Route.useSearch();
+  return (
+    <AssignmentDetailPage
+      assignmentId={assignmentId as Id<"assignments">}
+      cohortId={cohortId}
+    />
+  );
+}
 
-  if (assignment === undefined) return <AppFrame title="Assignment">Loading</AppFrame>
+export function AssignmentDetailPage({
+  assignmentId,
+  cohortId,
+}: {
+  assignmentId: Id<"assignments">;
+  cohortId?: string;
+}) {
+  const organization = useOrganizationContext();
+  const capture = organization.captureOrganizationContext();
+  const canStudy =
+    organization.status === "ready" &&
+    capture !== null &&
+    organization.capabilities.learn &&
+    organization.isCurrentOrganizationContext(capture);
+
+  if (organization.status === "ready" && !organization.capabilities.learn) {
+    return (
+      <AppFrame title="Assignment">
+        <p
+          role="alert"
+          className="rounded border border-amber-300 bg-amber-50 p-4 text-sm"
+        >
+          Study is unavailable for this organization membership.
+        </p>
+      </AppFrame>
+    );
+  }
+
+  if (!canStudy || !capture) {
+    return (
+      <AppFrame title="Assignment">
+        <p role="status">Loading selected organization…</p>
+      </AppFrame>
+    );
+  }
+
+  return (
+    <AssignmentDetailForOrganization
+      key={`${scopeKey(capture)}:${String(assignmentId)}`}
+      capture={capture}
+      assignmentId={assignmentId}
+      cohortId={cohortId}
+    />
+  );
+}
+
+function AssignmentDetailForOrganization({
+  capture,
+  assignmentId,
+  cohortId,
+}: {
+  capture: OrganizationContextCapture;
+  assignmentId: Id<"assignments">;
+  cohortId?: string;
+}) {
+  const organization = useOrganizationContext();
+  const isCurrent = organization.isCurrentOrganizationContext(capture);
+  const cohortsQuery = useQuery(
+    api.cohorts.listMine,
+    isCurrent && cohortId ? { institutionId: capture.organizationId } : "skip",
+  );
+  const selectedCohort =
+    isCurrent && cohortId
+      ? cohortsQuery?.find(
+          (cohort) =>
+            String(cohort.id) === cohortId &&
+            cohort.institutionId === capture.organizationId,
+        )
+      : undefined;
+  const cohortAssignments = useQuery(
+    api.assignments.listForCohort,
+    selectedCohort ? { cohortId: selectedCohort.id } : "skip",
+  );
+  const assignmentSummary =
+    isCurrent && selectedCohort
+      ? cohortAssignments?.find(
+          (assignment) =>
+            assignment.id === assignmentId && assignment.published,
+        )
+      : undefined;
+  const assignment = useQuery(
+    api.assignments.get,
+    assignmentSummary ? { assignmentId } : "skip",
+  );
+  const startSession = useMutation(api.assignments.startSession);
+  const submitSession = useMutation(api.assignments.submitSession);
+  const canMutate =
+    isCurrent && Boolean(assignmentSummary) && Boolean(assignment);
+  const visibleAssignment = canMutate ? assignment : undefined;
+
+  async function startAssignmentSession() {
+    if (!canMutate || !organization.isCurrentOrganizationContext(capture))
+      return;
+    await startSession({ assignmentId });
+  }
+
+  async function submitAssignmentSession() {
+    if (
+      !visibleAssignment?.caseSessionId ||
+      !organization.isCurrentOrganizationContext(capture)
+    ) {
+      return;
+    }
+    await submitSession({
+      assignmentId,
+      caseSessionId: visibleAssignment.caseSessionId,
+    });
+  }
+
+  if (!isCurrent) {
+    return (
+      <AppFrame title="Assignment">
+        <p role="status">Loading assignment…</p>
+      </AppFrame>
+    );
+  }
+  if (!cohortId) {
+    return (
+      <AppFrame title="Assignment">
+        <EmptyState>
+          Open this assignment from Study to confirm its organization.
+        </EmptyState>
+      </AppFrame>
+    );
+  }
+  if (cohortsQuery === undefined) {
+    return (
+      <AppFrame title="Assignment">
+        <p role="status">Loading course…</p>
+      </AppFrame>
+    );
+  }
+  if (!selectedCohort) {
+    return (
+      <AppFrame title="Assignment">
+        <EmptyState>Assignment not found in this organization.</EmptyState>
+      </AppFrame>
+    );
+  }
+  if (cohortAssignments === undefined) {
+    return (
+      <AppFrame title="Assignment">
+        <p role="status">Loading assignment…</p>
+      </AppFrame>
+    );
+  }
+  if (!assignmentSummary) {
+    return (
+      <AppFrame title="Assignment">
+        <EmptyState>Assignment not found in this organization.</EmptyState>
+      </AppFrame>
+    );
+  }
+  if (assignment === undefined) {
+    return (
+      <AppFrame title="Assignment">
+        <p role="status">Loading assignment…</p>
+      </AppFrame>
+    );
+  }
   if (assignment === null) {
     return (
       <AppFrame title="Assignment">
-        <EmptyState>Assignment not found.</EmptyState>
+        <EmptyState>Assignment not found in this organization.</EmptyState>
       </AppFrame>
-    )
+    );
   }
 
   return (
@@ -54,22 +227,28 @@ function AssignmentDetail() {
           <dl className="mt-4 grid gap-3 text-sm md:grid-cols-2">
             <div>
               <dt className="font-medium">Due</dt>
-              <dd className="text-slate-600">{assignment.dueAt ?? 'No due date'}</dd>
+              <dd className="text-slate-600">
+                {assignment.dueAt ?? "No due date"}
+              </dd>
             </div>
             <div>
               <dt className="font-medium">Autonomy</dt>
-              <dd className="text-slate-600">{assignment.autonomyMode ?? 'paused'}</dd>
+              <dd className="text-slate-600">
+                {assignment.autonomyMode ?? "paused"}
+              </dd>
             </div>
             <div>
               <dt className="font-medium">Status</dt>
-              <dd className="text-slate-600">{assignment.status.replaceAll('_', ' ')}</dd>
+              <dd className="text-slate-600">
+                {assignment.status.replaceAll("_", " ")}
+              </dd>
             </div>
             <div>
               <dt className="font-medium">AI budget cap</dt>
               <dd className="text-slate-600">
-                {typeof assignment.budgetCapCents === 'number'
+                {typeof assignment.budgetCapCents === "number"
                   ? `$${(assignment.budgetCapCents / 100).toFixed(2)}`
-                  : 'Default'}
+                  : "Default"}
               </dd>
             </div>
           </dl>
@@ -80,22 +259,21 @@ function AssignmentDetail() {
               <Link
                 to="/app/sessions/$caseSessionId"
                 params={{ caseSessionId: assignment.caseSessionId }}
+                search={{ organizationId: String(capture.organizationId) }}
                 className="inline-flex items-center justify-center gap-2 rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white"
               >
                 <Play className="h-4 w-4" aria-hidden="true" />
                 Open session
               </Link>
               <button
-                disabled={assignment.status === 'submitted' || assignment.status === 'reviewed'}
-                className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() =>
-                  assignment.caseSessionId
-                    ? void submitSession({
-                        assignmentId: assignment.id as Id<'assignments'>,
-                        caseSessionId: assignment.caseSessionId,
-                      })
-                    : undefined
+                type="button"
+                disabled={
+                  !canMutate ||
+                  assignment.status === "submitted" ||
+                  assignment.status === "reviewed"
                 }
+                className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void submitAssignmentSession()}
               >
                 <Send className="h-4 w-4" aria-hidden="true" />
                 Submit
@@ -103,20 +281,26 @@ function AssignmentDetail() {
             </div>
           ) : (
             <button
-              className="inline-flex w-full items-center justify-center gap-2 rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white"
-              onClick={() =>
-                void startSession({ assignmentId: assignment.id as Id<'assignments'> })
-              }
+              type="button"
+              className="inline-flex w-full items-center justify-center gap-2 rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              disabled={!canMutate}
+              onClick={() => void startAssignmentSession()}
             >
               <Play className="h-4 w-4" aria-hidden="true" />
               Start session
             </button>
           )}
           {assignment.instructorNote ? (
-            <p className="mt-4 text-sm text-slate-700">{assignment.instructorNote}</p>
+            <p className="mt-4 text-sm text-slate-700">
+              {assignment.instructorNote}
+            </p>
           ) : null}
         </aside>
       </section>
     </AppFrame>
-  )
+  );
+}
+
+function scopeKey(capture: OrganizationContextCapture) {
+  return `${String(capture.organizationId)}:${capture.generation}`;
 }

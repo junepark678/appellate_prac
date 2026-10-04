@@ -25,6 +25,10 @@ import { useState } from "react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { AppFrame, EmptyState } from "../components/AppFrame";
+import {
+  type OrganizationContextCapture,
+  useOrganizationContext,
+} from "../components/OrganizationContext";
 
 export const Route = createFileRoute("/instructor/cohorts/$cohortId")({
   component: CohortDetail,
@@ -38,31 +42,89 @@ function CohortDetail() {
   return <CohortDetailPage cohortId={cohortId as Id<"cohorts">} />;
 }
 
-export function CohortDetailPage({
+export function CohortDetailPage({ cohortId }: { cohortId: Id<"cohorts"> }) {
+  const organization = useOrganizationContext();
+  const capture = organization.captureOrganizationContext();
+  const hasTeachingAccess =
+    organization.status === "ready" &&
+    capture !== null &&
+    organization.capabilities.teach &&
+    organization.isCurrentOrganizationContext(capture);
+
+  if (organization.status === "ready" && !organization.capabilities.teach) {
+    return (
+      <AppFrame title="Course">
+        <p
+          role="alert"
+          className="rounded border border-amber-300 bg-amber-50 p-4 text-sm"
+        >
+          This course is available to instructors and organization admins.
+        </p>
+      </AppFrame>
+    );
+  }
+
+  if (!hasTeachingAccess || !capture) {
+    return (
+      <AppFrame title="Course">
+        <p role="status">Loading selected organization…</p>
+      </AppFrame>
+    );
+  }
+
+  return (
+    <CohortDetailForOrganization
+      key={`${scopeKey(capture)}:${String(cohortId)}`}
+      capture={capture}
+      cohortId={cohortId}
+    />
+  );
+}
+
+function CohortDetailForOrganization({
+  capture,
   cohortId,
 }: {
+  capture: OrganizationContextCapture;
   cohortId: Id<"cohorts">;
 }) {
-  const cohorts = useQuery(api.cohorts.listMine, {});
-  const cohort = cohorts?.find((candidate) => candidate.id === cohortId);
-  const canManageCohort =
-    cohort?.role === "instructor" || cohort?.role === "admin";
-  const assignments = useQuery(api.assignments.listForCohort, {
-    cohortId,
-  });
+  const organization = useOrganizationContext();
+  const isCurrent = organization.isCurrentOrganizationContext(capture);
+  const cohortsQuery = useQuery(
+    api.cohorts.listMine,
+    isCurrent ? { institutionId: capture.organizationId } : "skip",
+  );
+  const cohort =
+    isCurrent && cohortsQuery !== undefined
+      ? cohortsQuery.find(
+          (candidate) =>
+            candidate.id === cohortId &&
+            candidate.institutionId === capture.organizationId,
+        )
+      : undefined;
+  const assignmentsQuery = useQuery(
+    api.assignments.listForCohort,
+    isCurrent && cohort ? { cohortId } : "skip",
+  );
   const roster = useQuery(
     api.cohorts.listRoster,
-    canManageCohort ? { cohortId } : "skip",
-  );
-  const scenarios = useQuery(
-    api.scenarios.listPublishedRecords,
-    canManageCohort ? {} : "skip",
+    isCurrent && cohort ? { cohortId } : "skip",
   );
   const createAssignment = useMutation(api.assignments.create);
-  const inviteMembers = useMutation(api.cohorts.inviteMembers);
-  const activeAssignments = assignments?.filter(
-    (assignment) => !assignment.archivedAt,
+  const publishedScenarios = useQuery(
+    api.scenarios.listPublishedRecords,
+    isCurrent && cohort ? {} : "skip",
   );
+  const inviteMembers = useMutation(api.cohorts.inviteMembers);
+  const activeAssignments =
+    isCurrent && cohort && assignmentsQuery !== undefined
+      ? assignmentsQuery.filter((assignment) => !assignment.archivedAt)
+      : undefined;
+  const role = organization.organization?.role;
+  const canInvite =
+    isCurrent &&
+    Boolean(cohort) &&
+    organization.organization?.kind === "shared";
   const [title, setTitle] = useState("");
   const [scenarioKey, setScenarioKey] = useState("");
   const [dueAt, setDueAt] = useState("");
@@ -75,15 +137,99 @@ export function CohortDetailPage({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<InviteRole>("learner");
   const [inviteToken, setInviteToken] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
   const allowedInviteRole: InviteRole =
-    cohort?.role === "admin" ? inviteRole : "learner";
+    role === "admin" ? inviteRole : "learner";
 
-  const createDisabled =
-    !title || !scenarioKey || Number(budgetCapDollars || 0) < 0;
+  async function submitAssignment() {
+    if (!cohort || !isCurrent || !title.trim() || !scenarioKey) return;
+    setPending(true);
+    setError("");
+    try {
+      await createAssignment({
+        cohortId,
+        scenarioKey,
+        title: title.trim(),
+        published: publishImmediately,
+        autonomyMode,
+        ...(dueAt ? { dueAt: new Date(dueAt).toISOString() } : {}),
+        ...(rubricId ? { rubricId } : {}),
+        ...(budgetCapDollars
+          ? { budgetCapCents: Math.round(Number(budgetCapDollars) * 100) }
+          : {}),
+        hideAiReasoning,
+      });
+      if (organization.isCurrentOrganizationContext(capture)) {
+        setTitle("");
+        setDueAt("");
+        setScenarioKey("");
+        setPublishImmediately(false);
+      }
+    } catch (cause) {
+      if (organization.isCurrentOrganizationContext(capture)) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Unable to create assignment",
+        );
+      }
+    } finally {
+      if (organization.isCurrentOrganizationContext(capture)) setPending(false);
+    }
+  }
+
+  async function submitInvitation() {
+    if (!cohort || !canInvite || !inviteEmail.trim() || !isCurrent) return;
+    setPending(true);
+    setError("");
+    try {
+      const result = await inviteMembers({
+        institutionId: capture.organizationId,
+        cohortId,
+        invites: [{ email: inviteEmail.trim(), role: allowedInviteRole }],
+      });
+      if (!organization.isCurrentOrganizationContext(capture)) return;
+      setInviteToken(result[0]?.token ?? "");
+      setInviteEmail("");
+    } catch (cause) {
+      if (organization.isCurrentOrganizationContext(capture)) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "Unable to create invitation",
+        );
+      }
+    } finally {
+      if (organization.isCurrentOrganizationContext(capture)) setPending(false);
+    }
+  }
+
+  if (cohortsQuery === undefined || !isCurrent) {
+    return (
+      <AppFrame title="Course">
+        <p role="status">Loading course…</p>
+      </AppFrame>
+    );
+  }
+  if (!cohort) {
+    return (
+      <AppFrame title="Course">
+        <EmptyState>Course not found in this organization.</EmptyState>
+      </AppFrame>
+    );
+  }
 
   return (
-    <AppFrame title={cohort?.title ?? "Cohort"}>
-      {canManageCohort && (
+    <AppFrame title={cohort.title}>
+      {error ? (
+        <p
+          role="alert"
+          className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800"
+        >
+          {error}
+        </p>
+      ) : null}
       <section className="mb-5 grid gap-4 lg:grid-cols-2">
         <div className="rounded border border-slate-200 bg-white p-4">
           <h2 className="font-semibold">Create assignment</h2>
@@ -93,6 +239,7 @@ export function CohortDetailPage({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               placeholder="Assignment title"
+              aria-label="Assignment title"
             />
             <select
               className="rounded border border-slate-300 px-3 py-2"
@@ -101,7 +248,7 @@ export function CohortDetailPage({
               aria-label="Scenario"
             >
               <option value="">Scenario</option>
-              {scenarios?.map((scenario) => (
+              {publishedScenarios?.map((scenario) => (
                 <option key={scenario.scenarioKey} value={scenario.scenarioKey}>
                   {scenario.title}
                 </option>
@@ -124,6 +271,7 @@ export function CohortDetailPage({
                   value={rubricId}
                   onChange={(event) => setRubricId(event.target.value)}
                   placeholder="Rubric id"
+                  aria-label="Rubric"
                 />
               </label>
             </div>
@@ -138,6 +286,7 @@ export function CohortDetailPage({
                       event.target.value as AssignmentAutonomyMode,
                     )
                   }
+                  aria-label="Simulation mode"
                 >
                   <option value="paused">Paused</option>
                   <option value="supervised">Supervised</option>
@@ -154,6 +303,7 @@ export function CohortDetailPage({
                   value={budgetCapDollars}
                   onChange={(event) => setBudgetCapDollars(event.target.value)}
                   placeholder="Default"
+                  aria-label="AI budget cap"
                 />
               </label>
             </div>
@@ -177,90 +327,64 @@ export function CohortDetailPage({
             </label>
             <button
               className="inline-flex items-center justify-center gap-2 rounded bg-slate-950 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-              disabled={createDisabled}
-              onClick={() =>
-                void createAssignment({
-                  cohortId: cohortId as Id<"cohorts">,
-                  scenarioKey,
-                  title,
-                  published: publishImmediately,
-                  autonomyMode,
-                  ...(dueAt ? { dueAt: new Date(dueAt).toISOString() } : {}),
-                  ...(rubricId ? { rubricId } : {}),
-                  ...(budgetCapDollars
-                    ? {
-                        budgetCapCents: Math.round(
-                          Number(budgetCapDollars) * 100,
-                        ),
-                      }
-                    : {}),
-                  hideAiReasoning,
-                }).then(() => {
-                  setTitle("");
-                  setDueAt("");
-                  setScenarioKey("");
-                  setPublishImmediately(false);
-                })
+              disabled={
+                !isCurrent ||
+                pending ||
+                !title.trim() ||
+                !scenarioKey ||
+                publishedScenarios === undefined ||
+                Number(budgetCapDollars || 0) < 0
               }
+              onClick={() => void submitAssignment()}
+              type="button"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
               {publishImmediately ? "Create and publish" : "Create draft"}
             </button>
           </div>
         </div>
-        <div className="rounded border border-slate-200 bg-white p-4">
-          <h2 className="font-semibold">Invite collaborators</h2>
-          <div className="mt-3 grid gap-2">
-            <input
-              className="rounded border border-slate-300 px-3 py-2"
-              value={inviteEmail}
-              onChange={(event) => setInviteEmail(event.target.value)}
-              placeholder="account@example.edu"
-            />
-            <select
-              className="rounded border border-slate-300 px-3 py-2"
-              value={allowedInviteRole}
-              onChange={(event) =>
-                setInviteRole(event.target.value as InviteRole)
-              }
-              aria-label="Invite role"
-            >
-              <option value="learner">Learner</option>
-              {cohort?.role === "admin" ? (
-                <option value="instructor">Instructor</option>
+        {canInvite ? (
+          <div className="rounded border border-slate-200 bg-white p-4">
+            <h2 className="font-semibold">Invite collaborators</h2>
+            <div className="mt-3 grid gap-2">
+              <input
+                className="rounded border border-slate-300 px-3 py-2"
+                value={inviteEmail}
+                onChange={(event) => setInviteEmail(event.target.value)}
+                placeholder="account@example.edu"
+                aria-label="Invitation email"
+              />
+              <select
+                className="rounded border border-slate-300 px-3 py-2"
+                value={allowedInviteRole}
+                onChange={(event) =>
+                  setInviteRole(event.target.value as InviteRole)
+                }
+                aria-label="Invite role"
+              >
+                <option value="learner">Learner</option>
+                {role === "admin" ? (
+                  <option value="instructor">Instructor</option>
+                ) : null}
+              </select>
+              <button
+                className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50"
+                disabled={!isCurrent || pending || !inviteEmail.trim()}
+                onClick={() => void submitInvitation()}
+                type="button"
+              >
+                <UserPlus className="h-4 w-4" aria-hidden="true" />
+                Create invite
+              </button>
+              {inviteToken ? (
+                <p className="break-all rounded bg-slate-100 p-2 text-xs">
+                  {inviteToken}
+                </p>
               ) : null}
-            </select>
-            <button
-              className="inline-flex items-center justify-center gap-2 rounded border border-slate-300 px-3 py-2 text-sm font-medium disabled:opacity-50"
-              disabled={!inviteEmail || !cohort}
-              onClick={() =>
-                cohort
-                  ? void inviteMembers({
-                      institutionId: cohort.institutionId,
-                      cohortId: cohortId as Id<"cohorts">,
-                      invites: [
-                        { email: inviteEmail, role: allowedInviteRole },
-                      ],
-                    }).then((result) => {
-                      setInviteToken(result[0]?.token ?? "");
-                      setInviteEmail("");
-                    })
-                  : undefined
-              }
-            >
-              <UserPlus className="h-4 w-4" aria-hidden="true" />
-              Create invite
-            </button>
-            {inviteToken ? (
-              <p className="break-all rounded bg-slate-100 p-2 text-xs">
-                {inviteToken}
-              </p>
-            ) : null}
+            </div>
           </div>
-        </div>
+        ) : null}
       </section>
-      )}
-      {canManageCohort && (
       <section className="mb-5 rounded border border-slate-200 bg-white">
         <div className="flex items-center gap-2 border-b border-slate-200 p-4">
           <Users className="h-4 w-4" aria-hidden="true" />
@@ -274,12 +398,13 @@ export function CohortDetailPage({
               className="grid gap-2 p-4 text-sm md:grid-cols-[1fr_160px]"
             >
               <p className="font-medium">{member.displayName}</p>
-              <p className="text-slate-600">{member.organizationRole}</p>
+              <p className="text-slate-600">
+                Organization role: {member.organizationRole}
+              </p>
             </div>
           ))}
         </div>
       </section>
-      )}
       <div className="grid gap-3">
         {activeAssignments?.length === 0 ? (
           <EmptyState>No assignments yet.</EmptyState>
@@ -289,6 +414,10 @@ export function CohortDetailPage({
             key={assignment.id}
             to="/instructor/assignments/$assignmentId"
             params={{ assignmentId: assignment.id }}
+            search={{
+              organizationId: String(capture.organizationId),
+              cohortId: String(cohortId),
+            }}
             className="rounded border border-slate-200 bg-white p-4 hover:border-slate-400"
           >
             <h2 className="font-semibold">{assignment.title}</h2>
@@ -304,4 +433,8 @@ export function CohortDetailPage({
       </div>
     </AppFrame>
   );
+}
+
+function scopeKey(capture: OrganizationContextCapture) {
+  return `${String(capture.organizationId)}:${capture.generation}`;
 }

@@ -20,11 +20,19 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
+import { getFunctionName } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const queryMocks = vi.hoisted(() => ({ useQuery: vi.fn() }));
+const queryMocks = vi.hoisted(() => ({
+  useQuery: vi.fn(),
+  context: null as Record<string, any> | null,
+}));
 
 vi.mock("convex/react", () => queryMocks);
+
+vi.mock("../components/OrganizationContext", () => ({
+  useOrganizationContext: () => queryMocks.context,
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual =
@@ -63,7 +71,31 @@ import {
   SessionRouteErrorBoundary,
 } from "./app.sessions.$caseSessionId";
 
-beforeEach(() => queryMocks.useQuery.mockReset());
+beforeEach(() => {
+  queryMocks.useQuery.mockReset();
+  queryMocks.context = {
+    organizationId: "organization-test",
+    organization: {
+      institutionId: "organization-test",
+      name: "Organization Test",
+      kind: "shared",
+      role: "learner",
+      capabilities: { learn: true, teach: false, manageMembers: false },
+    },
+    capabilities: { learn: true, teach: false, manageMembers: false },
+    status: "ready",
+    captureOrganizationContext: () => ({
+      organizationId: "organization-test",
+      generation: 1,
+    }),
+    isCurrentOrganizationContext: (capture: {
+      organizationId: string;
+      generation: number;
+    }) =>
+      capture.organizationId === "organization-test" &&
+      capture.generation === 1,
+  };
+});
 afterEach(() => cleanup());
 
 describe("session deep-link route errors", () => {
@@ -100,6 +132,31 @@ describe("session deep-link route errors", () => {
         { id: "deadline-1", label: "Opening brief", dueDate: "2026-11-01" },
       ],
       filings: [],
+    });
+
+    queryMocks.useQuery.mockImplementation((reference, args) => {
+      if (getFunctionName(reference) === "caseSessions:getForCurrentUser") {
+        expect(args).toEqual({
+          caseSessionId: "session-valid",
+          institutionId: "organization-test",
+        });
+      }
+      return {
+        scenario: { shortCaption: "Example v. State" },
+        docketEntries: [
+          {
+            id: "entry-1",
+            entryNumber: 1,
+            title: "Notice of appeal",
+            filedAt: "2026-10-01T00:00:00.000Z",
+            text: "Notice filed.",
+          },
+        ],
+        deadlines: [
+          { id: "deadline-1", label: "Opening brief", dueDate: "2026-11-01" },
+        ],
+        filings: [],
+      };
     });
 
     render(<SessionPage caseSessionId="session-valid" />);

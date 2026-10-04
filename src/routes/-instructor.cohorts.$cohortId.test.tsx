@@ -2,24 +2,17 @@
  * Appellate Practice Simulator — federal appellate procedure training.
  * Copyright (C) 2026 Rhajune Park
  * SPDX-License-Identifier: AGPL-3.0-or-later
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published
- * by the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { getFunctionName } from "convex/server";
 import type { Id } from "../../convex/_generated/dataModel";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,9 +20,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const queryMocks = vi.hoisted(() => ({
   useQuery: vi.fn(),
   useMutation: vi.fn(),
+  context: null as Record<string, any> | null,
 }));
 
 vi.mock("convex/react", () => queryMocks);
+
+vi.mock("../components/OrganizationContext", () => ({
+  useOrganizationContext: () => queryMocks.context,
+}));
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual =
@@ -39,6 +37,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
     ...actual,
     Link: ({ children }: { children: React.ReactNode }) =>
       React.createElement("a", { href: "#" }, children),
+    useRouterState: () => ({ location: { pathname: "/instructor" } }),
   };
 });
 
@@ -67,10 +66,41 @@ import { CohortDetailPage } from "./instructor.cohorts.$cohortId";
 import { InstructorDashboard } from "./instructor";
 
 const cohortId = "cohort-route-test" as Id<"cohorts">;
-const instructorInstitutionId =
-  "instructor-institution-test" as Id<"institutions">;
-const learnerInstitutionId = "learner-institution-test" as Id<"institutions">;
+const organizationId = "teaching-institution-test" as Id<"institutions">;
+const otherOrganizationId = "other-institution-test" as Id<"institutions">;
 let queryValues: Record<string, unknown>;
+
+function makeContext(role: "learner" | "instructor" | "admin") {
+  const generation = 1;
+  return {
+    organizationId,
+    organization: {
+      institutionId: organizationId,
+      name: "Teaching Institution",
+      kind: "shared",
+      role,
+      capabilities: {
+        learn: true,
+        teach: role !== "learner",
+        manageMembers: role === "admin",
+      },
+    },
+    capabilities: {
+      learn: true,
+      teach: role !== "learner",
+      manageMembers: role === "admin",
+    },
+    status: "ready",
+    captureOrganizationContext: () => ({ organizationId, generation }),
+    isCurrentOrganizationContext: (capture: {
+      organizationId: string;
+      generation: number;
+    }) =>
+      capture.organizationId === organizationId &&
+      capture.generation === generation,
+    registerOrganizationCancellation: () => () => undefined,
+  };
+}
 
 function setQueryValues(values: Record<string, unknown>) {
   queryValues = values;
@@ -86,12 +116,18 @@ function queryArgsFor(functionName: string) {
     .map(([, args]) => args);
 }
 
-function cohort(role: "learner" | "instructor" | "admin") {
+function cohort(
+  role: "learner" | "instructor" | "admin",
+  institutionId = organizationId,
+) {
   return {
     id: cohortId,
-    institutionId: instructorInstitutionId,
-    institutionName: "Teaching Institution",
-    title: "Civil Appeals Cohort",
+    institutionId,
+    institutionName:
+      institutionId === organizationId
+        ? "Teaching Institution"
+        : "Other Institution",
+    title: "Civil Appeals Course",
     term: "Fall 2026",
     role,
     archived: false,
@@ -118,158 +154,97 @@ function detailQueryValues(role?: "learner" | "instructor" | "admin") {
         organizationRole: "learner",
       },
     ],
-    "scenarios:listPublishedRecords": [
-      { scenarioKey: "synthetic-case", title: "Synthetic Case" },
-    ],
   };
 }
 
 beforeEach(() => {
   queryValues = {};
+  queryMocks.context = makeContext("instructor");
   queryMocks.useQuery.mockReset();
   queryMocks.useQuery.mockImplementation(
     (reference: Parameters<typeof getFunctionName>[0]) =>
       queryValues[getFunctionName(reference)],
   );
   queryMocks.useMutation.mockReset();
-  queryMocks.useMutation.mockImplementation(() => vi.fn());
+  queryMocks.useMutation.mockImplementation(() =>
+    vi.fn().mockResolvedValue(undefined),
+  );
 });
 
 afterEach(() => cleanup());
 
-describe("instructor cohort routes", () => {
-  it("skips instructor-only reads while the cohort role loads and for learners", () => {
-    setQueryValues(detailQueryValues());
-    const view = render(<CohortDetailPage cohortId={cohortId} />);
-
-    expect(queryArgsFor("cohorts:listRoster").at(-1)).toBe("skip");
-    expect(queryArgsFor("scenarios:listPublishedRecords").at(-1)).toBe("skip");
-    expect(queryArgsFor("assignments:listForCohort").at(-1)).toEqual({
-      cohortId,
-    });
-    expect(screen.queryByText("Create assignment")).toBeNull();
-    expect(screen.queryByText("Invite collaborators")).toBeNull();
-    expect(screen.queryByText("Roster")).toBeNull();
-
+describe("instructor course routes", () => {
+  it("denies direct course access to learners before course reads run", () => {
+    queryMocks.context = makeContext("learner");
     setQueryValues(detailQueryValues("learner"));
-    view.rerender(<CohortDetailPage cohortId={cohortId} />);
+    render(<CohortDetailPage cohortId={cohortId} />);
 
-    expect(
-      screen.getByRole("heading", { name: "Civil Appeals Cohort" }),
-    ).toBeTruthy();
-    expect(screen.getByText("Published learner assignment")).toBeTruthy();
-    expect(queryArgsFor("cohorts:listRoster").at(-1)).toBe("skip");
-    expect(queryArgsFor("scenarios:listPublishedRecords").at(-1)).toBe("skip");
-    expect(screen.queryByText("Create assignment")).toBeNull();
-    expect(screen.queryByText("Invite collaborators")).toBeNull();
-    expect(screen.queryByText("Roster")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /available to instructors/i,
+    );
+    expect(queryArgsFor("cohorts:listMine")).toHaveLength(0);
+    expect(queryArgsFor("assignments:listForCohort")).toHaveLength(0);
+    expect(queryArgsFor("cohorts:listRoster")).toHaveLength(0);
   });
 
   it.each(["instructor", "admin"] as const)(
-    "loads the roster and shows teaching controls for %s cohorts",
+    "loads selected organization course controls for %s memberships",
     (role) => {
+      queryMocks.context = makeContext(role);
       setQueryValues(detailQueryValues(role));
       render(<CohortDetailPage cohortId={cohortId} />);
 
+      expect(
+        screen.getByRole("heading", { name: "Civil Appeals Course" }),
+      ).toBeTruthy();
+      expect(queryArgsFor("cohorts:listMine").at(-1)).toEqual({
+        institutionId: "teaching-institution-test",
+      });
+      expect(queryArgsFor("assignments:listForCohort").at(-1)).toEqual({
+        cohortId,
+      });
       expect(queryArgsFor("cohorts:listRoster").at(-1)).toEqual({ cohortId });
-      expect(queryArgsFor("scenarios:listPublishedRecords").at(-1)).toEqual({});
       expect(screen.getByText("Create assignment")).toBeTruthy();
       expect(screen.getByText("Invite collaborators")).toBeTruthy();
-      expect(screen.getByText("Roster Member")).toBeTruthy();
-      const roleOptions = within(
+      expect(screen.getByText("Organization role: learner")).toBeTruthy();
+      const options = within(
         screen.getByRole("combobox", { name: "Invite role" }),
-      ).getAllByRole("option");
-      expect(roleOptions.map((option) => option.textContent)).toEqual(
+      )
+        .getAllByRole("option")
+        .map((option) => option.textContent);
+      expect(options).toEqual(
         role === "admin" ? ["Learner", "Instructor"] : ["Learner"],
       );
     },
   );
 
-  it("hides cohort creation and skips institution reads while learner capability is unresolved or absent", () => {
+  it("filters the course list to the selected organization and creates there", async () => {
+    queryMocks.context = makeContext("instructor");
     setQueryValues({
-      "cohorts:listMine": [cohort("learner")],
-      "organizations:listMine": undefined,
-      "cohorts:listInstitutions": [
-        {
-          id: learnerInstitutionId,
-          name: "Learner Institution",
-          slug: "learner-institution",
-          status: "active",
-        },
+      "cohorts:listMine": [
+        cohort("instructor"),
+        { ...cohort("admin", otherOrganizationId), id: "foreign-course" },
       ],
     });
-    const view = render(<InstructorDashboard />);
+    const createCohort = vi.fn().mockResolvedValue(undefined);
+    queryMocks.useMutation.mockReturnValue(createCohort);
+    render(<InstructorDashboard />);
 
-    expect(queryArgsFor("cohorts:listInstitutions").at(-1)).toBe("skip");
-    expect(screen.queryByText("Create cohort")).toBeNull();
-    expect(screen.getByText("Civil Appeals Cohort")).toBeTruthy();
-
-    setQueryValues({
-      "cohorts:listMine": [cohort("learner")],
-      "organizations:listMine": [
-        {
-          institutionId: learnerInstitutionId,
-          name: "Learner Institution",
-          kind: "shared",
-          role: "learner",
-        },
-      ],
-      "cohorts:listInstitutions": [],
+    expect(screen.getByText("Civil Appeals Course")).toBeTruthy();
+    expect(screen.queryByText("Other Institution")).toBeNull();
+    expect(queryArgsFor("cohorts:listMine").at(-1)).toEqual({
+      institutionId: "teaching-institution-test",
     });
-    view.rerender(<InstructorDashboard />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Course title" }), {
+      target: { value: "Selected organization course" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
-    expect(queryArgsFor("cohorts:listInstitutions").at(-1)).toBe("skip");
-    expect(screen.queryByText("Create cohort")).toBeNull();
-    expect(screen.getByText("Civil Appeals Cohort")).toBeTruthy();
+    expect(createCohort).toHaveBeenCalledWith(
+      expect.objectContaining({
+        institutionId: organizationId,
+        title: "Selected organization course",
+      }),
+    );
   });
-
-  it.each(["instructor", "admin"] as const)(
-    "limits cohort creation choices to institutions where the actor is %s or admin",
-    (role) => {
-      setQueryValues({
-        "cohorts:listMine": [cohort(role)],
-        "organizations:listMine": [
-          {
-            institutionId: instructorInstitutionId,
-            name: "Teaching Institution",
-            kind: "shared",
-            role,
-          },
-          {
-            institutionId: learnerInstitutionId,
-            name: "Learner Institution",
-            kind: "shared",
-            role: "learner",
-          },
-        ],
-        "cohorts:listInstitutions": [
-          {
-            id: instructorInstitutionId,
-            name: "Teaching Institution",
-            slug: "teaching-institution",
-            status: "active",
-          },
-          {
-            id: learnerInstitutionId,
-            name: "Learner Institution",
-            slug: "learner-institution",
-            status: "active",
-          },
-        ],
-      });
-      render(<InstructorDashboard />);
-
-      expect(queryArgsFor("cohorts:listInstitutions").at(-1)).toEqual({});
-      expect(screen.getByText("Create cohort")).toBeTruthy();
-      const institutionOptions = within(
-        screen.getByRole("combobox", { name: "Institution" }),
-      )
-        .getAllByRole("option")
-        .map((option) => option.textContent);
-      expect(institutionOptions).toEqual([
-        "Institution",
-        "Teaching Institution",
-      ]);
-    },
-  );
 });
