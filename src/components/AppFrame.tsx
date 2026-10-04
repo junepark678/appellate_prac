@@ -38,6 +38,17 @@ import {
 
 import { useOrganizationContext } from "./OrganizationContext";
 
+function organizationSearch(
+  previous: Record<string, unknown>,
+  organizationId: string | null,
+) {
+  const search = { ...previous };
+  delete search.organizationId;
+  return organizationId
+    ? { ...search, organizationId }
+    : { ...search, organizationId: undefined };
+}
+
 export function AppFrame({
   title,
   children,
@@ -88,12 +99,7 @@ export function AppFrame({
           <Link
             to="/app"
             search={(previous) =>
-              organizationContext.organizationId
-                ? {
-                    ...previous,
-                    organizationId: organizationContext.organizationId,
-                  }
-                : previous
+              organizationSearch(previous, organizationContext.organizationId)
             }
             className="text-sm font-semibold"
           >
@@ -106,12 +112,10 @@ export function AppFrame({
                 to="/app"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
                 search={(previous) =>
-                  organizationContext.organizationId
-                    ? {
-                        ...previous,
-                        organizationId: organizationContext.organizationId,
-                      }
-                    : previous
+                  organizationSearch(
+                    previous,
+                    organizationContext.organizationId,
+                  )
                 }
               >
                 <BookOpen className="h-4 w-4" aria-hidden="true" />
@@ -132,12 +136,10 @@ export function AppFrame({
                 to="/instructor"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
                 search={(previous) =>
-                  organizationContext.organizationId
-                    ? {
-                        ...previous,
-                        organizationId: organizationContext.organizationId,
-                      }
-                    : previous
+                  organizationSearch(
+                    previous,
+                    organizationContext.organizationId,
+                  )
                 }
               >
                 <GraduationCap className="h-4 w-4" aria-hidden="true" />
@@ -151,12 +153,10 @@ export function AppFrame({
                 to="/admin"
                 className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100"
                 search={(previous) =>
-                  organizationContext.organizationId
-                    ? {
-                        ...previous,
-                        organizationId: organizationContext.organizationId,
-                      }
-                    : previous
+                  organizationSearch(
+                    previous,
+                    organizationContext.organizationId,
+                  )
                 }
               >
                 <Shield className="h-4 w-4" aria-hidden="true" />
